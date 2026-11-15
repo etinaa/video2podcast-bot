@@ -16,7 +16,7 @@ Sizes: S = 1-2 files, M = 3-5 files.
   - Depends on: none
   - Files: `pom.xml`, `Video2PodcastApplication.java`, `config/*Properties.java`, `application.yml`, one context test
 
-- [ ] **T2: Telegram long-polling spike (`/whoami`)** (S)
+- [x] **T2: Telegram long-polling spike (`/whoami`)** (S) — manual `/whoami` check with a real bot token is still to be done by the owner
   - Acceptance:
     - The bot connects with long polling on Boot 4.1.2 and replies to `/whoami` with the sender's id, in private chats only.
     - The chosen library approach is recorded in `docs/decisions.md` (starter, or the fallback if the starter fails).

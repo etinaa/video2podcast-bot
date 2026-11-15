@@ -8,7 +8,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 public record AppProperties(
     Telegram telegram, Access access, Ollama ollama, Whisper whisper, Jobs jobs) {
 
-  public record Telegram(String botToken, long adminUserId) {}
+  public record Telegram(String botToken, long adminUserId, boolean enabled) {}
 
   public record Access(Path file, Duration requestCooldown) {}
 
