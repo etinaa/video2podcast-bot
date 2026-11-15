@@ -36,3 +36,7 @@ allowed-users.json
 *.swp
 *.swo
 *~
+
+# local run data (allowlist, job files)
+/data/
+/work/
