@@ -35,14 +35,17 @@ class AccessAdmin {
     this.access = access;
   }
 
-  /** Tells the owner about a new request. A failure is logged: the request stays pending. */
+  /**
+   * Tells the owner about a new request. Any failure is logged and the request stays pending, so
+   * one bad request can neither break the user's {@code /start} nor stop the bot from starting.
+   */
   void notifyOwner(PendingRequest request) {
     try {
       int messageId =
           gateway.sendMessage(
               access.ownerId(), requestText(request), Keyboards.accessRequest(request.id()));
       access.recordRequestMessage(request.id(), messageId);
-    } catch (TelegramGatewayException e) {
+    } catch (RuntimeException e) {
       long userId = request.id();
       LOG.error("Could not notify the owner about the request from user {}", userId, e);
     }
@@ -50,9 +53,11 @@ class AccessAdmin {
 
   /** Sends the notification again for every request the owner has not been told about yet. */
   void resendPendingNotifications() {
-    access.pending().stream()
-        .filter(request -> request.requestMessageId() == null)
-        .forEach(this::notifyOwner);
+    for (PendingRequest request : access.pending()) {
+      if (request.requestMessageId() == null) {
+        notifyOwner(request);
+      }
+    }
   }
 
   void handleCommand(Sender sender, String command, String args) {

@@ -1,12 +1,13 @@
 package com.video2podcast.job;
 
 import java.time.Duration;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -22,7 +23,7 @@ public class JobQueue implements AutoCloseable {
 
   private final ExecutorService worker =
       Executors.newSingleThreadExecutor(task -> new Thread(task, "job-worker"));
-  private final AtomicInteger unfinished = new AtomicInteger();
+  private final Set<CompletableFuture<Void>> open = ConcurrentHashMap.newKeySet();
   private final Duration shutdownWait;
 
   public JobQueue() {
@@ -35,33 +36,39 @@ public class JobQueue implements AutoCloseable {
   }
 
   /**
-   * Queues a task. The returned future completes when the task has run, exceptionally if it threw.
+   * Queues a task. The returned future completes when the task has run, exceptionally if it threw,
+   * and is cancelled if the queue is stopped before the task could finish.
    *
    * @throws RejectedExecutionException after {@link #close()}
    */
   public CompletableFuture<Void> submit(Runnable task) {
-    unfinished.incrementAndGet();
+    CompletableFuture<Void> result = new CompletableFuture<>();
+    open.add(result);
     try {
-      return CompletableFuture.runAsync(() -> run(task), worker);
+      worker.execute(() -> run(task, result));
     } catch (RejectedExecutionException e) {
-      unfinished.decrementAndGet();
+      open.remove(result);
       throw e;
     }
+    return result;
   }
 
   /** How many tasks are waiting or running, which is also the position a new task would get. */
   public int size() {
-    return unfinished.get();
+    return open.size();
   }
 
-  private void run(Runnable task) {
+  private void run(Runnable task, CompletableFuture<Void> result) {
     try {
-      task.run();
+      if (!result.isDone()) {
+        task.run();
+        result.complete(null);
+      }
     } catch (RuntimeException e) {
       LOG.error("Queued task failed", e);
-      throw e;
+      result.completeExceptionally(e);
     } finally {
-      unfinished.decrementAndGet();
+      open.remove(result);
     }
   }
 
@@ -72,11 +79,23 @@ public class JobQueue implements AutoCloseable {
     try {
       if (!worker.awaitTermination(shutdownWait.toMillis(), TimeUnit.MILLISECONDS)) {
         LOG.warn("Job queue did not finish within {}, stopping it", shutdownWait);
-        worker.shutdownNow();
+        abandonUnfinished();
       }
     } catch (InterruptedException e) {
-      worker.shutdownNow();
+      abandonUnfinished();
       Thread.currentThread().interrupt();
     }
+  }
+
+  /**
+   * Interrupts the running task and drops the waiting ones. Their futures are cancelled, so nothing
+   * that waits for a result hangs, and they stop counting toward {@link #size()}.
+   */
+  private void abandonUnfinished() {
+    worker.shutdownNow();
+    open.forEach(result -> {
+      result.cancel(false);
+      open.remove(result);
+    });
   }
 }

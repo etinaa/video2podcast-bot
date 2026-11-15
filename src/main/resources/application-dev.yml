@@ -1,9 +1,10 @@
+# Local runs (./run.sh): only the defaults change. Any variable set in .env still wins.
 app:
   access:
-    file: ./data/allowed-users.json
+    file: ${ACCESS_FILE:./data/allowed-users.json}
   ollama:
-    base-url: http://localhost:11434
+    base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
   whisper:
-    base-url: http://localhost:8081
+    base-url: ${WHISPER_BASE_URL:http://localhost:8081}
   jobs:
-    work-dir: ./work
+    work-dir: ${WORK_DIR:./work}

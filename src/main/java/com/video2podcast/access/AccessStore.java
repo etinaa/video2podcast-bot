@@ -65,7 +65,8 @@ public class AccessStore {
   private static boolean isComplete(AccessState state) {
     return state != null
         && state.users().stream().allMatch(u -> u.id() != 0 && u.addedAt() != null)
-        && state.pending().stream().allMatch(p -> p.id() != 0 && p.requestedAt() != null)
+        && state.pending().stream()
+            .allMatch(p -> p.id() != 0 && p.requestedAt() != null && p.displayName() != null)
         && state.denials().stream().allMatch(d -> d.userId() != 0 && d.deniedAt() != null);
   }
 

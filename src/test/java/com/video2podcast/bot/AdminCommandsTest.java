@@ -321,6 +321,21 @@ class AdminCommandsTest {
   }
 
   @Test
+  void aBrokenRequestCannotStopTheStartupResendOfTheOthers() {
+    access.requestAccess(70, "nameless", null);
+    access.requestAccess(BOB, "bob", "Bob");
+
+    handler.resendPendingNotifications();
+
+    assertThat(gateway.messages)
+        .extracting(RecordingGateway.Sent::html)
+        .singleElement()
+        .asString()
+        .contains("id <code>60</code>");
+    assertThat(access.pendingRequest(70)).isPresent();
+  }
+
+  @Test
   void aLongUsersListIsSplitIntoMessagesBelowTheTelegramLimit() {
     String name = "<b>" + "x".repeat(100) + "</b> & ";
     for (long id = 1000; id < 1040; id++) {

@@ -7,6 +7,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
@@ -122,7 +123,34 @@ class JobQueueTest {
 
     queue.close();
 
-    assertThatThrownBy(() -> stuck.get(5, TimeUnit.SECONDS)).isInstanceOf(ExecutionException.class);
+    assertThat(stuck).isCancelled();
+    assertThat(queue.size()).isZero();
+  }
+
+  @Test
+  void closeCancelsTasksThatWereStillWaitingSoNobodyWaitsForeverAndTheCountIsRight()
+      throws Exception {
+    CountDownLatch started = new CountDownLatch(1);
+    List<String> ran = Collections.synchronizedList(new ArrayList<>());
+    CompletableFuture<Void> stuck =
+        queue.submit(() -> {
+          started.countDown();
+          await(new CountDownLatch(1));
+        });
+    CompletableFuture<Void> second = queue.submit(() -> ran.add("second"));
+    CompletableFuture<Void> third = queue.submit(() -> ran.add("third"));
+    started.await(5, TimeUnit.SECONDS);
+    assertThat(queue.size()).isEqualTo(3);
+
+    queue.close();
+
+    assertThat(stuck).isCancelled();
+    assertThat(second).isCancelled();
+    assertThat(third).isCancelled();
+    assertThat(queue.size()).isZero();
+    assertThat(ran).isEmpty();
+    assertThatThrownBy(() -> second.get(1, TimeUnit.SECONDS))
+        .isInstanceOf(CancellationException.class);
   }
 
   @Test
@@ -146,7 +174,8 @@ class JobQueueTest {
     queue.close();
 
     assertThat(Thread.interrupted()).isTrue();
-    assertThatThrownBy(() -> stuck.get(5, TimeUnit.SECONDS)).isInstanceOf(ExecutionException.class);
+    assertThat(stuck).isCancelled();
+    assertThat(queue.size()).isZero();
   }
 
   private static String slow(String value) {

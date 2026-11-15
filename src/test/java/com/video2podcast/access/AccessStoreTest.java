@@ -84,6 +84,7 @@ class AccessStoreTest {
         "{\"users\":[{\"addedAt\":\"2026-11-15T10:00:00Z\"}]}",
         "{\"users\":[{\"id\":100}]}",
         "{\"pending\":[{\"id\":100}]}",
+        "{\"pending\":[{\"id\":100,\"requestedAt\":\"2026-11-15T10:00:00Z\"}]}",
         "{\"pending\":[{\"requestedAt\":\"2026-11-15T10:00:00Z\"}]}",
         "{\"denials\":[{\"userId\":100}]}",
         "{\"denials\":[{\"deniedAt\":\"2026-11-15T10:00:00Z\"}]}"
