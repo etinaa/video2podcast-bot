@@ -4,7 +4,9 @@ import com.video2podcast.access.AccessService;
 import com.video2podcast.access.AccessService.RemoveResult;
 import com.video2podcast.access.AllowedUser;
 import com.video2podcast.access.PendingRequest;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -21,6 +23,9 @@ class AccessAdmin {
   private static final Logger LOG = LoggerFactory.getLogger(AccessAdmin.class);
 
   private static final String OWNER_ONLY = "Owner only.";
+
+  /** Escaped HTML is longer than the text Telegram counts, so this leaves a wide margin. */
+  private static final int MAX_MESSAGE_CHARS = 3000;
 
   private final TelegramGateway gateway;
   private final AccessService access;
@@ -43,13 +48,20 @@ class AccessAdmin {
     }
   }
 
+  /** Sends the notification again for every request the owner has not been told about yet. */
+  void resendPendingNotifications() {
+    access.pending().stream()
+        .filter(request -> request.requestMessageId() == null)
+        .forEach(this::notifyOwner);
+  }
+
   void handleCommand(Sender sender, String command, String args) {
     if (!access.isOwner(sender.userId())) {
       reply(sender, OWNER_ONLY);
       return;
     }
     if ("/users".equals(command)) {
-      reply(sender, usersText());
+      chunk(usersLines()).forEach(text -> reply(sender, text));
       return;
     }
     Optional<Long> target = parseId(args);
@@ -75,6 +87,12 @@ class AccessAdmin {
       return;
     }
     MaybeInaccessibleMessage message = callback.getMessage();
+    Optional<PendingRequest> active = access.pendingRequest(target.get());
+    if (active.isEmpty()
+        || !Objects.equals(active.get().requestMessageId(), message.getMessageId())) {
+      gateway.answerCallback(callback.getId(), "This request is no longer active.");
+      return;
+    }
     Tapped tapped = new Tapped(message.getChatId(), message.getMessageId());
     String result = approve ? allow(target.get(), tapped) : deny(target.get(), tapped);
     gateway.answerCallback(callback.getId(), result);
@@ -136,25 +154,43 @@ class AccessAdmin {
     }
   }
 
-  private String usersText() {
-    StringBuilder text = new StringBuilder("<b>Allowed users</b>\n");
+  /** One line per entry, so a long list can be split between lines without breaking any tag. */
+  private List<String> usersLines() {
+    List<String> lines = new ArrayList<>();
+    lines.add("<b>Allowed users</b>");
     List<AllowedUser> users = access.users();
     if (users.isEmpty()) {
-      text.append("none\n");
+      lines.add("none");
     }
-    users.forEach(user -> text.append(user.id()).append(handle(user.username())).append('\n'));
-    text.append("\n<b>Pending requests</b>\n");
+    users.forEach(user -> lines.add(user.id() + handle(user.username())));
+    lines.add("");
+    lines.add("<b>Pending requests</b>");
     List<PendingRequest> pending = access.pending();
     if (pending.isEmpty()) {
-      text.append("none\n");
+      lines.add("none");
     }
     pending.forEach(request ->
-        text.append(request.id())
-            .append(handle(request.username()))
-            .append(" - ")
-            .append(Html.escape(request.displayName()))
-            .append('\n'));
-    return text.toString().stripTrailing();
+        lines.add(
+            request.id()
+                + handle(request.username())
+                + " - "
+                + Html.escape(request.displayName())));
+    return lines;
+  }
+
+  /** Joins lines into messages that stay well under Telegram's 4096-character limit. */
+  private static List<String> chunk(List<String> lines) {
+    List<String> messages = new ArrayList<>();
+    StringBuilder current = new StringBuilder();
+    for (String line : lines) {
+      if (!current.isEmpty() && current.length() + line.length() + 1 > MAX_MESSAGE_CHARS) {
+        messages.add(current.toString().stripTrailing());
+        current.setLength(0);
+      }
+      current.append(line).append('\n');
+    }
+    messages.add(current.toString().stripTrailing());
+    return messages;
   }
 
   private static String requestText(PendingRequest request) {

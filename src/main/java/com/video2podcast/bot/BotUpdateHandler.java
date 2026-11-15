@@ -36,6 +36,11 @@ public class BotUpdateHandler {
     this.unknownUsers = new UnknownUserHandler(gateway, access, admin);
   }
 
+  /** Re-sends access requests the owner has not seen yet, e.g. after a failed notification. */
+  public void resendPendingNotifications() {
+    admin.resendPendingNotifications();
+  }
+
   public void handle(Update update) {
     if (update.hasCallbackQuery()) {
       handleCallback(update.getCallbackQuery());

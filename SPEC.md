@@ -127,7 +127,7 @@ Access is an allowlist of Telegram **user ids** (not chat ids), checked on every
 
 **Approval flow**
 1. An unknown user sends `/start`. The bot stores a pending request (one per user) and replies "Access requested. The owner will review it."
-2. The owner receives "Access request from <name> (@username, id 123)" with **Approve** and **Deny** buttons. The callback data is `access:approve:<userId>` or `access:deny:<userId>` and is accepted only from the owner.
+2. The owner receives "Access request from <name> (@username, id 123)" with **Approve** and **Deny** buttons. The callback data is `access:approve:<userId>` or `access:deny:<userId>` and is accepted only from the owner and only while that request is still pending and the tapped message is the one sent for it (a stale button does nothing). If the owner could not be notified, the notification is retried on the user's next `/start` and at startup. `/users` is split into several messages when the list is long.
 3. On Approve, the user is added to the allowlist and notified. On Deny, the request is removed and the user is notified. A denied user can't send a new request for 24 hours (`ACCESS_REQUEST_COOLDOWN`, default `PT24H`). The same cooldown applies to an allowed user the owner removes with `/deny`.
 4. Any other message from an unknown user gets a short reply: "No access. Send /start to request it. Your id: 123". These replies are rate-limited to one per minute per user.
 

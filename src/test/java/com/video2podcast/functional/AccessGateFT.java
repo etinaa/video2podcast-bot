@@ -106,8 +106,8 @@ class AccessGateFT extends FunctionalTest {
     long allowed = newUserId();
     access.allow(allowed, "ann", OWNER_ID);
 
-    receive(Updates.callback(stranger, "cb-stranger", "audio:job1"));
-    receive(Updates.callback(allowed, "cb-allowed", "audio:job1"));
+    receive(Updates.callback(stranger, "cb-stranger", "audio:job1", 5));
+    receive(Updates.callback(allowed, "cb-allowed", "audio:job1", 5));
 
     assertThat(telegramCalls("answerCallbackQuery"))
         .singleElement()

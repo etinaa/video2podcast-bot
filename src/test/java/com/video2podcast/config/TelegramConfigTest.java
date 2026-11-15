@@ -1,6 +1,7 @@
 package com.video2podcast.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.Mockito.mock;
 
 import com.video2podcast.access.AccessService;
@@ -10,6 +11,7 @@ import com.video2podcast.bot.TelegramGateway;
 import java.nio.file.Path;
 import java.time.Duration;
 import org.junit.jupiter.api.Test;
+import org.springframework.boot.ApplicationRunner;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
 class TelegramConfigTest {
@@ -40,6 +42,14 @@ class TelegramConfigTest {
           assertThat(context).hasSingleBean(BotUpdateHandler.class);
           assertThat(context.getBean(TelegramBot.class).getBotToken()).isEqualTo("123:abc");
         });
+  }
+
+  @Test
+  void resendsUndeliveredRequestsAtStartup() {
+    runner("123:abc", 1L, true)
+        .run(context ->
+            assertThatCode(() -> context.getBean(ApplicationRunner.class).run(null))
+                .doesNotThrowAnyException());
   }
 
   @Test

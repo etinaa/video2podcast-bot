@@ -30,7 +30,9 @@ class AccessApprovalFT extends FunctionalTest {
     assertThat(buttons.get(0).get("callback_data").asText()).isEqualTo("access:approve:" + userId);
     assertThat(buttons.get(1).get("callback_data").asText()).isEqualTo("access:deny:" + userId);
 
-    receive(Updates.callback(OWNER_ID, "cb-approve-" + userId, "access:approve:" + userId));
+    receive(
+        Updates.callback(
+            OWNER_ID, "cb-approve-" + userId, "access:approve:" + userId, BOT_MESSAGE_ID));
 
     assertThat(sentTo(userId))
         .extracting(call -> call.get("text").asText())
@@ -60,7 +62,8 @@ class AccessApprovalFT extends FunctionalTest {
     long userId = newUserId();
     receive(Updates.privateMessage(userId, "/start"));
 
-    receive(Updates.callback(OWNER_ID, "cb-deny-" + userId, "access:deny:" + userId));
+    receive(
+        Updates.callback(OWNER_ID, "cb-deny-" + userId, "access:deny:" + userId, BOT_MESSAGE_ID));
 
     assertThat(access.isAllowed(userId)).isFalse();
     assertThat(sentTo(userId))
@@ -83,7 +86,7 @@ class AccessApprovalFT extends FunctionalTest {
     access.allow(other, "other", OWNER_ID);
     receive(Updates.privateMessage(applicant, "/start"));
 
-    receive(Updates.callback(other, "cb-other", "access:approve:" + applicant));
+    receive(Updates.callback(other, "cb-other", "access:approve:" + applicant, BOT_MESSAGE_ID));
 
     assertThat(access.isAllowed(applicant)).isFalse();
     assertThat(telegramCalls("answerCallbackQuery"))
@@ -110,6 +113,27 @@ class AccessApprovalFT extends FunctionalTest {
     receive(Updates.privateMessage(OWNER_ID, "/deny " + userId));
     assertThat(access.isAllowed(userId)).isFalse();
     assertThat(sentTo(userId).get(1).get("text").asText()).isEqualTo("Your access was removed.");
+  }
+
+  @Test
+  void anOldApproveButtonCannotRestoreAccessTheOwnerRevoked() {
+    long userId = newUserId();
+    receive(Updates.privateMessage(userId, "/start"));
+    receive(
+        Updates.callback(
+            OWNER_ID, "cb-first-" + userId, "access:approve:" + userId, BOT_MESSAGE_ID));
+    receive(Updates.privateMessage(OWNER_ID, "/deny " + userId));
+
+    receive(
+        Updates.callback(
+            OWNER_ID, "cb-stale-" + userId, "access:approve:" + userId, BOT_MESSAGE_ID));
+
+    assertThat(access.isAllowed(userId)).isFalse();
+    assertThat(telegramCalls("answerCallbackQuery"))
+        .filteredOn(call -> call.get("callback_query_id").asText().equals("cb-stale-" + userId))
+        .singleElement()
+        .satisfies(call ->
+            assertThat(call.get("text").asText()).isEqualTo("This request is no longer active."));
   }
 
   @Test

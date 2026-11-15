@@ -5,6 +5,7 @@ import com.video2podcast.bot.BotUpdateHandler;
 import com.video2podcast.bot.TelegramBot;
 import com.video2podcast.bot.TelegramClientGateway;
 import com.video2podcast.bot.TelegramGateway;
+import org.springframework.boot.ApplicationRunner;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -34,6 +35,12 @@ public class TelegramConfig {
   @Bean
   BotUpdateHandler botUpdateHandler(TelegramGateway gateway, AccessService access) {
     return new BotUpdateHandler(gateway, access);
+  }
+
+  /** At startup, tell the owner about requests that could not be delivered earlier. */
+  @Bean
+  ApplicationRunner resendPendingRequests(BotUpdateHandler handler) {
+    return args -> handler.resendPendingNotifications();
   }
 
   @Bean

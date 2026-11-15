@@ -128,7 +128,7 @@ class AdminCommandsTest {
     assertThat(gateway.edits).isEmpty();
     assertThat(gateway.answers)
         .last()
-        .isEqualTo(new RecordingGateway.Answer("cb2", "User 60 already has access."));
+        .isEqualTo(new RecordingGateway.Answer("cb2", "This request is no longer active."));
   }
 
   @Test
@@ -161,8 +161,7 @@ class AdminCommandsTest {
     handler.handle(tap(OWNER, "cb1", "access:deny:60", 2));
 
     assertThat(gateway.answers)
-        .containsExactly(
-            new RecordingGateway.Answer("cb1", "User 60 has no request and no access."));
+        .containsExactly(new RecordingGateway.Answer("cb1", "This request is no longer active."));
     assertThat(gateway.messages).isEmpty();
   }
 
@@ -230,6 +229,113 @@ class AdminCommandsTest {
 
     assertThat(access.isAllowed(BOB)).isTrue();
     assertThat(gateway.answers).hasSize(1);
+  }
+
+  // --- stale buttons ---
+
+  @Test
+  void anOldApproveButtonCannotRestoreRevokedAccess() {
+    handler.handle(text(BOB, "bob", "Bob", "/start"));
+    gateway.failEdits = true;
+    handler.handle(tap(OWNER, "cb1", "access:approve:60", 2));
+    handler.handle(text(OWNER, "owner", "Owner", "/deny 60"));
+    gateway.answers.clear();
+
+    handler.handle(tap(OWNER, "cb2", "access:approve:60", 2));
+
+    assertThat(access.isAllowed(BOB)).isFalse();
+    assertThat(gateway.answers)
+        .containsExactly(new RecordingGateway.Answer("cb2", "This request is no longer active."));
+  }
+
+  @Test
+  void anOldDenyButtonCannotRemoveAUserWhoWasAllowedAgain() {
+    handler.handle(text(BOB, "bob", "Bob", "/start"));
+    handler.handle(text(OWNER, "owner", "Owner", "/allow 60"));
+
+    handler.handle(tap(OWNER, "cb1", "access:deny:60", 2));
+
+    assertThat(access.isAllowed(BOB)).isTrue();
+    assertThat(gateway.answers)
+        .containsExactly(new RecordingGateway.Answer("cb1", "This request is no longer active."));
+  }
+
+  @Test
+  void aButtonFromAnotherMessageDoesNotMatchTheRequest() {
+    handler.handle(text(BOB, "bob", "Bob", "/start"));
+
+    handler.handle(tap(OWNER, "cb1", "access:approve:60", 99));
+
+    assertThat(access.isAllowed(BOB)).isFalse();
+    assertThat(access.pendingRequest(BOB)).isPresent();
+  }
+
+  @Test
+  void aButtonCannotApproveARequestTheOwnerWasNeverNotifiedAbout() {
+    gateway.failingChats.add(OWNER);
+    handler.handle(text(BOB, "bob", "Bob", "/start"));
+    gateway.failingChats.clear();
+
+    handler.handle(tap(OWNER, "cb1", "access:approve:60", 2));
+
+    assertThat(access.isAllowed(BOB)).isFalse();
+  }
+
+  // --- delivery failures ---
+
+  @Test
+  void aFailedConfirmationDoesNotStopTheOwnerNotification() {
+    gateway.failingChats.add(BOB);
+
+    handler.handle(text(BOB, "bob", "Bob", "/start"));
+
+    assertThat(gateway.messages).extracting(RecordingGateway.Sent::chatId).containsExactly(OWNER);
+    assertThat(access.pendingRequest(BOB).orElseThrow().requestMessageId()).isNotNull();
+  }
+
+  @Test
+  void aRequestTheOwnerWasNotToldAboutIsSentAgainOnTheNextStart() {
+    gateway.failingChats.add(OWNER);
+    handler.handle(text(BOB, "bob", "Bob", "/start"));
+    gateway.failingChats.clear();
+    gateway.messages.clear();
+
+    handler.handle(text(BOB, "bob", "Bob", "/start"));
+    handler.handle(text(BOB, "bob", "Bob", "/start"));
+
+    assertThat(gateway.messages.stream().filter(m -> m.chatId() == OWNER)).hasSize(1);
+    assertThat(access.pendingRequest(BOB).orElseThrow().requestMessageId()).isNotNull();
+  }
+
+  @Test
+  void pendingNotificationsAreSentAgainAtStartupOnlyWhenMissing() {
+    gateway.failingChats.add(OWNER);
+    handler.handle(text(BOB, "bob", "Bob", "/start"));
+    gateway.failingChats.clear();
+    gateway.messages.clear();
+
+    handler.resendPendingNotifications();
+    handler.resendPendingNotifications();
+
+    assertThat(gateway.messages).extracting(RecordingGateway.Sent::chatId).containsExactly(OWNER);
+  }
+
+  @Test
+  void aLongUsersListIsSplitIntoMessagesBelowTheTelegramLimit() {
+    String name = "<b>" + "x".repeat(100) + "</b> & ";
+    for (long id = 1000; id < 1040; id++) {
+      access.requestAccess(id, "user" + id, name);
+    }
+
+    handler.handle(text(OWNER, "owner", "Owner", "/users"));
+
+    assertThat(gateway.messages).hasSizeGreaterThan(1);
+    assertThat(gateway.messages).allSatisfy(m -> assertThat(m.html().length()).isLessThan(4096));
+    String all =
+        String.join("\n", gateway.messages.stream().map(RecordingGateway.Sent::html).toList());
+    for (long id = 1000; id < 1040; id++) {
+      assertThat(all).contains(id + " @user" + id + " - ");
+    }
   }
 
   // --- commands ---

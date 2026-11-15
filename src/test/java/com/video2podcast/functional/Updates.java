@@ -22,7 +22,7 @@ final class Updates {
   }
 
   /** A button tap on a message in the user's private chat. */
-  static Update callback(long userId, String callbackId, String data) {
+  static Update callback(long userId, String callbackId, String data, int messageId) {
     int id = IDS.getAndIncrement();
     return parse(
         """
@@ -30,7 +30,7 @@ final class Updates {
          "from":{"id":%d,"is_bot":false,"first_name":"Test"},
          "message":{"message_id":%d,"date":1700000000,"chat":{"id":%d,"type":"private"}}}}
         """
-            .formatted(id, callbackId, data, userId, id, userId));
+            .formatted(id, callbackId, data, userId, messageId, userId));
   }
 
   private static Update message(String chatType, long chatId, long userId, String text) {

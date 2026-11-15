@@ -45,6 +45,9 @@ abstract class FunctionalTest {
   static final String TOKEN = "123:ft-token";
   static final long OWNER_ID = 1;
 
+  /** The id WireMock gives every message the bot sends, so the bot stores it with the request. */
+  static final int BOT_MESSAGE_ID = 77;
+
   private static final ObjectMapper MAPPER = new ObjectMapper();
   private static final AtomicLong USER_IDS = new AtomicLong(1000);
   private static final Path WORK_ROOT = createWorkRoot();

@@ -5,6 +5,8 @@ import com.video2podcast.access.AccessService.RequestOutcome;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Answers users who are not on the allowlist: {@code /start} files an access request, anything else
@@ -12,6 +14,8 @@ import java.util.List;
  * can't make the bot answer in a loop.
  */
 class UnknownUserHandler {
+
+  private static final Logger LOG = LoggerFactory.getLogger(UnknownUserHandler.class);
 
   private static final DateTimeFormatter UNTIL =
       DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm 'UTC'").withZone(ZoneOffset.UTC);
@@ -35,12 +39,15 @@ class UnknownUserHandler {
     }
     switch (access.requestAccess(sender.userId(), sender.username(), sender.displayName())) {
       case RequestOutcome.Created created -> {
-        gateway.sendMessage(
-            sender.chatId(), "Access requested. The owner will review it.", List.of());
+        tell(sender, "Access requested. The owner will review it.");
         admin.notifyOwner(created.request());
       }
-      case RequestOutcome.AlreadyPending _ ->
-          replyLimited(sender, "Your request is already waiting for the owner.");
+      case RequestOutcome.AlreadyPending pending -> {
+        replyLimited(sender, "Your request is already waiting for the owner.");
+        if (pending.request().requestMessageId() == null) {
+          admin.notifyOwner(pending.request());
+        }
+      }
       case RequestOutcome.CoolingDown cooling ->
           replyLimited(
               sender,
@@ -54,7 +61,19 @@ class UnknownUserHandler {
 
   private void replyLimited(Sender sender, String html) {
     if (access.shouldSendRefusal(sender.userId())) {
+      tell(sender, html);
+    }
+  }
+
+  /**
+   * A reply that can't be delivered (the user blocked the bot) must not stop the rest of the flow.
+   */
+  private void tell(Sender sender, String html) {
+    try {
       gateway.sendMessage(sender.chatId(), html, List.of());
+    } catch (TelegramGatewayException e) {
+      long userId = sender.userId();
+      LOG.warn("Could not answer user {}", userId, e);
     }
   }
 }
