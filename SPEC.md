@@ -226,4 +226,4 @@ While work is running, one status message is edited with the current stage (queu
 
 ## Open Questions
 1. **Java 27 / Spring Boot 4.1.2 compatibility (to verify in the plan phase):** I'll check that the Telegram library, Spotless/google-java-format, JaCoCo, and Mockito work on Java 27 and Boot 4.1.2. If one doesn't, I'll use the fallback noted in the Tech Stack and flag it to you. Docker images must use a JDK 27 base.
-2. **whisper.cpp server API (to verify in the plan phase):** I'll confirm the exact HTTP endpoint and request format of the installed `whisper-server` and adapt the client to it.
+2. ~~**whisper.cpp server API**~~ **Resolved in T3:** `POST /inference` (multipart: `file`, `response_format`, `language`, `temperature`) returns `{"text": ...}`. Errors are plain text. Ollama findings: `think: false` is required for `qwen3`, and a prompt longer than `num_ctx` is truncated silently. Details in `docs/host-setup.md`.

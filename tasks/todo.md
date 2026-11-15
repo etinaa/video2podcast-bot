@@ -25,7 +25,7 @@ Sizes: S = 1-2 files, M = 3-5 files.
   - Depends on: T1
   - Files: `bot/TelegramGateway.java`, `bot/BotUpdateHandler.java`, `docs/decisions.md`, test
 
-- [ ] **T3: Host-service contracts and fixtures** (S)
+- [x] **T3: Host-service contracts and fixtures** (S)
   - Acceptance:
     - Real `whisper-server` and Ollama (`qwen3:32b`) were called by hand with a small sample. Their exact endpoints, request fields, and response shapes are documented in `docs/host-setup.md`. The Ollama request shows `num_ctx` taking effect.
     - Sample responses are saved as WireMock fixtures in `src/test/resources/fixtures/`.
@@ -100,6 +100,7 @@ Sizes: S = 1-2 files, M = 3-5 files.
     - `TranscriptionClient` sends each WAV chunk to `whisper-server` (language `en`) and merges the results in order into `transcript.txt`.
     - A failed chunk is retried once, and a second failure fails the job with a clear message. An unreachable server gives a clear "Whisper server unreachable" failure.
     - A progress callback reports "transcribing n/N".
+    - Each chunk's text is trimmed and its inner newlines are collapsed before merging (the server wraps text per segment and starts with a space).
   - Verify: `./mvnw test -Dtest=TranscriptionClientTest` using the T3 fixtures in WireMock (merge order, retry, unreachable, progress callbacks).
   - Depends on: T3, T8
   - Files: `transcript/TranscriptionClient.java`, `transcript/TranscriptMerger.java`, tests
@@ -108,6 +109,7 @@ Sizes: S = 1-2 files, M = 3-5 files.
   - Acceptance:
     - The `LlmClient` interface has an Ollama implementation that sets `num_ctx` and the model on every request.
     - `SummaryService` splits the transcript into chunks that fit the context, summarizes each chunk, then summarizes the partial summaries. A short transcript is summarized in a single call.
+    - Every request sends `think: false`. An empty `content` is a failure. `prompt_eval_count` is checked against the expected input size, and a silently truncated prompt fails the job (Ollama does not return an error when the prompt exceeds `num_ctx`).
     - The output is English bullet points, capped at 1,500 characters. An unreachable Ollama gives a clear failure.
   - Verify: `./mvnw test -Dtest='OllamaClientTest,SummaryServiceTest'` with WireMock (single call, map-reduce call count, chunk size fits `num_ctx`, length cap, unreachable).
   - Depends on: T3

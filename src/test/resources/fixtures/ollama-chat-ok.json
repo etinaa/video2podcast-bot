@@ -1,0 +1,17 @@
+{
+  "model": "qwen3:32b",
+  "created_at": "2026-11-15T18:15:53.297164Z",
+  "message": {
+    "role": "assistant",
+    "content": "- The user is testing the video to podcast bot.  \n- A meeting is scheduled for Tuesday at 10 o'clock to discuss the budget."
+  },
+  "done": true,
+  "done_reason": "stop",
+  "total_duration": 10028676917,
+  "load_duration": 7516771458,
+  "prompt_eval_count": 71,
+  "prompt_eval_cached_count": 0,
+  "prompt_eval_duration": 792110000,
+  "eval_count": 31,
+  "eval_duration": 1714592000
+}

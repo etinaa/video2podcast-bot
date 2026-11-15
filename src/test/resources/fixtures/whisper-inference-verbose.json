@@ -1,0 +1,77 @@
+{
+  "task": "transcribe",
+  "language": "english",
+  "duration": 7.334249973297119,
+  "text": " Hello, this is a short test of the video to podcast but the\n meeting is on Tuesday at 10\n o'clock, and we will discuss the budget.\n",
+  "segments": [
+    {
+      "id": 0,
+      "text": " Hello, this is a short test of the video to podcast but the",
+      "start": 0.0,
+      "end": 3.44,
+      "tokens": [
+        2425,
+        11,
+        341,
+        307,
+        257,
+        2099,
+        1500,
+        295,
+        264,
+        960,
+        281,
+        7367,
+        457,
+        264
+      ],
+      "temperature": 0.0,
+      "avg_logprob": -0.05562165752053261,
+      "no_speech_prob": 3.0559263453078245e-11
+    },
+    {
+      "id": 1,
+      "text": " meeting is on Tuesday at 10",
+      "start": 3.44,
+      "end": 4.92,
+      "tokens": [
+        3440,
+        307,
+        322,
+        10017,
+        412,
+        1266
+      ],
+      "temperature": 0.0,
+      "avg_logprob": -0.013773782178759575,
+      "no_speech_prob": 0.0
+    },
+    {
+      "id": 2,
+      "text": " o'clock, and we will discuss the budget.",
+      "start": 4.92,
+      "end": 6.96,
+      "tokens": [
+        277,
+        6,
+        9023,
+        11,
+        293,
+        321,
+        486,
+        2248,
+        264,
+        4706,
+        13
+      ],
+      "temperature": 0.0,
+      "avg_logprob": -0.014333327300846577,
+      "no_speech_prob": 3.0559263453078245e-11
+    }
+  ],
+  "detected_language": "english",
+  "detected_language_probability": 0.9997866153717041,
+  "language_probabilities": {
+    "en": 0.9997866153717041
+  }
+}
