@@ -1,0 +1,20 @@
+spring:
+  application:
+    name: video2podcast-bot
+
+app:
+  telegram:
+    bot-token: ${TELEGRAM_BOT_TOKEN:}
+    admin-user-id: ${ADMIN_USER_ID:0}
+  access:
+    file: ${ACCESS_FILE:/data/allowed-users.json}
+    request-cooldown: ${ACCESS_REQUEST_COOLDOWN:PT24H}
+  ollama:
+    base-url: ${OLLAMA_BASE_URL:http://host.docker.internal:11434}
+    model: ${OLLAMA_MODEL:qwen3:32b}
+  whisper:
+    base-url: ${WHISPER_BASE_URL:http://host.docker.internal:8081}
+  jobs:
+    work-dir: ${WORK_DIR:/work}
+    max-video-duration: ${MAX_VIDEO_DURATION:PT3H}
+    retention: ${JOB_RETENTION:PT1H}

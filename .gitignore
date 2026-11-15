@@ -1,0 +1,38 @@
+# Maven / Java
+target/
+*.class
+hs_err_pid*
+replay_pid*
+
+# Secrets and local environment (keep example templates)
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+
+# Local runtime data: downloaded media, transcripts, and access lists
+/data/
+/work/
+/tmp/
+allowed-users.json
+
+# Logs
+*.log
+/logs/
+
+# IDE settings
+.idea/
+*.iml
+.vscode/
+.classpath
+.project
+.settings/
+
+# macOS and editor temporary files
+.DS_Store
+._*
+*.swp
+*.swo
+*~

@@ -1,0 +1,9 @@
+app:
+  access:
+    file: ./data/allowed-users.json
+  ollama:
+    base-url: http://localhost:11434
+  whisper:
+    base-url: http://localhost:8081
+  jobs:
+    work-dir: ./work

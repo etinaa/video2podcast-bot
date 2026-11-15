@@ -7,7 +7,7 @@ Sizes: S = 1-2 files, M = 3-5 files.
 
 ## Phase 1: Foundation and risk spikes
 
-- [ ] **T1: Project skeleton on Java 27 / Spring Boot 4.1.2** (M)
+- [x] **T1: Project skeleton on Java 27 / Spring Boot 4.1.2** (M)
   - Acceptance:
     - Maven project with the Maven wrapper, `<java.version>27</java.version>`, Spring Boot 4.1.2, JUnit 5, Mockito, WireMock.
     - Spotless (google-java-format) and JaCoCo are configured and work on Java 27.
