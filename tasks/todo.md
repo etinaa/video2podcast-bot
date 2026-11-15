@@ -60,7 +60,7 @@ Sizes: S = 1-2 files, M = 3-5 files.
   - Depends on: T1
   - Files: `access/AccessStore.java`, `access/AccessService.java`, `access/AllowedUser.java`, `access/PendingRequest.java`, tests
 
-- [ ] **T5: Authorization gate for messages and callbacks** (S)
+- [x] **T5: Authorization gate for messages and callbacks** (S)
   - Acceptance:
     - Every update passes one gate before any handler. Group and channel updates are ignored.
     - An unknown user gets the rate-limited refusal ("No access. Send /start to request it. Your id: …"), and `/start` from an unknown user creates a pending request and replies "Access requested".

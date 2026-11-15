@@ -1,5 +1,6 @@
 package com.video2podcast.config;
 
+import com.video2podcast.access.AccessService;
 import com.video2podcast.bot.BotUpdateHandler;
 import com.video2podcast.bot.TelegramBot;
 import com.video2podcast.bot.TelegramClientGateway;
@@ -20,6 +21,7 @@ public class TelegramConfig {
 
   @Bean
   TelegramClient telegramClient(AppProperties props) {
+    requireAdmin(props);
     return new OkHttpTelegramClient(
         requireToken(props), TelegramApiUrl.parse(props.telegram().apiUrl()));
   }
@@ -30,13 +32,21 @@ public class TelegramConfig {
   }
 
   @Bean
-  BotUpdateHandler botUpdateHandler(TelegramGateway gateway) {
-    return new BotUpdateHandler(gateway);
+  BotUpdateHandler botUpdateHandler(TelegramGateway gateway, AccessService access) {
+    return new BotUpdateHandler(gateway, access);
   }
 
   @Bean
   TelegramBot telegramBot(AppProperties props, BotUpdateHandler handler) {
     return new TelegramBot(requireToken(props), handler);
+  }
+
+  private static void requireAdmin(AppProperties props) {
+    if (props.telegram().adminUserId() <= 0) {
+      throw new IllegalStateException(
+          "app.telegram.admin-user-id (ADMIN_USER_ID) is required when the Telegram bot is enabled."
+              + " Send /whoami to the bot to find your id.");
+    }
   }
 
   private static String requireToken(AppProperties props) {

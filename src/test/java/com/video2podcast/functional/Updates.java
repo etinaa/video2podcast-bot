@@ -21,6 +21,18 @@ final class Updates {
     return message("group", chatId, userId, text);
   }
 
+  /** A button tap on a message in the user's private chat. */
+  static Update callback(long userId, String callbackId, String data) {
+    int id = IDS.getAndIncrement();
+    return parse(
+        """
+        {"update_id":%d,"callback_query":{"id":"%s","chat_instance":"1","data":"%s",
+         "from":{"id":%d,"is_bot":false,"first_name":"Test"},
+         "message":{"message_id":%d,"date":1700000000,"chat":{"id":%d,"type":"private"}}}}
+        """
+            .formatted(id, callbackId, data, userId, id, userId));
+  }
+
   private static Update message(String chatType, long chatId, long userId, String text) {
     int id = IDS.getAndIncrement();
     return parse(

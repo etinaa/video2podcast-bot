@@ -31,8 +31,11 @@ class WhoamiFT extends FunctionalTest {
   }
 
   @Test
-  void otherTextGetsNoReply() {
-    receive(Updates.privateMessage(newUserId(), "hello"));
+  void otherTextFromAnAllowedUserGetsNoReply() {
+    long userId = newUserId();
+    access.allow(userId, "ann", OWNER_ID);
+
+    receive(Updates.privateMessage(userId, "hello"));
 
     assertThat(telegramCalls("sendMessage")).isEmpty();
   }

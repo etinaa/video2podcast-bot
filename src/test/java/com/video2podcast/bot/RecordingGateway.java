@@ -9,7 +9,10 @@ class RecordingGateway implements TelegramGateway {
 
   record Sent(long chatId, String html, List<InlineButton> buttons) {}
 
+  record Answer(String callbackId, String text) {}
+
   final List<Sent> messages = new ArrayList<>();
+  final List<Answer> answers = new ArrayList<>();
 
   @Override
   public int sendMessage(long chatId, String html, List<InlineButton> buttons) {
@@ -34,6 +37,6 @@ class RecordingGateway implements TelegramGateway {
 
   @Override
   public void answerCallback(String callbackQueryId, String text) {
-    throw new UnsupportedOperationException();
+    answers.add(new Answer(callbackQueryId, text));
   }
 }

@@ -9,6 +9,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.tomakehurst.wiremock.verification.LoggedRequest;
+import com.video2podcast.access.AccessService;
 import com.video2podcast.bot.TelegramBot;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -54,6 +55,7 @@ abstract class FunctionalTest {
       """;
 
   @Autowired TelegramBot bot;
+  @Autowired AccessService access;
 
   @DynamicPropertySource
   static void endpoints(DynamicPropertyRegistry registry) {
@@ -71,6 +73,12 @@ abstract class FunctionalTest {
         post(urlPathEqualTo(telegramPath("sendMessage")))
             .willReturn(
                 aResponse().withBody(MESSAGE_OK).withHeader("Content-Type", "application/json")));
+    WireMocks.TELEGRAM.stubFor(
+        post(urlPathEqualTo(telegramPath("answerCallbackQuery")))
+            .willReturn(
+                aResponse()
+                    .withBody("{\"ok\":true,\"result\":true}")
+                    .withHeader("Content-Type", "application/json")));
   }
 
   static long newUserId() {

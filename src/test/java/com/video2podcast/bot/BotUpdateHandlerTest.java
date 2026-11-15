@@ -1,8 +1,20 @@
 package com.video2podcast.bot;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
+import com.video2podcast.access.AccessService;
+import com.video2podcast.access.AccessStore;
+import com.video2podcast.support.MutableClock;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.time.Instant;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.telegram.telegrambots.meta.api.objects.CallbackQuery;
@@ -13,8 +25,25 @@ import org.telegram.telegrambots.meta.api.objects.message.Message;
 
 class BotUpdateHandlerTest {
 
+  private static final long OWNER = 1;
+  private static final long ALLOWED = 50;
+  private static final long STRANGER = 123;
+
+  @TempDir Path dir;
+
   private final RecordingGateway gateway = new RecordingGateway();
-  private final BotUpdateHandler handler = new BotUpdateHandler(gateway);
+  private final MutableClock clock = new MutableClock(Instant.parse("2026-11-15T10:00:00Z"));
+  private AccessService access;
+  private BotUpdateHandler handler;
+
+  @BeforeEach
+  void setUp() {
+    access =
+        new AccessService(
+            new AccessStore(dir.resolve("allowed-users.json")), OWNER, Duration.ofHours(24), clock);
+    access.allow(ALLOWED, "ann", OWNER);
+    handler = new BotUpdateHandler(gateway, access);
+  }
 
   @ParameterizedTest
   @ValueSource(strings = {"/whoami", "/WhoAmI", "  /whoami  ", "/whoami@SomeBot", "/whoami extra"})
@@ -56,21 +85,189 @@ class BotUpdateHandlerTest {
   }
 
   @ParameterizedTest
-  @ValueSource(strings = {"hello", "/start", "/whoamix", "whoami"})
-  void ignoresOtherText(String text) {
-    handler.handle(update(message("private", 555L, 123L, text)));
+  @ValueSource(strings = {"hello", "/whoamix", "whoami"})
+  void ignoresOtherTextFromAllowedUsers(String text) {
+    handler.handle(update(message("private", 555L, ALLOWED, text)));
 
     assertThat(gateway.messages).isEmpty();
   }
 
   @Test
-  void ignoresUpdatesWithoutAMessage() {
+  void whoamiWorksForAllowedUsersAndTheOwnerToo() {
+    handler.handle(update(message("private", 7L, ALLOWED, "/whoami")));
+    handler.handle(update(message("private", 8L, OWNER, "/whoami")));
+
+    assertThat(gateway.messages).hasSize(2);
+  }
+
+  @Test
+  void unknownUserGetsARefusalWithTheirIdOnlyOncePerMinute() {
+    handler.handle(update(message("private", 9L, STRANGER, "hello")));
+    handler.handle(update(message("private", 9L, STRANGER, "hello again")));
+
+    assertThat(gateway.messages)
+        .singleElement()
+        .satisfies(sent -> {
+          assertThat(sent.chatId()).isEqualTo(9L);
+          assertThat(sent.html())
+              .isEqualTo("No access. Send /start to request it. Your id: <code>123</code>");
+        });
+
+    clock.advance(Duration.ofMinutes(1));
+    handler.handle(update(message("private", 9L, STRANGER, "hello")));
+
+    assertThat(gateway.messages).hasSize(2);
+  }
+
+  @Test
+  void startFromAnUnknownUserCreatesARequestAndConfirmsIt() {
+    handler.handle(update(message("private", 9L, STRANGER, "/start")));
+
+    assertThat(gateway.messages)
+        .singleElement()
+        .extracting(RecordingGateway.Sent::html)
+        .isEqualTo("Access requested. The owner will review it.");
+    assertThat(access.pending())
+        .singleElement()
+        .satisfies(request -> {
+          assertThat(request.id()).isEqualTo(STRANGER);
+          assertThat(request.username()).isNull();
+          assertThat(request.displayName()).isEqualTo("Test");
+        });
+  }
+
+  @Test
+  void repeatedStartIsAnsweredOncePerMinuteAndKeepsOneRequest() {
+    handler.handle(update(message("private", 9L, STRANGER, "/start")));
+    handler.handle(update(message("private", 9L, STRANGER, "/start")));
+    handler.handle(update(message("private", 9L, STRANGER, "/start")));
+
+    assertThat(gateway.messages)
+        .extracting(RecordingGateway.Sent::html)
+        .containsExactly(
+            "Access requested. The owner will review it.",
+            "Your request is already waiting for the owner.");
+    assertThat(access.pending()).hasSize(1);
+  }
+
+  @Test
+  void startDuringTheCooldownExplainsWhenToAskAgain() {
+    handler.handle(update(message("private", 9L, STRANGER, "/start")));
+    access.deny(STRANGER, OWNER);
+    clock.advance(Duration.ofMinutes(5));
+
+    handler.handle(update(message("private", 9L, STRANGER, "/start")));
+
+    assertThat(gateway.messages)
+        .extracting(RecordingGateway.Sent::html)
+        .last()
+        .isEqualTo("Your request was declined. You can ask again after 2026-11-16 10:00 UTC.");
+    assertThat(access.pending()).isEmpty();
+  }
+
+  @Test
+  void startFromAnAllowedUserOrTheOwnerShowsHelp() {
+    handler.handle(update(message("private", 7L, ALLOWED, "/start")));
+    handler.handle(update(message("private", 8L, OWNER, "/start@SomeBot")));
+
+    assertThat(gateway.messages)
+        .extracting(RecordingGateway.Sent::html)
+        .containsExactly(BotUpdateHandler.HELP, BotUpdateHandler.HELP);
+    assertThat(access.pending()).isEmpty();
+  }
+
+  @Test
+  void startRacingWithAnApprovalShowsHelp() {
+    AccessService racing = mock(AccessService.class);
+    when(racing.requestAccess(eq(STRANGER), any(), any()))
+        .thenReturn(new AccessService.RequestOutcome.AlreadyAllowed());
+    new BotUpdateHandler(gateway, racing)
+        .handle(update(message("private", 9L, STRANGER, "/start")));
+
+    assertThat(gateway.messages)
+        .extracting(RecordingGateway.Sent::html)
+        .containsExactly(BotUpdateHandler.HELP);
+  }
+
+  @Test
+  void allowedUsersGetNoReplyToOtherText() {
+    handler.handle(update(message("private", 7L, ALLOWED, "hello")));
+
+    assertThat(gateway.messages).isEmpty();
+  }
+
+  @Test
+  void usernameAndFullNameAreStoredWithTheRequest() {
+    Message message = message("private", 9L, STRANGER, "/start");
+    message.getFrom().setUserName("stranger");
+    message.getFrom().setLastName("Danger");
+
+    handler.handle(update(message));
+
+    assertThat(access.pending())
+        .singleElement()
+        .satisfies(request -> {
+          assertThat(request.username()).isEqualTo("stranger");
+          assertThat(request.displayName()).isEqualTo("Test Danger");
+        });
+  }
+
+  @Test
+  void groupMessagesFromUnknownUsersAreIgnoredCompletely() {
+    handler.handle(update(message("group", -1L, STRANGER, "/start")));
+
+    assertThat(gateway.messages).isEmpty();
+    assertThat(access.pending()).isEmpty();
+  }
+
+  @Test
+  void callbackFromAnUnknownUserIsRefused() {
+    handler.handle(callbackUpdate("cb1", STRANGER, "private"));
+
+    assertThat(gateway.answers).containsExactly(new RecordingGateway.Answer("cb1", "No access."));
+  }
+
+  @Test
+  void callbackFromAnAllowedUserPassesTheGate() {
+    handler.handle(callbackUpdate("cb2", ALLOWED, "private"));
+
+    assertThat(gateway.answers).isEmpty();
+  }
+
+  @Test
+  void callbacksOutsidePrivateChatsAreIgnored() {
+    handler.handle(callbackUpdate("cb3", STRANGER, "group"));
+
+    assertThat(gateway.answers).isEmpty();
+  }
+
+  @Test
+  void callbackWithoutAMessageIsIgnored() {
     Update update = new Update();
     update.setCallbackQuery(new CallbackQuery());
 
     handler.handle(update);
 
+    assertThat(gateway.answers).isEmpty();
     assertThat(gateway.messages).isEmpty();
+  }
+
+  @Test
+  void ignoresUpdatesOfOtherKinds() {
+    handler.handle(new Update());
+
+    assertThat(gateway.messages).isEmpty();
+  }
+
+  private static Update callbackUpdate(String id, long userId, String chatType) {
+    CallbackQuery callback = new CallbackQuery();
+    callback.setId(id);
+    callback.setFrom(User.builder().id(userId).firstName("Test").isBot(false).build());
+    callback.setMessage(message(chatType, 9L, userId, "button message"));
+    callback.setData("x");
+    Update update = new Update();
+    update.setCallbackQuery(callback);
+    return update;
   }
 
   private static Update update(Message message) {
