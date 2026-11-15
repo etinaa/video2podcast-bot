@@ -1,20 +1,12 @@
 package com.video2podcast.access;
 
-import com.fasterxml.jackson.annotation.JsonInclude;
-import com.fasterxml.jackson.databind.DeserializationFeature;
-import com.fasterxml.jackson.databind.SerializationFeature;
-import com.fasterxml.jackson.databind.json.JsonMapper;
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import com.video2podcast.storage.AtomicFiles;
+import com.video2podcast.storage.Json;
 import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.nio.channels.FileChannel;
-import java.nio.channels.WritableByteChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.nio.file.StandardOpenOption;
 import java.time.Instant;
-import java.util.Objects;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -26,15 +18,6 @@ import org.slf4j.LoggerFactory;
 public class AccessStore {
 
   private static final Logger LOG = LoggerFactory.getLogger(AccessStore.class);
-
-  private static final JsonMapper MAPPER =
-      JsonMapper.builder()
-          .addModule(new JavaTimeModule())
-          .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
-          .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
-          .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
-          .serializationInclusion(JsonInclude.Include.NON_NULL)
-          .build();
 
   private final Path file;
 
@@ -72,7 +55,7 @@ public class AccessStore {
   /** Returns the parsed state, or null when the content is not valid JSON or is incomplete. */
   private static AccessState parse(byte[] bytes) {
     try {
-      AccessState state = MAPPER.readValue(bytes, AccessState.class);
+      AccessState state = Json.MAPPER.readValue(bytes, AccessState.class);
       return isComplete(state) ? state : null;
     } catch (IOException e) {
       return null;
@@ -87,31 +70,11 @@ public class AccessStore {
   }
 
   public void save(AccessState state) {
-    Path tmp = file.resolveSibling(file.getFileName() + ".tmp");
     try {
-      Files.createDirectories(
-          Objects.requireNonNull(
-              file.toAbsolutePath().getParent(), "allowlist file has no parent"));
-      byte[] bytes = MAPPER.writerWithDefaultPrettyPrinter().writeValueAsBytes(state);
-      try (FileChannel channel =
-          FileChannel.open(
-              tmp,
-              StandardOpenOption.CREATE,
-              StandardOpenOption.WRITE,
-              StandardOpenOption.TRUNCATE_EXISTING)) {
-        writeFully(channel, ByteBuffer.wrap(bytes));
-        channel.force(true);
-      }
-      Files.move(tmp, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+      AtomicFiles.write(
+          file, Json.MAPPER.writerWithDefaultPrettyPrinter().writeValueAsBytes(state));
     } catch (IOException e) {
       throw new AccessStoreException("Cannot write " + file, e);
-    }
-  }
-
-  /** A channel may accept only part of the buffer per call, so keep writing until it is empty. */
-  static void writeFully(WritableByteChannel channel, ByteBuffer buffer) throws IOException {
-    while (buffer.hasRemaining()) {
-      channel.write(buffer);
     }
   }
 }

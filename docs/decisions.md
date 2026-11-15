@@ -37,3 +37,22 @@ anyway. Using it avoids a second JSON stack. Switching later only touches `Acces
 unreadable file can never grant access. Only the owner (from `ADMIN_USER_ID`) works until users are
 approved again. Denials are persisted too, so the cooldown survives restarts.
 
+## D3: Job state on disk
+
+**Decision:** each job has a directory `<WORK_DIR>/<jobId>/` with a `job.json` that is the only
+source of truth about it. `JobStore` changes a job only under that job's own lock and writes the
+file atomically (the same `AtomicFiles` helper the allowlist uses). `transition(jobId, kind,
+expected, next)` is a compare-and-set, so when two taps race exactly one gets `APPLIED`.
+
+**Job ids** are random UUIDs (36 characters, so `transcript:<jobId>` stays under Telegram's 64-byte
+callback limit). An id is validated against `[A-Za-z0-9_-]{1,40}` before it is turned into a path, so
+a forged callback can never point outside the work directory. File names inside `job.json` must be
+plain names without separators.
+
+**File states:** `AVAILABLE -> SENDING -> SENT`, `SENDING -> AVAILABLE` (failed send or restart
+recovery), and `AVAILABLE -> EXPIRED`. `SENT` and `EXPIRED` are final. A `job.json` that is missing,
+not valid JSON or incomplete is reported as "no such job" so the buttons answer "expired".
+
+**Queue:** `JobQueue` is one worker thread. A task that throws is logged and its future fails, and
+the next task still runs. `close()` waits up to 30 seconds for queued tasks.
+

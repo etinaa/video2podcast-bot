@@ -4,8 +4,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.nio.channels.WritableByteChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
@@ -104,33 +102,6 @@ class AccessStoreTest {
           .asString()
           .startsWith("allowed-users.json.corrupt-");
     }
-  }
-
-  @Test
-  void writeFullyKeepsWritingUntilTheBufferIsEmpty() throws IOException {
-    java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
-    WritableByteChannel oneByteAtATime =
-        new WritableByteChannel() {
-          @Override
-          public int write(ByteBuffer src) {
-            out.write(src.get());
-            return 1;
-          }
-
-          @Override
-          public boolean isOpen() {
-            return true;
-          }
-
-          @Override
-          public void close() {}
-        };
-
-    AccessStore.writeFully(
-        oneByteAtATime,
-        ByteBuffer.wrap("complete file".getBytes(java.nio.charset.StandardCharsets.UTF_8)));
-
-    assertThat(out).hasToString("complete file");
   }
 
   @Test

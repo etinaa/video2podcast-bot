@@ -88,7 +88,7 @@ Sizes: S = 1-2 files, M = 3-5 files.
 
 ## Phase 3: Summary pipeline
 
-- [ ] **T7: Job model, `job.json` store, and single-worker queue** (M)
+- [x] **T7: Job model, `job.json` store, and single-worker queue** (M)
   - Acceptance:
     - `JobStore` writes and reads `job.json` atomically with `jobId`, `ownerUserId`, `chatId`, `summaryMessageId`, title, duration, `createdAt`, and per-file `{path, state, expiresAt, sentAt}`.
     - File states: `AVAILABLE`, `SENDING`, `SENT`, `EXPIRED`. Transitions are enforced and guarded by a per-job lock.
