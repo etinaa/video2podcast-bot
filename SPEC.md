@@ -131,7 +131,7 @@ Access is an allowlist of Telegram **user ids** (not chat ids), checked on every
 3. On Approve, the user is added to the allowlist and notified. On Deny, the request is removed and the user is notified. A denied user can't send a new request for 24 hours (`ACCESS_REQUEST_COOLDOWN`, default `PT24H`).
 4. Any other message from an unknown user gets a short reply: "No access. Send /start to request it. Your id: 123". These replies are rate-limited to one per minute per user.
 
-**Storage:** `allowed-users.json` holds the allowed users (id, username, addedAt, addedBy) and pending requests (id, username, requestedAt, request message id), so the Approve and Deny buttons keep working after a restart. It is written atomically (temp file and rename) behind a lock and cached in memory. No database.
+**Storage:** `allowed-users.json` holds the allowed users (id, username, addedAt, addedBy) pending requests (id, username, name, requestedAt, request message id), so the Approve and Deny buttons keep working after a restart, and recent denials (id, deniedAt), so the 24-hour cooldown survives a restart. A file that is not valid JSON is renamed to `allowed-users.json.corrupt-<time>` and the bot starts with an empty allowlist (only the owner has access). It is written atomically (temp file and rename) behind a lock and cached in memory. No database.
 
 **Job ownership:** `job.json` stores `ownerUserId`. A button tap on a job is accepted only from its owner, even if the tapper is on the allowlist. The queue is shared and first come, first served.
 

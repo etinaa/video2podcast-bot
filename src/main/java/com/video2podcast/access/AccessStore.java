@@ -1,0 +1,91 @@
+package com.video2podcast.access;
+
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
+import java.time.Instant;
+import java.util.Objects;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Reads and writes {@code allowed-users.json}. A write goes to a temporary file in the same
+ * directory that is then renamed over the target, so a crash never leaves a half-written file.
+ * Callers are responsible for serializing access (see {@link AccessService}).
+ */
+public class AccessStore {
+
+  private static final Logger LOG = LoggerFactory.getLogger(AccessStore.class);
+
+  private static final JsonMapper MAPPER =
+      JsonMapper.builder()
+          .addModule(new JavaTimeModule())
+          .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
+          .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+          .serializationInclusion(JsonInclude.Include.NON_NULL)
+          .build();
+
+  private final Path file;
+
+  public AccessStore(Path file) {
+    this.file = file;
+  }
+
+  /**
+   * Returns the stored state, or an empty state when the file does not exist. A file that is not
+   * valid JSON is renamed to {@code <name>.corrupt-<epoch seconds>} and an empty state is returned,
+   * so the bot fails closed: only the owner has access until users are added again.
+   */
+  public AccessState load() {
+    if (!Files.exists(file)) {
+      return AccessState.empty();
+    }
+    try {
+      byte[] bytes = Files.readAllBytes(file);
+      try {
+        return MAPPER.readValue(bytes, AccessState.class);
+      } catch (JsonProcessingException e) {
+        Path aside =
+            file.resolveSibling(file.getFileName() + ".corrupt-" + Instant.now().getEpochSecond());
+        Files.move(file, aside, StandardCopyOption.REPLACE_EXISTING);
+        LOG.error(
+            "{} is not valid JSON, moved to {}. Starting with an empty allowlist.", file, aside, e);
+        return AccessState.empty();
+      }
+    } catch (IOException e) {
+      throw new AccessStoreException("Cannot read " + file, e);
+    }
+  }
+
+  public void save(AccessState state) {
+    Path tmp = file.resolveSibling(file.getFileName() + ".tmp");
+    try {
+      Files.createDirectories(
+          Objects.requireNonNull(
+              file.toAbsolutePath().getParent(), "allowlist file has no parent"));
+      byte[] bytes = MAPPER.writerWithDefaultPrettyPrinter().writeValueAsBytes(state);
+      try (FileChannel channel =
+          FileChannel.open(
+              tmp,
+              StandardOpenOption.CREATE,
+              StandardOpenOption.WRITE,
+              StandardOpenOption.TRUNCATE_EXISTING)) {
+        channel.write(ByteBuffer.wrap(bytes));
+        channel.force(true);
+      }
+      Files.move(tmp, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+    } catch (IOException e) {
+      throw new AccessStoreException("Cannot write " + file, e);
+    }
+  }
+}

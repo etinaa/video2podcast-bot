@@ -42,7 +42,7 @@ Sizes: S = 1-2 files, M = 3-5 files.
 
 ## Phase 2: Access control
 
-- [ ] **T4: Allowlist store and access service** (M)
+- [x] **T4: Allowlist store and access service** (M)
   - Acceptance:
     - `AccessStore` reads and writes `allowed-users.json` atomically (temp file and rename) behind a lock, with an in-memory cache and reload on start.
     - `AccessService` implements: the owner always allowed and not removable, add and remove users, a pending request per user, a 24-hour deny cooldown, and rate limiting of refusal replies (1 per minute per user).

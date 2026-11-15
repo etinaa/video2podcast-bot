@@ -22,3 +22,18 @@
   tested against WireMock using `TelegramUrl` to point the client at a local server.
 - The Telegram client lower-cases method names in request paths (`/sendmessage`). Telegram accepts
   this, and the WireMock stubs rely on it.
+
+## D2: Allowlist persistence
+
+**Decision:** `allowed-users.json` is read and written with Jackson 2 (`jackson-databind` and
+`jackson-datatype-jsr310`, already on the classpath through the Telegram libraries, now declared
+explicitly). Writes go to `<file>.tmp`, are flushed, then renamed over the target (atomic move).
+
+**Why Jackson 2:** Spring Boot 4 defaults to Jackson 3, but the Telegram client needs Jackson 2
+anyway. Using it avoids a second JSON stack. Switching later only touches `AccessStore` (and
+`JobStore` from T7).
+
+**Fail closed:** a corrupt file is renamed aside and the bot starts with an empty allowlist, so an
+unreadable file can never grant access. Only the owner (from `ADMIN_USER_ID`) works until users are
+approved again. Denials are persisted too, so the cooldown survives restarts.
+

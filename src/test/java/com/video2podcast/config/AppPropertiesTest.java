@@ -2,6 +2,7 @@ package com.video2podcast.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.video2podcast.access.AccessService;
 import java.nio.file.Path;
 import java.time.Duration;
 import org.junit.jupiter.api.Test;
@@ -12,6 +13,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 class AppPropertiesTest {
 
   @Autowired AppProperties props;
+  @Autowired AccessService accessService;
 
   @Test
   void bindsValuesFromConfiguration() {
@@ -29,5 +31,11 @@ class AppPropertiesTest {
     assertThat(props.jobs().workDir()).isEqualTo(Path.of("/work"));
     assertThat(props.jobs().maxVideoDuration()).isEqualTo(Duration.ofHours(3));
     assertThat(props.jobs().retention()).isEqualTo(Duration.ofHours(1));
+  }
+
+  @Test
+  void accessServiceKnowsTheConfiguredOwner() {
+    assertThat(accessService.isOwner(42L)).isTrue();
+    assertThat(accessService.isAllowed(43L)).isFalse();
   }
 }
