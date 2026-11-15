@@ -20,7 +20,8 @@ public class TelegramConfig {
 
   @Bean
   TelegramClient telegramClient(AppProperties props) {
-    return new OkHttpTelegramClient(requireToken(props));
+    return new OkHttpTelegramClient(
+        requireToken(props), TelegramApiUrl.parse(props.telegram().apiUrl()));
   }
 
   @Bean

@@ -42,7 +42,7 @@ Sizes: S = 1-2 files, M = 3-5 files.
 
 ## Phase 2: Access control
 
-- [ ] **T4a: WireMock functional-test harness** (M) — added at the owner's request; every later task adds its own functional tests on top of it
+- [x] **T4a: WireMock functional-test harness** (M) — added at the owner's request; every later task adds its own functional tests on top of it
   - Acceptance:
     - A reusable test support (JUnit extension or base class) starts WireMock servers for the Telegram Bot API, Whisper and Ollama, boots the full Spring context against them (fake token, no real network), and offers helpers to feed an `Update` to the bot and to assert on the requests WireMock received.
     - The Telegram base URL is configurable (`app.telegram.api-url`, default the real API) so the production client and the long-polling starter can be pointed at WireMock. In functional tests the bot is driven directly and long polling does not run.

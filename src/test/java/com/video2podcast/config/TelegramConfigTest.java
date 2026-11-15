@@ -14,7 +14,7 @@ class TelegramConfigTest {
 
   private static AppProperties props(String token, boolean enabled) {
     return new AppProperties(
-        new AppProperties.Telegram(token, 1L, enabled),
+        new AppProperties.Telegram(token, 1L, enabled, ""),
         new AppProperties.Access(Path.of("a.json"), Duration.ofHours(24)),
         new AppProperties.Ollama("http://localhost:11434", "m"),
         new AppProperties.Whisper("http://localhost:8081"),

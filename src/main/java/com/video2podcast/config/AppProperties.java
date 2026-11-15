@@ -8,7 +8,8 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 public record AppProperties(
     Telegram telegram, Access access, Ollama ollama, Whisper whisper, Jobs jobs) {
 
-  public record Telegram(String botToken, long adminUserId, boolean enabled) {}
+  /** {@code apiUrl} overrides the Telegram Bot API base URL (blank means the real API). */
+  public record Telegram(String botToken, long adminUserId, boolean enabled, String apiUrl) {}
 
   public record Access(Path file, Duration requestCooldown) {}
 

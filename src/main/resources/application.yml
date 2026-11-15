@@ -7,6 +7,7 @@ app:
     bot-token: ${TELEGRAM_BOT_TOKEN:}
     admin-user-id: ${ADMIN_USER_ID:0}
     enabled: ${TELEGRAM_ENABLED:true}
+    api-url: ${TELEGRAM_API_URL:}
   access:
     file: ${ACCESS_FILE:/data/allowed-users.json}
     request-cooldown: ${ACCESS_REQUEST_COOLDOWN:PT24H}

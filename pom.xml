@@ -97,7 +97,28 @@
         <configuration>
           <argLine>@{jacoco.unit.argLine}</argLine>
           <failIfNoTests>true</failIfNoTests>
+          <excludes>
+            <exclude>**/*FT.java</exclude>
+          </excludes>
         </configuration>
+        <executions>
+          <!-- Functional tests run after the unit tests, without the JaCoCo agent, so they do
+               not count toward the coverage gate. -->
+          <execution>
+            <id>functional-tests</id>
+            <phase>integration-test</phase>
+            <goals>
+              <goal>test</goal>
+            </goals>
+            <configuration>
+              <argLine>-Dfile.encoding=UTF-8</argLine>
+              <excludes combine.self="override"/>
+              <includes>
+                <include>**/*FT.java</include>
+              </includes>
+            </configuration>
+          </execution>
+        </executions>
       </plugin>
 
       <plugin>
