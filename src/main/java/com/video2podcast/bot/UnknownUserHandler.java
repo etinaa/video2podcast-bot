@@ -18,10 +18,12 @@ class UnknownUserHandler {
 
   private final TelegramGateway gateway;
   private final AccessService access;
+  private final AccessAdmin admin;
 
-  UnknownUserHandler(TelegramGateway gateway, AccessService access) {
+  UnknownUserHandler(TelegramGateway gateway, AccessService access, AccessAdmin admin) {
     this.gateway = gateway;
     this.access = access;
+    this.admin = admin;
   }
 
   void handle(Sender sender, String command, String helpText) {
@@ -32,9 +34,11 @@ class UnknownUserHandler {
       return;
     }
     switch (access.requestAccess(sender.userId(), sender.username(), sender.displayName())) {
-      case RequestOutcome.Created _ ->
-          gateway.sendMessage(
-              sender.chatId(), "Access requested. The owner will review it.", List.of());
+      case RequestOutcome.Created created -> {
+        gateway.sendMessage(
+            sender.chatId(), "Access requested. The owner will review it.", List.of());
+        admin.notifyOwner(created.request());
+      }
       case RequestOutcome.AlreadyPending _ ->
           replyLimited(sender, "Your request is already waiting for the owner.");
       case RequestOutcome.CoolingDown cooling ->

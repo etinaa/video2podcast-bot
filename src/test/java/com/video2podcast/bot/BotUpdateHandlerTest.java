@@ -12,6 +12,7 @@ import com.video2podcast.support.MutableClock;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -123,7 +124,7 @@ class BotUpdateHandlerTest {
   void startFromAnUnknownUserCreatesARequestAndConfirmsIt() {
     handler.handle(update(message("private", 9L, STRANGER, "/start")));
 
-    assertThat(gateway.messages)
+    assertThat(sentTo(9L))
         .singleElement()
         .extracting(RecordingGateway.Sent::html)
         .isEqualTo("Access requested. The owner will review it.");
@@ -142,11 +143,12 @@ class BotUpdateHandlerTest {
     handler.handle(update(message("private", 9L, STRANGER, "/start")));
     handler.handle(update(message("private", 9L, STRANGER, "/start")));
 
-    assertThat(gateway.messages)
+    assertThat(sentTo(9L))
         .extracting(RecordingGateway.Sent::html)
         .containsExactly(
             "Access requested. The owner will review it.",
             "Your request is already waiting for the owner.");
+    assertThat(sentTo(OWNER)).hasSize(1);
     assertThat(access.pending()).hasSize(1);
   }
 
@@ -268,6 +270,10 @@ class BotUpdateHandlerTest {
     Update update = new Update();
     update.setCallbackQuery(callback);
     return update;
+  }
+
+  private List<RecordingGateway.Sent> sentTo(long chatId) {
+    return gateway.messages.stream().filter(sent -> sent.chatId() == chatId).toList();
   }
 
   private static Update update(Message message) {

@@ -12,17 +12,32 @@ class RecordingGateway implements TelegramGateway {
   record Answer(String callbackId, String text) {}
 
   final List<Sent> messages = new ArrayList<>();
+
+  record Edit(long chatId, int messageId, String html, List<InlineButton> buttons) {}
+
   final List<Answer> answers = new ArrayList<>();
+  final List<Edit> edits = new ArrayList<>();
+
+  /** Chats for which sending fails, to simulate a user who blocked the bot. */
+  final java.util.Set<Long> failingChats = new java.util.HashSet<>();
+
+  boolean failEdits;
 
   @Override
   public int sendMessage(long chatId, String html, List<InlineButton> buttons) {
+    if (failingChats.contains(chatId)) {
+      throw new TelegramGatewayException("chat " + chatId + " is unreachable", null);
+    }
     messages.add(new Sent(chatId, html, buttons));
     return messages.size();
   }
 
   @Override
   public void editMessage(long chatId, int messageId, String html, List<InlineButton> buttons) {
-    throw new UnsupportedOperationException();
+    if (failEdits) {
+      throw new TelegramGatewayException("cannot edit", null);
+    }
+    edits.add(new Edit(chatId, messageId, html, buttons));
   }
 
   @Override

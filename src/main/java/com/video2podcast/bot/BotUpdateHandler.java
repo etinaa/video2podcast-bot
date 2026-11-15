@@ -3,6 +3,7 @@ package com.video2podcast.bot;
 import com.video2podcast.access.AccessService;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import org.telegram.telegrambots.meta.api.objects.CallbackQuery;
 import org.telegram.telegrambots.meta.api.objects.Update;
 import org.telegram.telegrambots.meta.api.objects.User;
@@ -21,14 +22,18 @@ public class BotUpdateHandler {
           + "Then tap a button to get the audio or the transcript.\n\n"
           + "/whoami - show your Telegram id";
 
+  private static final Set<String> ADMIN_COMMANDS = Set.of("/allow", "/deny", "/users");
+
   private final TelegramGateway gateway;
   private final AccessService access;
+  private final AccessAdmin admin;
   private final UnknownUserHandler unknownUsers;
 
   public BotUpdateHandler(TelegramGateway gateway, AccessService access) {
     this.gateway = gateway;
     this.access = access;
-    this.unknownUsers = new UnknownUserHandler(gateway, access);
+    this.admin = new AccessAdmin(gateway, access);
+    this.unknownUsers = new UnknownUserHandler(gateway, access, admin);
   }
 
   public void handle(Update update) {
@@ -45,6 +50,7 @@ public class BotUpdateHandler {
     }
     Sender sender = senderOf(message);
     String command = commandOf(message.getText());
+    String args = argsOf(message.getText());
     if ("/whoami".equals(command)) {
       gateway.sendMessage(
           sender.chatId(), "Your Telegram id: <code>" + sender.userId() + "</code>", List.of());
@@ -52,6 +58,8 @@ public class BotUpdateHandler {
       unknownUsers.handle(sender, command, HELP);
     } else if ("/start".equals(command)) {
       gateway.sendMessage(sender.chatId(), HELP, List.of());
+    } else if (ADMIN_COMMANDS.contains(command)) {
+      admin.handleCommand(sender, command, args);
     }
   }
 
@@ -62,6 +70,9 @@ public class BotUpdateHandler {
     }
     if (!access.isAllowed(callback.getFrom().getId())) {
       gateway.answerCallback(callback.getId(), "No access.");
+    } else if (callback.getData() != null
+        && callback.getData().startsWith(Keyboards.ACCESS_PREFIX)) {
+      admin.handleCallback(callback);
     }
   }
 
@@ -78,6 +89,12 @@ public class BotUpdateHandler {
     return Boolean.TRUE.equals(message.getChat().isUserChat())
         && message.getFrom() != null
         && message.hasText();
+  }
+
+  /** Everything after the command, e.g. "123" for "/allow 123". */
+  private static String argsOf(String text) {
+    String[] tokens = text.strip().split("\\s+", 2);
+    return tokens.length > 1 ? tokens[1] : "";
   }
 
   /** Returns the lower-cased command without a "@BotName" suffix, e.g. "/whoami". */

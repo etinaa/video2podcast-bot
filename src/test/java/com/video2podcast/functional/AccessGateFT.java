@@ -33,11 +33,14 @@ class AccessGateFT extends FunctionalTest {
     receive(Updates.privateMessage(userId, "/start"));
     receive(Updates.privateMessage(userId, "/start"));
 
-    assertThat(telegramCalls("sendMessage"))
+    assertThat(sentTo(userId))
         .extracting(call -> call.get("text").asText())
         .containsExactly(
             "Access requested. The owner will review it.",
             "Your request is already waiting for the owner.");
+    assertThat(sentTo(OWNER_ID))
+        .filteredOn(call -> call.get("text").asText().contains("id <code>" + userId + "</code>"))
+        .hasSize(1);
     assertThat(access.pending()).extracting(PendingRequest::id).containsOnlyOnce(userId);
     assertThat(access.isAllowed(userId)).isFalse();
   }

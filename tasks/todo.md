@@ -70,7 +70,7 @@ Sizes: S = 1-2 files, M = 3-5 files.
   - Depends on: T2, T4, T4a
   - Files: `access/AuthorizationGate.java`, `bot/BotUpdateHandler.java`, tests
 
-- [ ] **T6: Owner commands and the Approve/Deny flow** (M)
+- [x] **T6: Owner commands and the Approve/Deny flow** (M)
   - Acceptance:
     - On a new request the owner gets "Access request from <name> (@username, id N)" with **Approve** and **Deny** buttons (`access:approve:<id>`, `access:deny:<id>`). Names are HTML-escaped.
     - Approve adds the user and notifies them. Deny removes the request, notifies them, and starts the cooldown.

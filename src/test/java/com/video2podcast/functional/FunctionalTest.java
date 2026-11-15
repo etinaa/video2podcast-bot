@@ -74,6 +74,10 @@ abstract class FunctionalTest {
             .willReturn(
                 aResponse().withBody(MESSAGE_OK).withHeader("Content-Type", "application/json")));
     WireMocks.TELEGRAM.stubFor(
+        post(urlPathEqualTo(telegramPath("editMessageText")))
+            .willReturn(
+                aResponse().withBody(MESSAGE_OK).withHeader("Content-Type", "application/json")));
+    WireMocks.TELEGRAM.stubFor(
         post(urlPathEqualTo(telegramPath("answerCallbackQuery")))
             .willReturn(
                 aResponse()
@@ -83,6 +87,13 @@ abstract class FunctionalTest {
 
   static long newUserId() {
     return USER_IDS.getAndIncrement();
+  }
+
+  /** The messages the bot sent to one chat, oldest first. */
+  static List<JsonNode> sentTo(long chatId) {
+    return telegramCalls("sendMessage").stream()
+        .filter(call -> call.get("chat_id").asLong() == chatId)
+        .toList();
   }
 
   void receive(Update update) {

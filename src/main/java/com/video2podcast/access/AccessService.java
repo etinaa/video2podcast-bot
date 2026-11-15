@@ -60,6 +60,10 @@ public class AccessService {
     this.state = store.load();
   }
 
+  public long ownerId() {
+    return ownerId;
+  }
+
   public boolean isOwner(long userId) {
     return userId == ownerId;
   }
@@ -74,6 +78,10 @@ public class AccessService {
 
   public synchronized List<PendingRequest> pending() {
     return state.pending();
+  }
+
+  public synchronized Optional<PendingRequest> pendingRequest(long userId) {
+    return findPending(userId);
   }
 
   /** Stores an access request from an unknown user, unless one is pending or cooling down. */
