@@ -16,7 +16,7 @@ Sizes: S = 1-2 files, M = 3-5 files.
   - Depends on: none
   - Files: `pom.xml`, `Video2PodcastApplication.java`, `config/*Properties.java`, `application.yml`, one context test
 
-- [x] **T2: Telegram long-polling spike (`/whoami`)** (S) — manual `/whoami` check with a real bot token is still to be done by the owner
+- [x] **T2: Telegram long-polling spike (`/whoami`)** (S)
   - Acceptance:
     - The bot connects with long polling on Boot 4.1.2 and replies to `/whoami` with the sender's id, in private chats only.
     - The chosen library approach is recorded in `docs/decisions.md` (starter, or the fallback if the starter fails).
@@ -35,9 +35,9 @@ Sizes: S = 1-2 files, M = 3-5 files.
   - Files: `docs/host-setup.md`, `src/test/resources/fixtures/*.json` (no production code)
 
 ### Checkpoint 1: Foundation
-- [ ] `./mvnw verify` passes on Java 27 with Spotless and JaCoCo
-- [ ] The bot answers `/whoami` from a real Telegram account
-- [ ] Whisper and Ollama contracts are documented and match the spec's assumptions (or the spec is updated)
+- [x] `./mvnw verify` passes on Java 27 with Spotless and JaCoCo
+- [x] The bot answers `/whoami` from a real Telegram account
+- [x] Whisper and Ollama contracts are documented and match the spec's assumptions (or the spec is updated)
 - [ ] Review with human before proceeding
 
 ## Phase 2: Access control
