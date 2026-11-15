@@ -68,6 +68,7 @@ See `tasks/todo.md` for the checklist with acceptance criteria and verification 
 - T12 Download transcript button
 - T13 Audio preparation and Download audio button
 - T14 Retention sweeper and restart recovery
+- T18 WireMock functional tests (Telegram, Whisper, Ollama) — added after T3; numbered last to keep T1-T17 stable
 - Checkpoint 4
 
 ### Phase 5: Packaging and hardening

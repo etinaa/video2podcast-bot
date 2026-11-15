@@ -154,6 +154,15 @@ Sizes: S = 1-2 files, M = 3-5 files.
   - Depends on: T7, T12, T13
   - Files: `job/RetentionSweeper.java`, `job/JobRecovery.java`, `bot/Keyboards.java`, tests
 
+- [ ] **T18: WireMock functional tests of the whole bot** (M) — added at the owner's request; numbered last to keep T1-T17 stable
+  - Acceptance:
+    - Functional tests (`*FT`) start the full Spring context with Telegram Bot API, Whisper and Ollama as WireMock servers (using the T3 fixtures) and a fake `ProcessRunner` for `yt-dlp`/`ffmpeg`. Updates are fed to the bot and assertions are made on the requests WireMock received.
+    - Scenarios: unknown user requests access and the owner approves; allowed user sends a link and gets exactly one summary message with two buttons and no file uploads; transcript tap sends the `.txt` once; audio tap sends audio (compressed and unchanged cases); tap on an expired job; tap by another user; Whisper or Ollama down gives a clear failure message.
+    - The tests run in `./mvnw verify` and need no network and no secrets.
+  - Verify: `./mvnw verify` passes with the functional tests included.
+  - Depends on: T14
+  - Files: `src/test/java/com/video2podcast/functional/*FT.java`, shared WireMock support class, `pom.xml` (failsafe or surefire include)
+
 ### Checkpoint 4: Full flow
 - [ ] All tests pass
 - [ ] Manual: link, summary, tap transcript, tap audio, and the job directory is deleted. A second job left alone is deleted after 1 hour.
@@ -176,7 +185,7 @@ Sizes: S = 1-2 files, M = 3-5 files.
     - Integration tests cover: restart between summary and button tap (buttons still work), restart with pending access requests, private/unsupported/too-long URL, non-allowlisted callbacks, and another user's button.
     - The JaCoCo gate requires at least 90% line coverage and 90% branch coverage across all production code, including `access` and `config`, measured from unit tests only. `./mvnw clean verify` generates `target/site/jacoco/index.html` and enforces both `COVEREDRATIO` minimums of `0.90` through `jacoco:check`; either threshold being missed fails the build. Integration-test coverage does not count toward the gate.
   - Verify: `./mvnw verify` passes with the gate on.
-  - Depends on: T14, T15
+  - Depends on: T14, T15, T18
   - Files: `job/HealthChecks.java`, `RestartRecoveryIT.java`, `FailureModesIT.java`, `pom.xml`
 
 - [ ] **T17: Real-world smoke tests (short and 3-hour video)** (S)
