@@ -4,6 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.WritableByteChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
@@ -11,6 +13,8 @@ import java.util.List;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class AccessStoreTest {
 
@@ -68,6 +72,65 @@ class AccessStoreTest {
           .asString()
           .startsWith("allowed-users.json.corrupt-");
     }
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "{\"users\":[{\"id\":100,\"addedAt\":\"2026-11-15T10:00:00Z\"}]} THIS IS NOT JSON",
+        "{\"users\":[]}{\"users\":[]}",
+        "null",
+        "",
+        "[]",
+        "{\"users\":[null]}",
+        "{\"users\":[{\"addedAt\":\"2026-11-15T10:00:00Z\"}]}",
+        "{\"users\":[{\"id\":100}]}",
+        "{\"pending\":[{\"id\":100}]}",
+        "{\"pending\":[{\"requestedAt\":\"2026-11-15T10:00:00Z\"}]}",
+        "{\"denials\":[{\"userId\":100}]}",
+        "{\"denials\":[{\"deniedAt\":\"2026-11-15T10:00:00Z\"}]}"
+      })
+  void invalidContentIsTreatedAsCorruptAndNeverGrantsAccess(String content) throws IOException {
+    Path file = dir.resolve("allowed-users.json");
+    Files.writeString(file, content);
+
+    AccessState state = new AccessStore(file).load();
+
+    assertThat(state).isEqualTo(AccessState.empty());
+    assertThat(file).doesNotExist();
+    try (Stream<Path> files = Files.list(dir)) {
+      assertThat(files.map(p -> p.getFileName().toString()))
+          .singleElement()
+          .asString()
+          .startsWith("allowed-users.json.corrupt-");
+    }
+  }
+
+  @Test
+  void writeFullyKeepsWritingUntilTheBufferIsEmpty() throws IOException {
+    java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+    WritableByteChannel oneByteAtATime =
+        new WritableByteChannel() {
+          @Override
+          public int write(ByteBuffer src) {
+            out.write(src.get());
+            return 1;
+          }
+
+          @Override
+          public boolean isOpen() {
+            return true;
+          }
+
+          @Override
+          public void close() {}
+        };
+
+    AccessStore.writeFully(
+        oneByteAtATime,
+        ByteBuffer.wrap("complete file".getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+
+    assertThat(out).hasToString("complete file");
   }
 
   @Test

@@ -1,7 +1,6 @@
 package com.video2podcast.access;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.json.JsonMapper;
@@ -9,6 +8,7 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.channels.WritableByteChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -32,6 +32,7 @@ public class AccessStore {
           .addModule(new JavaTimeModule())
           .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
           .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+          .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
           .serializationInclusion(JsonInclude.Include.NON_NULL)
           .build();
 
@@ -51,20 +52,38 @@ public class AccessStore {
       return AccessState.empty();
     }
     try {
-      byte[] bytes = Files.readAllBytes(file);
-      try {
-        return MAPPER.readValue(bytes, AccessState.class);
-      } catch (JsonProcessingException e) {
-        Path aside =
-            file.resolveSibling(file.getFileName() + ".corrupt-" + Instant.now().getEpochSecond());
-        Files.move(file, aside, StandardCopyOption.REPLACE_EXISTING);
-        LOG.error(
-            "{} is not valid JSON, moved to {}. Starting with an empty allowlist.", file, aside, e);
-        return AccessState.empty();
+      AccessState parsed = parse(Files.readAllBytes(file));
+      if (parsed != null) {
+        return parsed;
       }
+      Path aside =
+          file.resolveSibling(file.getFileName() + ".corrupt-" + Instant.now().getEpochSecond());
+      Files.move(file, aside, StandardCopyOption.REPLACE_EXISTING);
+      LOG.error(
+          "{} is not a valid allowlist, moved to {}. Starting with an empty allowlist.",
+          file,
+          aside);
+      return AccessState.empty();
     } catch (IOException e) {
       throw new AccessStoreException("Cannot read " + file, e);
     }
+  }
+
+  /** Returns the parsed state, or null when the content is not valid JSON or is incomplete. */
+  private static AccessState parse(byte[] bytes) {
+    try {
+      AccessState state = MAPPER.readValue(bytes, AccessState.class);
+      return isComplete(state) ? state : null;
+    } catch (IOException e) {
+      return null;
+    }
+  }
+
+  private static boolean isComplete(AccessState state) {
+    return state != null
+        && state.users().stream().allMatch(u -> u.id() != 0 && u.addedAt() != null)
+        && state.pending().stream().allMatch(p -> p.id() != 0 && p.requestedAt() != null)
+        && state.denials().stream().allMatch(d -> d.userId() != 0 && d.deniedAt() != null);
   }
 
   public void save(AccessState state) {
@@ -80,12 +99,19 @@ public class AccessStore {
               StandardOpenOption.CREATE,
               StandardOpenOption.WRITE,
               StandardOpenOption.TRUNCATE_EXISTING)) {
-        channel.write(ByteBuffer.wrap(bytes));
+        writeFully(channel, ByteBuffer.wrap(bytes));
         channel.force(true);
       }
       Files.move(tmp, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
     } catch (IOException e) {
       throw new AccessStoreException("Cannot write " + file, e);
+    }
+  }
+
+  /** A channel may accept only part of the buffer per call, so keep writing until it is empty. */
+  static void writeFully(WritableByteChannel channel, ByteBuffer buffer) throws IOException {
+    while (buffer.hasRemaining()) {
+      channel.write(buffer);
     }
   }
 }
