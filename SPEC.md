@@ -38,6 +38,7 @@ A Telegram bot that summarizes a video and, on request, delivers its audio and t
 - Summary: Ollama on the macOS host (native app or Homebrew, with Metal), called through its HTTP API (`/api/chat`) behind a small `LlmClient` interface so the backend can be swapped (for example for llama.cpp's `llama-server`) without touching the rest. Default model `qwen3:32b`. The model is configurable. Ollama's default context window is small, so each request sets `num_ctx` explicitly, and the chunk size is derived from it. Long transcripts use map-reduce: summarize chunks, then summarize the summaries.
 - Deployment: docker-compose with one service, `bot`. Ollama and whisper.cpp stay on the host because Docker on macOS has no GPU access. A named volume holds the job working directories, and a separate named volume holds `allowed-users.json` so job cleanup never touches it.
 - Tests: JUnit 5, Mockito, Spring Boot Test, WireMock for the Whisper and Ollama APIs
+- Static analysis: SpotBugs with FindSecBugs and PMD (rules in `config/pmd-ruleset.xml`), both run in `./mvnw verify` and fail the build on findings
 
 ## Commands
 ```
@@ -45,6 +46,7 @@ Build:        ./mvnw clean package
 Test:         ./mvnw test
 Single test:  ./mvnw test -Dtest=AudioPreparerTest
 Lint/format:  ./mvnw spotless:apply
+Static check: ./mvnw spotbugs:check pmd:check
 Verify:       ./mvnw verify
 Run (dev):    ./mvnw spring-boot:run -Dspring-boot.run.profiles=dev
 Run (jar):    java -jar target/video2podcast-bot.jar
@@ -173,7 +175,7 @@ While work is running, one status message is edited with the current stage (queu
   - Enforce the max video duration (3 hours) before downloading, using yt-dlp metadata.
   - Delete a job's working directory once both the audio and the transcript have been delivered, on failure, and 1 hour after the summary was sent. Clean up expired directories on startup.
   - HTML-escape all dynamic text in Telegram messages.
-  - Run `./mvnw verify` before committing.
+  - Run `./mvnw verify` before committing. It includes Spotless, SpotBugs, and PMD, which must pass.
   - Read secrets from the environment.
 - **Ask first:**
   - Adding dependencies beyond the stack above.
@@ -187,7 +189,7 @@ While work is running, one status message is edited with the current stage (queu
   - Process messages from group chats or channels.
   - Run shell commands built from unsanitized user input.
   - Create or send the audio or the transcript file before the user taps its button.
-  - Delete or skip failing tests to get a build green.
+  - Delete or skip failing tests, or add SpotBugs or PMD suppressions, to get a build green without approval.
   - Expose any port of the bot to the network.
 
 ## Success Criteria
