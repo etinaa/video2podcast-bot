@@ -164,7 +164,8 @@ While work is running, one status message is edited with the current stage (queu
 - **Access (unit):** allowlist add and remove, pending request lifecycle, 24-hour deny cooldown, refusal rate limit, owner-only command checks, job-owner check on button taps, atomic `allowed-users.json` persistence and reload.
 - **Integration (Spring Boot Test + WireMock):** the full flow with the yt-dlp/ffmpeg wrapper stubbed and the Whisper and Ollama APIs mocked: link, summary message with button, callback, audio sent. Also a callback for an expired job and one from a non-allowlisted user.
 - **Manual smoke test:** one real short video end to end (audio stays uncompressed), then one video of about 3 hours (audio gets compressed and uploads successfully). Documented in `docs/`.
-- Coverage target: 80% line coverage on `job`, `bot`, `media`, `summary`, and `transcript` packages, checked by JaCoCo in `verify`.
+- Coverage requirement: at least **90% line coverage and 90% branch coverage** across all production code, including `access` and `config`. Both thresholds must be met independently using coverage collected from the unit-test run; integration-test coverage does not count toward these thresholds.
+- Verification: `./mvnw clean verify` runs the unit tests with the JaCoCo agent, generates the coverage report, and enforces `LINE` and `BRANCH` `COVEREDRATIO` minimums of `0.90` via `jacoco:check` in the `verify` phase. The build fails if either threshold is missed. The HTML report is available at `target/site/jacoco/index.html`.
 - No tests call real external services. CI never needs secrets.
 
 ## Boundaries
@@ -175,7 +176,7 @@ While work is running, one status message is edited with the current stage (queu
   - Enforce the max video duration (3 hours) before downloading, using yt-dlp metadata.
   - Delete a job's working directory once both the audio and the transcript have been delivered, on failure, and 1 hour after the summary was sent. Clean up expired directories on startup.
   - HTML-escape all dynamic text in Telegram messages.
-  - Run `./mvnw verify` before committing. It includes Spotless, SpotBugs, and PMD, which must pass.
+  - Run `./mvnw clean verify` before committing. Unit tests, the JaCoCo gate (at least 90% lines and 90% branches), Spotless, SpotBugs, and PMD must all pass.
   - Read secrets from the environment.
 - **Ask first:**
   - Adding dependencies beyond the stack above.
@@ -207,7 +208,7 @@ While work is running, one status message is edited with the current stage (queu
 12. A user can't tap another user's **Download audio** or **Download transcript** button.
 13. Invalid, private, too-long, or unsupported URLs produce a clear failure message, and the working directory is removed.
 14. The user is told if Ollama or the Whisper server is unreachable, instead of a silent hang.
-15. `./mvnw verify` passes with the coverage target met, and no test needs network access.
+15. `./mvnw clean verify` passes: unit tests and JaCoCo demonstrate at least 90% line coverage and 90% branch coverage across all production code, with the build failing below either threshold. No test needs network access.
 
 ## Out of Scope (Deferred)
 - RSS feed and podcast-app subscription: removed because audio is delivered in chat. It could return as a V2 option.

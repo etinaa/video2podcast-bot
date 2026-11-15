@@ -174,7 +174,7 @@ Sizes: S = 1-2 files, M = 3-5 files.
   - Acceptance:
     - Startup health check and per-job checks report "Ollama unreachable" or "Whisper unreachable" to the user, without hanging.
     - Integration tests cover: restart between summary and button tap (buttons still work), restart with pending access requests, private/unsupported/too-long URL, non-allowlisted callbacks, and another user's button.
-    - The JaCoCo gate (80% on `job`, `bot`, `media`, `summary`, `transcript`, `access`) is enforced in `verify`.
+    - The JaCoCo gate requires at least 90% line coverage and 90% branch coverage across all production code, including `access` and `config`, measured from unit tests only. `./mvnw clean verify` generates `target/site/jacoco/index.html` and enforces both `COVEREDRATIO` minimums of `0.90` through `jacoco:check`; either threshold being missed fails the build. Integration-test coverage does not count toward the gate.
   - Verify: `./mvnw verify` passes with the gate on.
   - Depends on: T14, T15
   - Files: `job/HealthChecks.java`, `RestartRecoveryIT.java`, `FailureModesIT.java`, `pom.xml`
