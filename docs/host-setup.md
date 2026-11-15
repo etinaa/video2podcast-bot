@@ -1,6 +1,6 @@
 # Host setup and service contracts
 
-The bot runs in Docker, but `whisper-server` and Ollama run on the macOS host so they can use the GPU (Metal). Inside Docker the bot reaches them at `http://host.docker.internal:<port>`. For local runs (`./run.sh`, profile `dev`) it uses `localhost`.
+The bot runs in a Podman container (`podman compose`), but `whisper-server` and Ollama run on the macOS host so they can use the GPU (Metal). Inside the container the bot reaches them at `http://host.containers.internal:<port>`. For local runs (`./run.sh`, profile `dev`) it uses `localhost`.
 
 Verified on: MacBook Pro, Apple M3 Max, 64 GB, macOS, Ollama 0.40.16, Homebrew `whisper-cpp`.
 
@@ -16,7 +16,7 @@ curl -L --fail -o ~/models/whisper/ggml-large-v3-turbo.bin \
   https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin   # about 1.5 GB
 ```
 
-`ffmpeg` and `yt-dlp` on the host are only needed for local runs. The Docker image will contain its own copies (T15).
+`ffmpeg` and `yt-dlp` on the host are only needed for local runs. The container image will contain its own copies (T15).
 
 ## Run
 
@@ -25,7 +25,7 @@ curl -L --fail -o ~/models/whisper/ggml-large-v3-turbo.bin \
 whisper-server -m ~/models/whisper/ggml-large-v3-turbo.bin --host 127.0.0.1 --port 8081 -l en -t 8
 ```
 
-Reachability from the container is **not verified yet** (Docker is not installed on this machine). With Docker Desktop for Mac, `host.docker.internal` is expected to reach services bound to the host's loopback. If it does not, bind `whisper-server` with `--host 0.0.0.0` and start Ollama with `OLLAMA_HOST=0.0.0.0`, and restrict the ports with the macOS firewall. T15 settles this.
+Reachability from the container is **not verified yet** (this machine uses Podman 6.2.0 with `podman machine`, 8 CPUs, 6 GiB). `host.containers.internal` is expected to reach the host, but whether services bound to `127.0.0.1` are visible from the Podman VM is not confirmed. If they are not, bind `whisper-server` with `--host 0.0.0.0` and start Ollama with `OLLAMA_HOST=0.0.0.0`, and restrict the ports with the macOS firewall. T15 settles this.
 
 Check that both are up:
 

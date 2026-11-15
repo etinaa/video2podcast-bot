@@ -4,7 +4,7 @@ Source spec: `SPEC.md` (V1, approved). Tasks are tracked in `tasks/todo.md`.
 
 ## Overview
 
-A Telegram bot (Java 27, Spring Boot 4.1.2, Maven) that takes a video URL, downloads the audio with `yt-dlp`, transcribes it with whisper.cpp, and summarizes it with Ollama (`qwen3:32b`). It replies with an HTML summary and two buttons. **Download audio** sends the audio (compressed only if over 50 MB). **Download transcript** sends a `.txt`. Access is an owner-managed allowlist with an Approve/Deny request flow. Job state lives in `job.json` files with a 1-hour retention. The bot runs in docker-compose. Ollama and whisper.cpp run on the macOS host.
+A Telegram bot (Java 27, Spring Boot 4.1.2, Maven) that takes a video URL, downloads the audio with `yt-dlp`, transcribes it with whisper.cpp, and summarizes it with Ollama (`qwen3:32b`). It replies with an HTML summary and two buttons. **Download audio** sends the audio (compressed only if over 50 MB). **Download transcript** sends a `.txt`. Access is an owner-managed allowlist with an Approve/Deny request flow. Job state lives in `job.json` files with a 1-hour retention. The bot runs in a Podman container via `podman compose`. Ollama and whisper.cpp run on the macOS host.
 
 ## Architecture Decisions
 
@@ -35,7 +35,7 @@ T1 skeleton ─┬─ T2 telegram spike ─┬─ T4 access store ─ T5 auth ga
                                                                ├─ T13 audio btn       │
                                                                └─ T14 retention ◄─────┘
                                                                          │
-                                                      T15 docker/compose ─ T16 hardening ─ T17 smoke tests
+                                                      T15 podman/compose ─ T16 hardening ─ T17 smoke tests
 ```
 
 **Parallel opportunities** (after T3): the access track (T4–T6), the media and model clients (T8, T9, T10), and the job store (T7) have no shared files and can be built in any order or in parallel. T11 is the join point. T12 and T13 are independent of each other once T11 is done.
@@ -72,7 +72,7 @@ See `tasks/todo.md` for the checklist with acceptance criteria and verification 
 - Checkpoint 4
 
 ### Phase 5: Packaging and hardening
-- T15 Dockerfile, docker-compose, and host setup docs
+- T15 Dockerfile, Podman compose file, and host setup docs
 - T16 Failure-mode and restart integration tests
 - T17 Real-world smoke tests (short and 3-hour video)
 - Checkpoint: Complete
@@ -87,9 +87,9 @@ See `tasks/todo.md` for the checklist with acceptance criteria and verification 
 | Ollama default context is too small and silently truncates long prompts | High | T10 sets `num_ctx` on every request. A unit test asserts the chunk size fits the context. T17 runs a real 3-hour transcript. |
 | `qwen3:32b` is slow, and a 3-hour transcript needs many map-reduce calls | Med | Measured in T17. Chunk size and model are configurable, and `qwen3:14b` is a documented fallback. The progress message shows summarization progress. |
 | Memory pressure from Whisper and a 32B model loaded together (64 GB) | Med | Stages run sequentially and Ollama's `keep_alive` is configured. Measured in T17. |
-| `yt-dlp` breaks when sites change | Med | The Docker image installs the latest `yt-dlp` at build time, and docs describe `docker compose build --no-cache` to update. Download errors map to a clear user message. |
+| `yt-dlp` breaks when sites change | Med | The container image installs the latest `yt-dlp` at build time, and docs describe `podman compose build --no-cache` to update. Download errors map to a clear user message. |
 | A 3-hour video at 37 kbps AAC is too low quality, or the result is still over 50 MB | Low | The size is verified after encoding, with one retry at a lower bitrate. The bot tells the user the result was compressed. Local Bot API server is in the V2 list. |
-| Docker on macOS can't reach host services | Low | `host.docker.internal` is used and checked in T15. A health check reports unreachable services to the user (T16). |
+| The Podman VM can't reach host services | Med | `host.containers.internal` is used and checked in T15 (services bound to `127.0.0.1` may need `0.0.0.0`). Podman machine has 6 GiB of memory, enough for the bot and `ffmpeg`. A health check reports unreachable services to the user (T16). |
 | Concurrent button taps cause double sends | Med | Per-job lock and `SENDING` state (T12, T13), covered by a concurrency test. |
 
 ## Open Questions

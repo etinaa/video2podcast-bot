@@ -23,7 +23,7 @@ A Telegram bot that summarizes a video and, on request, delivers its audio and t
 1. A small trusted group, not a public service. Access is controlled by an allowlist of Telegram user ids managed by the owner from inside the bot (see Access Control). No accounts or billing.
 2. Video sources are whatever `yt-dlp` supports, with YouTube as the primary target.
 3. Telegram integration uses long polling. No public endpoint or webhook is needed, and nothing is exposed to the internet.
-4. Everything runs locally on the owner's Mac (Apple M3 Max, 64 GB RAM) with no paid external APIs. Ollama and whisper.cpp run on the host with Apple GPU (Metal) acceleration. Only the bot runs in docker-compose.
+4. Everything runs locally on the owner's Mac (Apple M3 Max, 64 GB RAM) with no paid external APIs. Ollama and whisper.cpp run on the host with Apple GPU (Metal) acceleration. Only the bot runs in a container, managed with Podman (`podman compose`).
 5. The source audio and the transcript are kept in a per-job working directory between the summary and the button taps, so the audio does not have to be downloaded again. A small `job.json` file in that directory stores the job state, so the button still works after a bot restart. No database.
 6. Working files are kept for 1 hour (`JOB_RETENTION`, default `PT1H`), counted from the moment the summary message is sent. When the hour ends, everything in the job directory is deleted, including any file that was not requested. After that a button tap reports that the files have expired and asks the user to resend the link. A file that was already delivered stays in the chat.
 7. Jobs run one at a time (a simple queue), because the local models are the bottleneck. Audio preparation goes through the same queue.
@@ -33,10 +33,10 @@ A Telegram bot that summarizes a video and, on request, delivers its audio and t
 - Java 27, Spring Boot 4.1.2, Maven (set `<java.version>27</java.version>`)
 - Telegram: `org.telegram:telegrambots-springboot-longpolling-starter` (long polling) with inline keyboards, callback queries, `sendAudio` and `sendDocument`. Its compatibility with Spring Boot 4 is unverified (see Open Questions). The fallback is the plain `telegrambots-longpolling` client wired as a Spring bean.
 - Telegram file size: the cloud Bot API limits bot uploads to 50 MB. V1 uses the standard cloud API, with no local Bot API server. The audio step compresses only when needed (see Audio Delivery).
-- Video download and audio extraction: `yt-dlp` and `ffmpeg`, installed in the bot's Docker image and invoked as external processes. A temporary 16 kHz mono WAV is made for Whisper and deleted after transcription.
-- Transcription: whisper.cpp `whisper-server` on the macOS host (installed separately, e.g. via Homebrew, with Metal). Model `large-v3-turbo`, language forced to `en`. Audio is split into about 10-minute chunks so progress can be reported and failures retried per chunk. The bot reaches it at `http://host.docker.internal:<port>`.
+- Video download and audio extraction: `yt-dlp` and `ffmpeg`, installed in the bot's container image and invoked as external processes. A temporary 16 kHz mono WAV is made for Whisper and deleted after transcription.
+- Transcription: whisper.cpp `whisper-server` on the macOS host (installed separately, e.g. via Homebrew, with Metal). Model `large-v3-turbo`, language forced to `en`. Audio is split into about 10-minute chunks so progress can be reported and failures retried per chunk. The bot reaches it at `http://host.containers.internal:<port>`.
 - Summary: Ollama on the macOS host (native app or Homebrew, with Metal), called through its HTTP API (`/api/chat`) behind a small `LlmClient` interface so the backend can be swapped (for example for llama.cpp's `llama-server`) without touching the rest. Default model `qwen3:32b`. The model is configurable. Ollama's default context window is small, so each request sets `num_ctx` explicitly, and the chunk size is derived from it. Long transcripts use map-reduce: summarize chunks, then summarize the summaries.
-- Deployment: docker-compose with one service, `bot`. Ollama and whisper.cpp stay on the host because Docker on macOS has no GPU access. A named volume holds the job working directories, and a separate named volume holds `allowed-users.json` so job cleanup never touches it.
+- Deployment: Podman (rootless, `podman machine` on macOS) with a compose file and one service, `bot`, run through `podman compose` (`podman-compose` provider). The compose file avoids Docker-only extensions. Ollama and whisper.cpp stay on the host because containers on macOS have no GPU access. A named volume holds the job working directories, and a separate named volume holds `allowed-users.json` so job cleanup never touches it.
 - Tests: JUnit 5, Mockito, Spring Boot Test, WireMock for the Whisper and Ollama APIs
 - Static analysis: SpotBugs with FindSecBugs and PMD (rules in `config/pmd-ruleset.xml`), both run in `./mvnw verify` and fail the build on findings
 
@@ -50,14 +50,14 @@ Static check: ./mvnw spotbugs:check pmd:check
 Verify:       ./mvnw verify
 Run (dev):    ./mvnw spring-boot:run -Dspring-boot.run.profiles=dev
 Run (jar):    java -jar target/video2podcast-bot.jar
-Docker build: docker build -t video2podcast-bot .
-Compose up:   docker compose up -d --build
-Compose logs: docker compose logs -f bot
-Compose down: docker compose down
+Image build:  podman build -t video2podcast-bot .
+Compose up:   podman compose up -d --build
+Compose logs: podman compose logs -f bot
+Compose down: podman compose down
 Host (once):  ollama pull qwen3:32b
 Host (run):   whisper-server --model <path-to-ggml-large-v3-turbo.bin> --port 8081
 ```
-Required env vars: `TELEGRAM_BOT_TOKEN`, `ADMIN_USER_ID`, `ACCESS_FILE` (default `/data/allowed-users.json`, on a separate volume from the job files), `OLLAMA_BASE_URL` (default `http://host.docker.internal:11434`), `OLLAMA_MODEL` (default `qwen3:32b`), `WHISPER_BASE_URL` (default `http://host.docker.internal:8081`), `WORK_DIR`, `MAX_VIDEO_DURATION` (default `PT3H`), `JOB_RETENTION` (default `PT1H`), `ACCESS_REQUEST_COOLDOWN` (default `PT24H`). They are read from the environment only and never committed.
+Required env vars: `TELEGRAM_BOT_TOKEN`, `ADMIN_USER_ID`, `ACCESS_FILE` (default `/data/allowed-users.json`, on a separate volume from the job files), `OLLAMA_BASE_URL` (default `http://host.containers.internal:11434`), `OLLAMA_MODEL` (default `qwen3:32b`), `WHISPER_BASE_URL` (default `http://host.containers.internal:8081`), `WORK_DIR`, `MAX_VIDEO_DURATION` (default `PT3H`), `JOB_RETENTION` (default `PT1H`), `ACCESS_REQUEST_COOLDOWN` (default `PT24H`). They are read from the environment only and never committed.
 
 ## Project Structure
 ```
@@ -71,8 +71,8 @@ src/main/java/com/video2podcast/
   config/       → Typed @ConfigurationProperties, beans
 src/main/resources/ → application.yml, application-dev.yml
 src/test/java/      → Unit and integration tests mirroring main packages
-docker-compose.yml  → bot service and the work volume
-Dockerfile          → JDK 27 runtime + yt-dlp + ffmpeg
+compose.yaml         → bot service and the work volume (Podman compose)
+Dockerfile          → JDK 27 runtime + yt-dlp + ffmpeg (built by Podman)
 docs/               → Host setup (Ollama, whisper.cpp) and troubleshooting
 SPEC.md             → This file
 ```
@@ -222,8 +222,8 @@ While work is running, one status message is edited with the current stage (queu
 - Non-English transcription and translation.
 - Chapters, cover art, and TTS rewriting of the summary.
 - Other chat platforms (Discord, Slack).
-- Running Ollama and Whisper inside Docker: no GPU on macOS, so deferred until the bot moves to a Linux host with a GPU.
+- Running Ollama and Whisper inside a container: no GPU on macOS, so deferred until the bot moves to a Linux host with a GPU.
 
 ## Open Questions
-1. **Java 27 / Spring Boot 4.1.2 compatibility (to verify in the plan phase):** I'll check that the Telegram library, Spotless/google-java-format, JaCoCo, and Mockito work on Java 27 and Boot 4.1.2. If one doesn't, I'll use the fallback noted in the Tech Stack and flag it to you. Docker images must use a JDK 27 base.
+1. **Java 27 / Spring Boot 4.1.2 compatibility (to verify in the plan phase):** I'll check that the Telegram library, Spotless/google-java-format, JaCoCo, and Mockito work on Java 27 and Boot 4.1.2. If one doesn't, I'll use the fallback noted in the Tech Stack and flag it to you. Container images must use a JDK 27 base.
 2. ~~**whisper.cpp server API**~~ **Resolved in T3:** `POST /inference` (multipart: `file`, `response_format`, `language`, `temperature`) returns `{"text": ...}`. Errors are plain text. Ollama findings: `think: false` is required for `qwen3`, and a prompt longer than `num_ctx` is truncated silently. Details in `docs/host-setup.md`.

@@ -11,10 +11,10 @@ app:
     file: ${ACCESS_FILE:/data/allowed-users.json}
     request-cooldown: ${ACCESS_REQUEST_COOLDOWN:PT24H}
   ollama:
-    base-url: ${OLLAMA_BASE_URL:http://host.docker.internal:11434}
+    base-url: ${OLLAMA_BASE_URL:http://host.containers.internal:11434}
     model: ${OLLAMA_MODEL:qwen3:32b}
   whisper:
-    base-url: ${WHISPER_BASE_URL:http://host.docker.internal:8081}
+    base-url: ${WHISPER_BASE_URL:http://host.containers.internal:8081}
   jobs:
     work-dir: ${WORK_DIR:/work}
     max-video-duration: ${MAX_VIDEO_DURATION:PT3H}

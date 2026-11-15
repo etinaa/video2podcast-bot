@@ -172,14 +172,14 @@ Sizes: S = 1-2 files, M = 3-5 files.
 
 ## Phase 5: Packaging and hardening
 
-- [ ] **T15: Dockerfile, docker-compose, and host setup docs** (M)
+- [ ] **T15: Dockerfile, Podman compose file, and host setup docs** (M)
   - Acceptance:
     - A multi-stage `Dockerfile` (JDK 27) with `yt-dlp` and `ffmpeg`, running as a non-root user.
-    - `docker-compose.yml` with the `bot` service, a work volume, a separate data volume for `allowed-users.json`, `host.docker.internal` access, env vars from `.env`, and no published ports.
+    - `compose.yaml` (runs with `podman compose` / `podman-compose`, no Docker-only extensions) with the `bot` service, a work volume, a separate data volume for `allowed-users.json`, `host.containers.internal` access, env vars from `.env`, and no published ports.
     - `.env.example` lists every variable (no secrets), and `.gitignore` excludes `.env`. `docs/host-setup.md` covers the full setup.
-  - Verify: `docker compose build` succeeds, and `docker compose up -d` starts the bot, which reaches host Ollama and Whisper (`docker compose logs bot` shows the health check passing).
+  - Verify: `podman compose build` succeeds, and `podman compose up -d` starts the bot, which reaches host Ollama and Whisper (`podman compose logs bot` shows the health check passing).
   - Depends on: T11
-  - Files: `Dockerfile`, `docker-compose.yml`, `.env.example`, `.gitignore`, `docs/host-setup.md`
+  - Files: `Dockerfile`, `compose.yaml`, `.env.example`, `.gitignore`, `docs/host-setup.md`
 
 - [ ] **T16: Failure-mode and restart integration tests** (M)
   - Acceptance:
@@ -201,5 +201,5 @@ Sizes: S = 1-2 files, M = 3-5 files.
 
 ### Checkpoint: Complete
 - [ ] All 15 success criteria in `SPEC.md` are met
-- [ ] `./mvnw verify` is green and `docker compose up -d` works from a clean checkout
+- [ ] `./mvnw verify` is green and `podman compose up -d` works from a clean checkout
 - [ ] Ready for review
