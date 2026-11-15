@@ -42,6 +42,16 @@ Sizes: S = 1-2 files, M = 3-5 files.
 
 ## Phase 2: Access control
 
+- [ ] **T4a: WireMock functional-test harness** (M) — added at the owner's request; every later task adds its own functional tests on top of it
+  - Acceptance:
+    - A reusable test support (JUnit extension or base class) starts WireMock servers for the Telegram Bot API, Whisper and Ollama, boots the full Spring context against them (fake token, no real network), and offers helpers to feed an `Update` to the bot and to assert on the requests WireMock received.
+    - The Telegram base URL is configurable (`app.telegram.api-url`, default the real API) so the production client and the long-polling starter can be pointed at WireMock. In functional tests the bot is driven directly and long polling does not run.
+    - The `/whoami` flow is covered as the first functional test (`WhoamiFT`): a private message gets one `sendMessage` with the sender's id, and a group message gets none.
+    - Functional tests are named `*FT`, run in `./mvnw verify`, need no network and no secrets, and do not count toward the coverage gate.
+  - Verify: `./mvnw verify` passes with `WhoamiFT` included.
+  - Depends on: T4
+  - Files: `config/TelegramConfig.java`, `application.yml`, `src/test/java/com/video2podcast/functional/*` (support and `WhoamiFT`)
+
 - [x] **T4: Allowlist store and access service** (M)
   - Acceptance:
     - `AccessStore` reads and writes `allowed-users.json` atomically (temp file and rename) behind a lock, with an in-memory cache and reload on start.
@@ -55,8 +65,9 @@ Sizes: S = 1-2 files, M = 3-5 files.
     - Every update passes one gate before any handler. Group and channel updates are ignored.
     - An unknown user gets the rate-limited refusal ("No access. Send /start to request it. Your id: …"), and `/start` from an unknown user creates a pending request and replies "Access requested".
     - `/whoami` works for everyone. Allowed users get a help text on `/start`.
+    - Functional test `AccessGateFT`: an unknown user gets one refusal per minute and `/start` creates a request; an allowed user gets the help text; `/whoami` works for everyone; a group message gets no reply.
   - Verify: `./mvnw test -Dtest=AuthorizationGateTest` covers owner, allowed, unknown, group chat, callback from unknown, and `/whoami` for everyone.
-  - Depends on: T2, T4
+  - Depends on: T2, T4, T4a
   - Files: `access/AuthorizationGate.java`, `bot/BotUpdateHandler.java`, tests
 
 - [ ] **T6: Owner commands and the Approve/Deny flow** (M)
@@ -65,6 +76,7 @@ Sizes: S = 1-2 files, M = 3-5 files.
     - Approve adds the user and notifies them. Deny removes the request, notifies them, and starts the cooldown.
     - `/allow <id>`, `/deny <id>`, and `/users` work for the owner only. The owner can't be removed. Events are logged (who, whom, when).
     - Pending requests and their buttons survive a restart.
+    - Functional test `AccessApprovalFT`: an unknown user's `/start` makes the owner receive the request with Approve and Deny buttons; tapping Approve notifies the user and lets them in; tapping Deny refuses them and the cooldown applies; a non-owner tap is rejected.
   - Verify: `./mvnw test -Dtest=AdminCommandsTest` covers owner-only enforcement, approve and deny, cooldown, notifications, a restart with pending requests, and HTML escaping.
   - Depends on: T5
   - Files: `access/AdminCommands.java`, `access/AccessRequestFlow.java`, `bot/Keyboards.java`, tests
@@ -120,7 +132,8 @@ Sizes: S = 1-2 files, M = 3-5 files.
     - An allowed user's URL message gets an acknowledgement within 5 seconds, then one status message that is edited through the stages (queued, downloading, transcribing n/N, summarizing).
     - On success the bot sends the HTML message (title, duration, bullets) with **Download audio** and **Download transcript** buttons (`audio:<jobId>`, `transcript:<jobId>`) and saves `job.json` with `expiresAt` = send time + 1 hour. **No audio or transcript file is sent.**
     - Failures produce a clear message and remove the job directory. Title and summary are HTML-escaped.
-  - Verify: `./mvnw test -Dtest=PipelineIntegrationTest` (Spring Boot Test with WireMock and stubbed process runner): link, status edits, final message with two buttons, `job.json` content, no file uploads. Failure paths clean up the directory.
+    - Functional test `SummaryFlowFT` (replaces `PipelineIntegrationTest`): link, status edits, final message with two buttons, `job.json`, no file uploads; Whisper and Ollama are WireMock servers built from the T3 fixtures and `yt-dlp`/`ffmpeg` are a fake `ProcessRunner`.
+  - Verify: `./mvnw test -Dtest=SummaryFlowFT` (functional test on the T4a harness): link, status edits, final message with two buttons, `job.json` content, no file uploads. Failure paths clean up the directory.
   - Depends on: T5, T7, T8, T9, T10
   - Files: `job/PipelineService.java`, `bot/UrlMessageHandler.java`, `bot/SummaryMessageFormatter.java`, `bot/BotUpdateHandler.java`, test
 
@@ -135,6 +148,7 @@ Sizes: S = 1-2 files, M = 3-5 files.
   - Acceptance:
     - Tapping **Download transcript** from the job's owner sends `<title>.txt` with `sendDocument`. The file state goes `AVAILABLE` → `SENDING` → `SENT`, and the button changes to "Transcript sent". The audio button stays active.
     - A second tap, or a tap at the same moment, sends the file once. A tap from another user is rejected. A tap on an expired or missing job gives "expired, please resend the link".
+    - Functional test `TranscriptButtonFT`: the tap sends the `.txt` once through `sendDocument`; a second tap, another user, and an expired job are handled.
   - Verify: `./mvnw test -Dtest=TranscriptButtonTest` covers the happy path, double tap, concurrent taps, another user, and expired.
   - Depends on: T11
   - Files: `bot/DeliveryCallbackHandler.java`, `job/DeliveryService.java`, `bot/Keyboards.java`, test
@@ -143,6 +157,7 @@ Sizes: S = 1-2 files, M = 3-5 files.
   - Acceptance:
     - `AudioPreparer` follows the compression rule: a file of 50 MB or less in MP3 or M4A is returned unchanged. A smaller file in another format is converted to M4A at 128 kbps. A file over 50 MB is re-encoded to mono AAC at `48 MiB × 8 / duration`, verified under 50 MB, with one retry at a lower bitrate.
     - Tapping **Download audio** goes through the job queue, shows "Preparing audio…", sends with `sendAudio` (title and performer set), and notes whether and how it was compressed. The same one-send, owner-only, and expired rules as T12 apply.
+    - Functional test `AudioButtonFT`: the tap sends audio through `sendAudio`, unchanged and compressed cases, with the same one-send and owner-only rules.
   - Verify: `./mvnw test -Dtest='AudioPreparerTest,AudioButtonTest'` covers each branch of the rule (the unchanged branch must return the same path), the bitrate for a 3-hour input, the retry, and the button rules.
   - Depends on: T11, T12
   - Files: `media/AudioPreparer.java`, `media/FfmpegRunner.java`, `bot/DeliveryCallbackHandler.java`, `job/DeliveryService.java`, tests
@@ -152,18 +167,10 @@ Sizes: S = 1-2 files, M = 3-5 files.
     - A `@Scheduled` sweeper (every minute) and a run at startup delete files whose `expiresAt` has passed and mark them `EXPIRED`. A job directory is removed when every file is `SENT` or `EXPIRED`, or when its retention is over. Failed jobs are removed immediately.
     - At startup, `SENDING` files go back to `AVAILABLE`, and directories with a missing or corrupt `job.json` are removed.
     - After expiry the summary message buttons are replaced with "expired" (best effort).
+    - Functional test `ExpiryFT`: after the retention time the files are gone and a tap gets "expired"; a restart between the summary and the tap keeps the buttons working.
   - Verify: `./mvnw test -Dtest=RetentionSweeperTest` with a fake clock and a temp directory: expiry, partial delivery, all delivered, `SENDING` recovery, corrupt `job.json`.
   - Depends on: T7, T12, T13
   - Files: `job/RetentionSweeper.java`, `job/JobRecovery.java`, `bot/Keyboards.java`, tests
-
-- [ ] **T18: WireMock functional tests of the whole bot** (M) — added at the owner's request; numbered last to keep T1-T17 stable
-  - Acceptance:
-    - Functional tests (`*FT`) start the full Spring context with Telegram Bot API, Whisper and Ollama as WireMock servers (using the T3 fixtures) and a fake `ProcessRunner` for `yt-dlp`/`ffmpeg`. Updates are fed to the bot and assertions are made on the requests WireMock received.
-    - Scenarios: unknown user requests access and the owner approves; allowed user sends a link and gets exactly one summary message with two buttons and no file uploads; transcript tap sends the `.txt` once; audio tap sends audio (compressed and unchanged cases); tap on an expired job; tap by another user; Whisper or Ollama down gives a clear failure message.
-    - The tests run in `./mvnw verify` and need no network and no secrets.
-  - Verify: `./mvnw verify` passes with the functional tests included.
-  - Depends on: T14
-  - Files: `src/test/java/com/video2podcast/functional/*FT.java`, shared WireMock support class, `pom.xml` (failsafe or surefire include)
 
 ### Checkpoint 4: Full flow
 - [ ] All tests pass
@@ -184,11 +191,11 @@ Sizes: S = 1-2 files, M = 3-5 files.
 - [ ] **T16: Failure-mode and restart integration tests** (M)
   - Acceptance:
     - Startup health check and per-job checks report "Ollama unreachable" or "Whisper unreachable" to the user, without hanging.
-    - Integration tests cover: restart between summary and button tap (buttons still work), restart with pending access requests, private/unsupported/too-long URL, non-allowlisted callbacks, and another user's button.
+    - Functional tests (`*FT`) cover the failure paths that earlier tasks did not: Whisper or Ollama down, private/unsupported/too-long URL, non-allowlisted callbacks, restart with pending access requests.
     - The JaCoCo gate requires at least 90% line coverage and 90% branch coverage across all production code, including `access` and `config`, measured from unit tests only. `./mvnw clean verify` generates `target/site/jacoco/index.html` and enforces both `COVEREDRATIO` minimums of `0.90` through `jacoco:check`; either threshold being missed fails the build. Integration-test coverage does not count toward the gate.
   - Verify: `./mvnw verify` passes with the gate on.
-  - Depends on: T14, T15, T18
-  - Files: `job/HealthChecks.java`, `RestartRecoveryIT.java`, `FailureModesIT.java`, `pom.xml`
+  - Depends on: T14, T15
+  - Files: `job/HealthChecks.java`, `FailureModesFT.java`, `pom.xml`
 
 - [ ] **T17: Real-world smoke tests (short and 3-hour video)** (S)
   - Acceptance:
