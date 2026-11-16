@@ -28,7 +28,10 @@ agent_args() {
     reviewer-claude)
       printf '%s\n' claude --model "$sonnet" --settings "$root/.claude/roles/reviewer.settings.json" ;;
     analyst)
-      printf '%s\n' codex -m "$sol" -s workspace-write -a on-request --search \
+      # Live web search comes from the profile ~/.codex/analyst.config.toml (web_search = "live"):
+      # --search is a command-line config override, which Codex rejects outside embedded mode and
+      # stops at a startup warning.
+      printf '%s\n' codex -p analyst -m "$sol" -s workspace-write -a on-request \
         -C "$root/tasks" --add-dir "$root/src/features" --add-dir "$root/docs" ;;
     tester)
       printf '%s\n' codex -m "$sol" -s workspace-write -a on-request \
@@ -78,8 +81,9 @@ start() {
   local kind="${args[0]}"
   local pane
   pane="$(free_pane "$task")"
-  herdr agent start "$role" --kind "$kind" --pane "$pane" --timeout 60000 -- "${args[@]:1}" >/dev/null
+  # Recorded before the start, so `role.sh stop` can close the pane when the agent fails to start.
   echo "$pane" >"$state/$task.$role.pane"
+  herdr agent start "$role" --kind "$kind" --pane "$pane" --timeout 60000 -- "${args[@]:1}" >/dev/null
   herdr agent prompt "$role" "You are the $role of task $task. Read $(role_file "$role") and follow it. \
 The task is $task in tasks/todo.md, its brief is tasks/$task/brief.md, and its working files are in \
 tasks/$task/. ${message}" >/dev/null
