@@ -22,8 +22,21 @@
     <wiremock.version>3.13.2</wiremock.version>
     <pmd.version>7.29.0</pmd.version>
     <telegrambots.version>10.3.0</telegrambots.version>
+    <cucumber.version>8.0.4</cucumber.version>
     <jacoco.unit.argLine/>
   </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>io.cucumber</groupId>
+        <artifactId>cucumber-bom</artifactId>
+        <version>${cucumber.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
 
   <dependencies>
     <dependency>
@@ -62,6 +75,26 @@
       <version>${wiremock.version}</version>
       <scope>test</scope>
     </dependency>
+    <dependency>
+      <groupId>io.cucumber</groupId>
+      <artifactId>cucumber-java</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.cucumber</groupId>
+      <artifactId>cucumber-spring</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.cucumber</groupId>
+      <artifactId>cucumber-junit-platform-engine</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.platform</groupId>
+      <artifactId>junit-platform-suite</artifactId>
+      <scope>test</scope>
+    </dependency>
   </dependencies>
 
   <build>
@@ -78,6 +111,11 @@
         <version>3.11.0</version>
         <configuration>
           <java>
+            <includes>
+              <include>src/main/java/**/*.java</include>
+              <include>src/test/java/**/*.java</include>
+              <include>src/it/java/**/*.java</include>
+            </includes>
             <googleJavaFormat/>
           </java>
         </configuration>
@@ -98,27 +136,9 @@
           <argLine>@{jacoco.unit.argLine}</argLine>
           <failIfNoTests>true</failIfNoTests>
           <excludes>
-            <exclude>**/*FT.java</exclude>
+            <exclude>**/*IT.java</exclude>
           </excludes>
         </configuration>
-        <executions>
-          <!-- Functional tests run after the unit tests, without the JaCoCo agent, so they do
-               not count toward the coverage gate. -->
-          <execution>
-            <id>functional-tests</id>
-            <phase>integration-test</phase>
-            <goals>
-              <goal>test</goal>
-            </goals>
-            <configuration>
-              <argLine>-Dfile.encoding=UTF-8</argLine>
-              <excludes combine.self="override"/>
-              <includes>
-                <include>**/*FT.java</include>
-              </includes>
-            </configuration>
-          </execution>
-        </executions>
       </plugin>
 
       <plugin>
@@ -233,4 +253,81 @@
       </plugin>
     </plugins>
   </build>
+  <profiles>
+    <!-- On by default. `-Dno-it` builds without src/it, so the Developer's checks do not depend on
+         tests the Tester is still writing. -->
+    <profile>
+      <id>it</id>
+      <activation>
+        <property>
+          <name>!no-it</name>
+        </property>
+      </activation>
+      <build>
+        <plugins>
+          <!-- Integration and acceptance tests (owned by the Tester) live in src/it: JUnit *IT
+               classes and Cucumber steps. The Gherkin features they run are owned by the Analyst and
+               live in src/features, on the test classpath under features/. -->
+          <plugin>
+            <groupId>org.codehaus.mojo</groupId>
+            <artifactId>build-helper-maven-plugin</artifactId>
+            <version>3.6.1</version>
+            <executions>
+              <execution>
+                <id>add-it-sources</id>
+                <phase>generate-test-sources</phase>
+                <goals>
+                  <goal>add-test-source</goal>
+                </goals>
+                <configuration>
+                  <sources>
+                    <source>src/it/java</source>
+                  </sources>
+                </configuration>
+              </execution>
+              <execution>
+                <id>add-it-resources</id>
+                <phase>generate-test-resources</phase>
+                <goals>
+                  <goal>add-test-resource</goal>
+                </goals>
+                <configuration>
+                  <resources>
+                    <resource>
+                      <directory>src/it/resources</directory>
+                    </resource>
+                    <resource>
+                      <directory>src/features</directory>
+                      <targetPath>features</targetPath>
+                    </resource>
+                  </resources>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+
+          <!-- Integration tests run after the unit tests, without the JaCoCo agent, so they do not
+               count toward the coverage gate. -->
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-failsafe-plugin</artifactId>
+            <configuration>
+              <argLine>-Dfile.encoding=UTF-8</argLine>
+              <includes>
+                <include>**/*IT.java</include>
+              </includes>
+            </configuration>
+            <executions>
+              <execution>
+                <goals>
+                  <goal>integration-test</goal>
+                  <goal>verify</goal>
+                </goals>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
 </project>

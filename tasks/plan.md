@@ -51,7 +51,7 @@ See `tasks/todo.md` for the checklist with acceptance criteria and verification 
 - Checkpoint 1
 
 ### Phase 2: Access control
-- T4a WireMock functional-test harness (Telegram, Whisper, Ollama); T5 onward each add their own `*FT` tests
+- T4a WireMock functional-test harness (Telegram, Whisper, Ollama); T5 onward each add their own `*IT` tests
 - T4 Allowlist store and access service
 - T5 Authorization gate for messages and callbacks
 - T6 Owner commands and the Approve/Deny flow

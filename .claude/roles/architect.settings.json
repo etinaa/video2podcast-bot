@@ -1,0 +1,43 @@
+{
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(herdr agent prompt:*)",
+      "Bash(herdr agent list:*)",
+      "Bash(herdr agent get:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(echo:*)",
+      "Bash(mkdir -p:*)"
+    ],
+    "deny": [
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git reset:*)",
+      "Bash(git checkout:*)",
+      "Bash(git restore:*)",
+      "Bash(git stash:*)",
+      "Bash(git push:*)",
+      "Bash(git rm:*)",
+      "Edit(./.claude/**)",
+      "Write(./.claude/**)",
+      "Edit(./CLAUDE.md)",
+      "Write(./CLAUDE.md)",
+      "Edit(./tasks/todo.md)",
+      "Write(./tasks/todo.md)",
+      "Edit(./src/**)",
+      "Write(./src/**)",
+      "Edit(./pom.xml)",
+      "Write(./pom.xml)",
+      "Edit(./config/**)",
+      "Write(./config/**)",
+      "Edit(./deploy/**)",
+      "Write(./deploy/**)",
+      "Bash(./mvnw:*)"
+    ]
+  }
+}

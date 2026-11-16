@@ -6,7 +6,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 
-class AccessApprovalFT extends FunctionalTest {
+class AccessApprovalIT extends FunctionalTest {
 
   /** The one message to the owner that mentions the user (the owner chat is shared by tests). */
   private static JsonNode requestFor(long userId) {

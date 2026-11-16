@@ -5,7 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.video2podcast.access.PendingRequest;
 import org.junit.jupiter.api.Test;
 
-class AccessGateFT extends FunctionalTest {
+class AccessGateIT extends FunctionalTest {
 
   @Test
   void unknownUserGetsOneRefusalNoMatterHowManyMessagesTheySend() {
