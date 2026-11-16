@@ -28,10 +28,11 @@ agent_args() {
     reviewer-claude)
       printf '%s\n' claude --model "$sonnet" --settings "$root/.claude/roles/reviewer.settings.json" ;;
     analyst)
-      # Live web search comes from the profile ~/.codex/analyst.config.toml (web_search = "live"):
-      # --search is a command-line config override, which Codex rejects outside embedded mode and
-      # stops at a startup warning.
-      printf '%s\n' codex -p analyst -m "$sol" -s workspace-write -a on-request \
+      # Live web search comes from the profile ~/.codex/analyst.config.toml (web_search = "live").
+      # A profile, like --search, works only in embedded mode: with the shared background server
+      # running, Codex falls back to it and stops at a startup warning. --no-daemon asks for
+      # embedded mode up front.
+      printf '%s\n' codex --no-daemon -p analyst -m "$sol" -s workspace-write -a on-request \
         -C "$root/tasks" --add-dir "$root/src/features" --add-dir "$root/docs" ;;
     tester)
       printf '%s\n' codex -m "$sol" -s workspace-write -a on-request \
