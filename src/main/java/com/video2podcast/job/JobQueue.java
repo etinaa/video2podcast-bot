@@ -68,6 +68,8 @@ public class JobQueue implements AutoCloseable {
       LOG.error("Queued task failed", e);
       result.completeExceptionally(e);
     } finally {
+      // An Error skips both branches above; its future must still complete so nobody waits forever.
+      result.completeExceptionally(new IllegalStateException("Queued task ended abnormally"));
       open.remove(result);
     }
   }

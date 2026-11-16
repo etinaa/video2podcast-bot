@@ -6,15 +6,15 @@ import com.video2podcast.storage.Json;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
@@ -33,6 +33,7 @@ public class JobStore {
   private static final Logger LOG = LoggerFactory.getLogger(JobStore.class);
 
   private static final String JOB_FILE = "job.json";
+  private static final int LOCK_STRIPES = 64;
   private static final Pattern JOB_ID = Pattern.compile("[A-Za-z0-9_-]{1,40}");
 
   /** The outcome of {@link #transition}. */
@@ -47,11 +48,20 @@ public class JobStore {
 
   private final Path workDir;
   private final Clock clock;
-  private final ConcurrentMap<String, ReentrantLock> locks = new ConcurrentHashMap<>();
+
+  /**
+   * A fixed set of locks, picked by job id. They are never created or dropped while the store runs,
+   * so two callers working on the same job always meet at the same lock, and a few jobs sharing one
+   * lock is harmless because no operation holds two jobs at once.
+   */
+  private final ReentrantLock[] locks = new ReentrantLock[LOCK_STRIPES];
 
   public JobStore(Path workDir, Clock clock) {
     this.workDir = workDir;
     this.clock = clock;
+    for (int i = 0; i < locks.length; i++) {
+      locks[i] = new ReentrantLock();
+    }
   }
 
   public static String newJobId() {
@@ -74,9 +84,20 @@ public class JobStore {
     return directory(jobId).resolve(file.path());
   }
 
-  /** Creates the job directory (if needed) and writes its {@code job.json}. */
+  /**
+   * Creates the job directory (if needed) and writes its {@code job.json}.
+   *
+   * @throws IllegalStateException if the job already exists, so a stored job is never replaced
+   */
   public void create(JobRecord job) {
-    withLock(job.jobId(), () -> save(job));
+    withLock(
+        job.jobId(),
+        () -> {
+          if (read(job.jobId()).isPresent()) {
+            throw new IllegalStateException("Job " + job.jobId() + " already exists");
+          }
+          save(job);
+        });
   }
 
   /** The stored job, or empty if it does not exist or its {@code job.json} is unusable. */
@@ -84,7 +105,14 @@ public class JobStore {
     return withLock(jobId, () -> read(jobId));
   }
 
-  /** Changes a job under its lock. Returns the new content, or empty if the job does not exist. */
+  /**
+   * Changes a job under its lock. Returns the new content, or empty if the job does not exist. The
+   * change may not touch file states except along the allowed transitions, so this cannot bring a
+   * sent file back; use {@link #transition} to move a file.
+   *
+   * @throws IllegalArgumentException if the change drops a file, moves one along a forbidden
+   *     transition or changes the job id
+   */
   public Optional<JobRecord> update(String jobId, UnaryOperator<JobRecord> change) {
     return withLock(
         jobId,
@@ -95,9 +123,24 @@ public class JobStore {
                   if (!jobId.equals(changed.jobId())) {
                     throw new IllegalArgumentException("A change must keep the job id");
                   }
+                  checkStates(job, changed);
                   save(changed);
                   return changed;
                 }));
+  }
+
+  private static void checkStates(JobRecord before, JobRecord after) {
+    for (Map.Entry<FileKind, JobFile> entry : before.files().entrySet()) {
+      JobFile old = entry.getValue();
+      JobFile now = after.files().get(entry.getKey());
+      if (now == null) {
+        throw new IllegalArgumentException("A change must keep the " + entry.getKey() + " file");
+      }
+      if (now.state() != old.state() && !old.state().canMoveTo(now.state())) {
+        throw new IllegalArgumentException(
+            "A file cannot move from " + old.state() + " to " + now.state());
+      }
+    }
   }
 
   /**
@@ -146,25 +189,18 @@ public class JobStore {
   /** Deletes the job directory with everything in it. Deleting a missing job does nothing. */
   public void delete(String jobId) {
     Path dir = directory(jobId);
-    withLock(
-        jobId,
-        () -> {
-          deleteRecursively(dir);
-          return null;
-        });
-    locks.remove(jobId);
+    withLock(jobId, () -> deleteRecursively(dir));
   }
 
   private Optional<JobRecord> read(String jobId) {
     Path file = directory(jobId).resolve(JOB_FILE);
-    if (!Files.exists(file)) {
-      return Optional.empty();
-    }
     try {
       JobRecord job = Json.MAPPER.readValue(Files.readAllBytes(file), JobRecord.class);
       if (isUsable(job, jobId)) {
         return Optional.of(job);
       }
+    } catch (NoSuchFileException e) {
+      return Optional.empty();
     } catch (JsonProcessingException e) {
       LOG.warn("{} is not valid JSON", file);
     } catch (IOException e) {
@@ -227,7 +263,7 @@ public class JobStore {
 
   private <T> T withLock(String jobId, Supplier<T> action) {
     directory(jobId);
-    ReentrantLock lock = locks.computeIfAbsent(jobId, id -> new ReentrantLock());
+    ReentrantLock lock = locks[Math.floorMod(jobId.hashCode(), locks.length)];
     lock.lock();
     try {
       return action.get();

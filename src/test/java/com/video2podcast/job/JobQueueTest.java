@@ -99,6 +99,18 @@ class JobQueueTest {
   }
 
   @Test
+  void aTaskThatThrowsAnErrorCompletesItsFutureAndDoesNotStopTheQueue() throws Exception {
+    CompletableFuture<Void> broken =
+        queue.submit(() -> {
+          throw new AssertionError("boom");
+        });
+    queue.submit(() -> {}).get(5, TimeUnit.SECONDS);
+
+    assertThat(broken).isCompletedExceptionally();
+    assertThat(queue.size()).isZero();
+  }
+
+  @Test
   void closeWaitsForQueuedTasksAndThenRefusesNewOnes() {
     List<String> ran = Collections.synchronizedList(new ArrayList<>());
     queue.submit(() -> ran.add(slow("one")));

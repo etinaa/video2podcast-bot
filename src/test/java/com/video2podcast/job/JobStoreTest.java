@@ -198,6 +198,68 @@ class JobStoreTest {
     assertThat(store.load(ID)).contains(job(ID));
   }
 
+  @Test
+  void anUpdateCannotBringASentFileBack() {
+    store.create(job(ID));
+    store.transition(ID, FileKind.AUDIO, FileState.AVAILABLE, FileState.SENDING);
+    store.transition(ID, FileKind.AUDIO, FileState.SENDING, FileState.SENT);
+
+    assertThatThrownBy(
+            () -> store.update(ID, j -> j.withFile(FileKind.AUDIO, JobFile.available("audio.m4a"))))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThat(store.load(ID).orElseThrow().files().get(FileKind.AUDIO).state())
+        .isEqualTo(FileState.SENT);
+  }
+
+  @Test
+  void anUpdateCannotDropAFile() {
+    store.create(job(ID));
+
+    assertThatThrownBy(
+            () -> store.update(ID, j -> new JobRecord(ID, 42L, 4242L, null, "t", 1, T0, Map.of())))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThat(store.load(ID)).contains(job(ID));
+  }
+
+  @Test
+  void creatingAJobThatAlreadyExistsIsRefusedAndKeepsTheStoredOne() {
+    store.create(job(ID));
+    store.transition(ID, FileKind.AUDIO, FileState.AVAILABLE, FileState.SENDING);
+    JobRecord stored = store.load(ID).orElseThrow();
+
+    assertThatThrownBy(() -> store.create(job(ID))).isInstanceOf(IllegalStateException.class);
+    assertThat(store.load(ID)).contains(stored);
+  }
+
+  @Test
+  void deletingAndRecreatingAJobWhileOthersUpdateItNeverCorruptsIt() throws Exception {
+    ExecutorService pool = Executors.newFixedThreadPool(4);
+    try {
+      List<Future<?>> runs = new ArrayList<>();
+      for (int i = 0; i < 4; i++) {
+        runs.add(
+            pool.submit(() -> {
+              for (int n = 0; n < 200; n++) {
+                store.delete(ID);
+                try {
+                  store.create(job(ID));
+                } catch (IllegalStateException alreadyRecreated) {
+                  // another thread was faster; the job is there, which is all this test needs
+                }
+                store.update(ID, j -> j);
+              }
+            }));
+      }
+      for (Future<?> run : runs) {
+        run.get();
+      }
+    } finally {
+      pool.shutdownNow();
+    }
+
+    assertThat(store.load(ID)).contains(job(ID));
+  }
+
   // --- transitions ---
 
   @Test
