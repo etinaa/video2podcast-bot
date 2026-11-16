@@ -3,6 +3,8 @@
 Source: `SPEC.md`, plan in `tasks/plan.md`. Package root: `com.video2podcast`.
 Sizes: S = 1-2 files, M = 3-5 files.
 
+**Status:** `[ ]` not started, `[~]` Code Review (waiting for the Claude and Codex reviewers, see `CLAUDE.md`), `[x]` done.
+
 **Commit rule:** every task is a separate commit (`T<N>: <title>`), made after its verification passes, with the task ticked in this file in the same commit.
 
 ## Phase 1: Foundation and risk spikes
