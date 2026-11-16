@@ -56,3 +56,15 @@ not valid JSON or incomplete is reported as "no such job" so the buttons answer 
 **Queue:** `JobQueue` is one worker thread. A task that throws is logged and its future fails, and
 the next task still runs. `close()` waits up to 30 seconds for queued tasks.
 
+
+## D4: Media wrappers (T8)
+
+**Decision:** `yt-dlp` and `ffmpeg` run only through the `ProcessRunner` interface (argument list,
+no shell, timeout, process tree killed on timeout). Failures are `JobFailure(Kind, safeMessage)`;
+raw stderr goes to the log only. Metadata comes from `yt-dlp --dump-json`, the URL always follows
+`--`, and `UrlValidator` runs inside `YtDlpClient` so no caller can skip it.
+
+**Consequences:** the functional harness (T4a/T11) replaces `ProcessRunner` with a fake. Live
+streams (no duration) are `UNSUPPORTED`. DNS names are not resolved, so a public name that points
+to a private address is not caught by the validator (accepted; the container has no access to
+private services other than the host ones it is meant to reach).

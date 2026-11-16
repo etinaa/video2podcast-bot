@@ -101,15 +101,16 @@ Sizes: S = 1-2 files, M = 3-5 files.
   - Depends on: T1
   - Files: `job/JobStore.java`, `job/JobRecord.java`, `job/FileState.java`, `job/JobQueue.java`, tests
 
-- [ ] **T8: Media: URL validation, metadata, download, WAV chunks** (M)
+- [~] **T8: Media: URL validation, metadata, download, WAV chunks** (M)
   - Acceptance:
-    - `ProcessRunner` runs external commands from an argument list with a timeout and output capture. No shell strings.
-    - URL validation accepts only http(s) URLs. Metadata (title, duration) comes from `yt-dlp`, and a video over 3 hours is rejected before download.
-    - Audio download prefers m4a. A 16 kHz mono WAV is created and split into about 10-minute chunks.
-    - Errors map to a `JobFailure` with a user-safe message (private, unsupported, too long, failed).
+    - `ProcessRunner` is an interface, `run(List<String> args, Duration timeout)`, with a real implementation that runs an argument list (no shell strings), captures stdout and stderr, and on timeout kills the process and its children and fails with `JobFailure` (`TIMEOUT`). Timeouts are configurable under `jobs.*`, defaults: metadata 1 min, download 30 min, ffmpeg 30 min.
+    - `UrlValidator` accepts only `http`/`https` URLs with a host, up to 2048 characters, no whitespace or control characters, no `user:password@`, and rejects `localhost` and literal loopback, private and link-local IPs. DNS names are not resolved. The URL is always passed to `yt-dlp` after `--`.
+    - Metadata (title, duration) comes from `yt-dlp`. A video over 3 hours (exactly 3 hours passes) is rejected before download. A missing duration (live stream) is rejected as `UNSUPPORTED`.
+    - Audio download prefers m4a (`bestaudio[ext=m4a]/bestaudio`). `FfmpegRunner` creates a 16 kHz mono WAV and splits it into about 10-minute chunks. Audio preparation for Telegram (`AudioPreparer`, re-encoding, the 50 MB rule) is out of scope (T13).
+    - Errors map to a `JobFailure` with a `Kind` (`PRIVATE`, `UNSUPPORTED`, `TOO_LONG`, `FAILED`, `TIMEOUT`) and a user-safe message. `yt-dlp` stderr is matched case-insensitively by substrings from one table (private/sign in/members-only/age → `PRIVATE`, unsupported URL → `UNSUPPORTED`, any other non-zero exit → `FAILED`). Raw stderr goes to the log only, never to the chat.
   - Verify: `./mvnw test -Dtest='UrlValidatorTest,YtDlpClientTest,ChunkSplitterTest'` with a stubbed `ProcessRunner`. Manual: download a short real video in the dev profile.
-  - Depends on: T1, T3
-  - Files: `media/ProcessRunner.java`, `media/UrlValidator.java`, `media/YtDlpClient.java`, `media/FfmpegRunner.java`, `job/JobFailure.java`, tests
+  - Depends on: T1
+  - Files: `media/ProcessRunner.java`, `media/UrlValidator.java`, `media/YtDlpClient.java`, `media/FfmpegRunner.java`, `job/JobFailure.java`, `config/AppProperties.java`, `application.yml`, tests
 
 - [ ] **T9: Transcription client and merged transcript** (S)
   - Acceptance:
