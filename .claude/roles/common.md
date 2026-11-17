@@ -15,7 +15,7 @@ Team, by Herdr agent name:
 
 Every agent may also write to `tasks/T<N>/comms/` (questions, approvals, status).
 
-Paths in these files are relative to the repository root. Codex agents start in a subdirectory, because the sandbox makes only that directory and a few others writable. Run shell commands from the root: `cd "$(git rev-parse --show-toplevel)"`.
+Paths in these files are relative to the repository root. Codex agents start in a subdirectory, because the sandbox makes only that directory and a few others writable. Codex agents run shell commands from the root with `cd "$(git rev-parse --show-toplevel)"`. Claude agents already start in the repository root: never put `cd` in a command, and give every path relative to the root. A compound command with `cd` and a relative read stops for manual approval whenever a `Read` deny rule exists (the reviewers have one), so a `cd` only creates a prompt.
 
 Write only to the paths your role owns. If you need a change elsewhere, ask its owner.
 
