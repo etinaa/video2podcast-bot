@@ -57,7 +57,7 @@ Compose down: podman compose down
 Host (once):  ollama pull qwen3:32b
 Host (run):   whisper-server --model <path-to-ggml-large-v3-turbo.bin> --port 8081
 ```
-Required env vars: `TELEGRAM_BOT_TOKEN`, `ADMIN_USER_ID`, `ACCESS_FILE` (default `/data/allowed-users.json`, on a separate volume from the job files), `OLLAMA_BASE_URL` (default `http://host.containers.internal:11434`), `OLLAMA_MODEL` (default `qwen3:32b`), `WHISPER_BASE_URL` (default `http://host.containers.internal:8081`), `WORK_DIR`, `MAX_VIDEO_DURATION` (default `PT3H`), `JOB_RETENTION` (default `PT1H`), `METADATA_TIMEOUT` (default `PT1M`), `DOWNLOAD_TIMEOUT` (default `PT30M`), `FFMPEG_TIMEOUT` (default `PT30M`), `ACCESS_REQUEST_COOLDOWN` (default `PT24H`). They are read from the environment only and never committed.
+Required env vars: `TELEGRAM_BOT_TOKEN`, `ADMIN_USER_ID`, `ACCESS_FILE` (default `/data/allowed-users.json`, on a separate volume from the job files), `OLLAMA_BASE_URL` (default `http://host.containers.internal:11434`), `OLLAMA_MODEL` (default `qwen3:32b`), `WHISPER_BASE_URL` (default `http://host.containers.internal:8081`), `WHISPER_TIMEOUT` (default `PT10M`), `WORK_DIR`, `MAX_VIDEO_DURATION` (default `PT3H`), `JOB_RETENTION` (default `PT1H`), `METADATA_TIMEOUT` (default `PT1M`), `DOWNLOAD_TIMEOUT` (default `PT30M`), `FFMPEG_TIMEOUT` (default `PT30M`), `ACCESS_REQUEST_COOLDOWN` (default `PT24H`). They are read from the environment only and never committed.
 
 ## Project Structure
 ```
