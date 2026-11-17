@@ -13,7 +13,13 @@
       "Bash(cat:*)",
       "Bash(echo:*)",
       "Bash(mkdir -p:*)",
-      "Bash(./mvnw:*)"
+      "Bash(./mvnw:*)",
+      "Bash(grep:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(cp target/pit-reports/*)",
+      "Read(//private/tmp/**)",
+      "Read(//tmp/**)"
     ],
     "deny": [
       "Bash(git add:*)",
@@ -26,6 +32,7 @@
       "Bash(git rm:*)",
       "Edit(./.claude/**)",
       "Edit(./CLAUDE.md)",
+      "Bash(sed -i*CLAUDE.md*)",
       "Edit(./tasks/todo.md)",
       "Edit(./src/it/**)",
       "Edit(./src/features/**)",

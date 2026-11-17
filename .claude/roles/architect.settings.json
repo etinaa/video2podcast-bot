@@ -12,7 +12,8 @@
       "Bash(ls:*)",
       "Bash(cat:*)",
       "Bash(echo:*)",
-      "Bash(mkdir -p:*)"
+      "Bash(mkdir -p:*)",
+      "Bash(curl -s -m 15 https://repo1.maven.org/maven2/*)"
     ],
     "deny": [
       "Bash(git add:*)",
