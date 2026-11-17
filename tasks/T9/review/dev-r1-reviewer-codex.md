@@ -1,0 +1,23 @@
+VERDICT: CHANGES_REQUESTED
+
+## Findings
+- [Important] src/test/java/com/video2podcast/transcript/WhisperClientTest.java:160 - R5's explicitly required connection-deadline verification is missing. The delayed WireMock answer exercises the answer timeout; the refused-port and unresolved-host cases exercise immediate connection failures. None verifies that the actual HTTP client has a five-second connect deadline or that HttpConnectTimeoutException is classified as a connection failure (rather than the HttpTimeoutException answer-timeout branch). The production wiring looks correct, but these tests do not protect the separately agreed deadline/classification contract. Add deterministic controlled-transport coverage for the connect-timeout wiring and exception classification, including the resulting SERVICE_UNREACHABLE after two failed attempts. Also exercise a WHISPER_TIMEOUT override through configuration binding: the current short-timeout test constructs the record directly, while AppPropertiesTest checks only the default.
+- [Suggestion] src/test/java/com/video2podcast/transcript/TranscriptionClientTest.java:160 - The throwing-progress test never verifies that Whisper was not called, and the successful tests record callbacks separately from mock invocation order. Add a shared event sequence or assertions inside the Whisper stub, plus verifyNoInteractions for a callback failing on the first chunk. This would catch moving progress after the send, which the current assertions do not detect.
+- [Suggestion] src/test/java/com/video2podcast/transcript/TranscriptionClientTest.java:176 - Add existing-transcript success/failure cases and assert original input bytes, rather than existence alone. The current write-failure test uses a nonempty directory as the target; it does not demonstrate preservation of a pre-existing transcript file. AtomicFiles has independent replacement coverage, and the implementation delegates correctly, so this is a component regression-coverage improvement rather than an observed persistence defect.
+- [Suggestion] src/test/java/com/video2podcast/transcript/WhisperClientTest.java:27 - Load the captured T3 success/error fixtures in the compatibility tests as requested by the task. The current inline simplified JSON and literal error text check the basic shape but do not tie the tests to the captured server contract.
+
+## Requirements
+- R1: met - Sequential supplied-order processing, streaming WAV multipart fields, English JSON contract, and top-level string text extraction are implemented; fixture coverage suggestion above.
+- R2: met - Unicode whitespace normalization, ordered merge, UTF-8 and one final LF; persistence occurs only after all chunks succeed.
+- R3: met - Valid empty strings are skipped without retry; all-empty speech has the exact NO_SPEECH message; broken responses fail attempts.
+- R4: met - Exactly one immediate application retry; only the second failure selects the terminal kind; later chunks stop.
+- R5: not met - Production defaults and timeout wiring are present, but required controlled connection-deadline/classification verification and configuration-override coverage are missing (Important finding).
+- R6: met - Callback occurs before each first attempt, once per chunk, with original denominator; stronger ordering assertions suggested.
+- R7: met - Fixed safe transcription messages and added kinds preserve existing media meanings; diagnostic causes remain separate.
+- R8: met - AtomicFiles persistence precedes best-effort cleanup; caught write errors preserve inputs; per-file deletion errors warn and continue.
+- R9: met - Null/invalid arguments, missing chunks, supplied order/location, existing transcripts and callback exception propagation follow the documented implementation contract; additional preservation tests suggested.
+
+## Review scope and verification
+Reviewed the frozen dev-r1.patch and every touched file in full. Reconstructed each patched file from its recorded base blob and confirmed the full-file reads match the patch. Reviewed the task, brief, requirements, architecture contracts, feature scenarios, shared JSON/atomic-file helpers and existing atomic-file tests. No other reviewer's report was read. SPEC.md and the Cucumber filter are outside this zone.
+
+Accepted the orchestrator's supplied checks: spotless:check and ./mvnw verify -Dno-it passed, BUILD SUCCESS, 354 tests, SpotBugs and PMD enabled, coverage gate met. The patch adds no suppression or exclusion. Per reviewer role, no Maven run, mutation experiment or production-file modification was performed. No production correctness, readability, architecture, security or performance blocker was identified; the requested change concerns explicit R5 verification.

@@ -112,7 +112,7 @@ Sizes: S = 1-2 files, M = 3-5 files.
   - Depends on: T1
   - Files: `media/ProcessRunner.java`, `media/UrlValidator.java`, `media/YtDlpClient.java`, `media/FfmpegRunner.java`, `job/JobFailure.java`, `config/AppProperties.java`, `application.yml`, tests
 
-- [~] **T9: Transcription client and merged transcript** (S)
+- [x] **T9: Transcription client and merged transcript** (S)
   - Acceptance:
     - `TranscriptionClient` sends each WAV chunk of a job, in order, to `whisper-server` (`POST /inference`, `response_format=json`, language `en`) and merges the results in order into `transcript.txt` in the job directory (UTF-8, chunks joined by one space, one trailing newline, no header or timestamps).
     - Each chunk's text is trimmed and its whitespace (including inner newlines) is collapsed before merging. A chunk that is empty after that is skipped. If the whole transcript is empty, the job fails with `JobFailure(NO_SPEECH)` ("No speech was found in this video.") and no `transcript.txt` is written.
@@ -139,7 +139,7 @@ Sizes: S = 1-2 files, M = 3-5 files.
     - An allowed user's URL message gets an acknowledgement within 5 seconds, then one status message that is edited through the stages (queued, downloading, transcribing n/N, summarizing).
     - On success the bot sends the HTML message (title, duration, bullets) with **Download audio** and **Download transcript** buttons (`audio:<jobId>`, `transcript:<jobId>`) and saves `job.json` with `expiresAt` = send time + 1 hour. **No audio or transcript file is sent.**
     - Failures produce a clear message and remove the job directory. Title and summary are HTML-escaped.
-    - The tag filter `not @T8` in `CucumberIT` is removed, and the step definitions for `src/features/T8-media.feature` are written (the T8 scenarios were deferred to this task). The `@manual_media` scenarios stay manual.
+    - The tag filters `not @T8` and `not @T9` in `CucumberIT` are removed (`not @TD2` stays: those scenarios are covered by `JobQueueTest`), and the step definitions for `src/features/T8-media.feature` and `src/features/T9-transcription.feature` are written (their scenarios were deferred to this task). The `@manual_media` scenarios stay manual.
     - Functional test `SummaryFlowIT` (replaces `PipelineIntegrationTest`): link, status edits, final message with two buttons, `job.json`, no file uploads; Whisper and Ollama are WireMock servers built from the T3 fixtures and `yt-dlp`/`ffmpeg` are a fake `ProcessRunner`.
   - Verify: `./mvnw verify -Dit.test=SummaryFlowIT` (functional test on the T4a harness): link, status edits, final message with two buttons, `job.json` content, no file uploads. Failure paths clean up the directory.
   - Depends on: T5, T7, T8, T9, T10
