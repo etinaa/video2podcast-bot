@@ -264,6 +264,96 @@ class TranscriptionClientTest {
   }
 
   @Test
+  void nothingIsPublishedOrChangedWhileALaterAnswerIsPending() throws Exception {
+    byte[] source = Files.readAllBytes(jobDir.resolve("source.m4a"));
+    when(whisper.transcribe(c0)).thenReturn("First");
+    when(whisper.transcribe(c1))
+        .thenAnswer(inv -> {
+          assertThat(jobDir.resolve("transcript.txt")).doesNotExist();
+          assertThat(jobDir.resolve("audio.wav")).hasContent("wav");
+          assertThat(c0).hasContent("0");
+          assertThat(c1).hasContent("1");
+          assertThat(Files.readAllBytes(jobDir.resolve("source.m4a"))).isEqualTo(source);
+          events.add("held");
+          return "Second";
+        });
+
+    run(c0, c1);
+
+    assertThat(events).containsExactly("1/2", "2/2", "held");
+    assertThat(Files.readString(jobDir.resolve("transcript.txt"))).isEqualTo("First Second\n");
+  }
+
+  @Test
+  void aFailedReplacementLeavesThePriorTranscriptBytesIntact() throws Exception {
+    byte[] old = "Old text\n".getBytes(StandardCharsets.UTF_8);
+    Files.write(jobDir.resolve("transcript.txt"), old);
+    Path tmp = Files.createDirectory(jobDir.resolve("transcript.txt.tmp"));
+    Files.writeString(tmp.resolve("blocker"), "x");
+    when(whisper.transcribe(c0)).thenReturn("New text");
+
+    assertThatThrownBy(() -> run(c0))
+        .isInstanceOfSatisfying(
+            JobFailure.class,
+            f -> {
+              assertThat(f.kind()).isEqualTo(JobFailure.Kind.FAILED);
+              assertThat(f).hasMessage("Transcription failed. Please try again later.");
+            });
+
+    assertThat(Files.isRegularFile(jobDir.resolve("transcript.txt"))).isTrue();
+    assertThat(Files.readAllBytes(jobDir.resolve("transcript.txt"))).isEqualTo(old);
+    assertThat(jobDir.resolve("audio.wav")).exists();
+    assertThat(c0).exists();
+    assertThat(c1).exists();
+    assertThat(c2).exists();
+  }
+
+  @Test
+  void anAudioDeletionFailureStillLetsEveryLaterDeletionRun() throws Exception {
+    byte[] source = Files.readAllBytes(jobDir.resolve("source.m4a"));
+    byte[] jobJson = "{\"id\":\"j\"}".getBytes(StandardCharsets.UTF_8);
+    Files.write(jobDir.resolve("job.json"), jobJson);
+    Files.delete(jobDir.resolve("audio.wav"));
+    Path audio = Files.createDirectory(jobDir.resolve("audio.wav"));
+    Files.writeString(audio.resolve("blocker"), "x");
+    when(whisper.transcribe(any())).thenReturn("secret speech");
+    ch.qos.logback.classic.Logger logger =
+        (ch.qos.logback.classic.Logger)
+            org.slf4j.LoggerFactory.getLogger(TranscriptionClient.class);
+    ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> appender =
+        new ch.qos.logback.core.read.ListAppender<>();
+    appender.start();
+    logger.addAppender(appender);
+
+    Path transcript;
+    try {
+      transcript = run(c0, c1, c2);
+    } finally {
+      logger.detachAppender(appender);
+    }
+
+    assertThat(Files.readString(transcript))
+        .isEqualTo("secret speech secret speech secret speech\n");
+    assertThat(c0).doesNotExist();
+    assertThat(c1).doesNotExist();
+    assertThat(c2).doesNotExist();
+    assertThat(jobDir.resolve("chunks")).doesNotExist();
+    assertThat(audio.resolve("blocker")).exists();
+    assertThat(Files.readAllBytes(jobDir.resolve("source.m4a"))).isEqualTo(source);
+    assertThat(Files.readAllBytes(jobDir.resolve("job.json"))).isEqualTo(jobJson);
+    List<String> warnings =
+        appender.list.stream()
+            .filter(e -> e.getLevel() == ch.qos.logback.classic.Level.WARN)
+            .map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+            .toList();
+    assertThat(warnings).hasSize(1);
+    assertThat(warnings.get(0))
+        .contains("audio.wav")
+        .doesNotContain(jobDir.toString())
+        .doesNotContain("secret speech");
+  }
+
+  @Test
   void missingChunksDirectoryIsOnlyLogged() throws Exception {
     when(whisper.transcribe(any())).thenReturn("text");
     Path loose = Files.writeString(jobDir.resolve("loose.wav"), "x");
