@@ -97,3 +97,11 @@ job directory.
 `FAILED` has its own message through `JobFailure.transcriptionFailed`. `SERVICE_UNREACHABLE` is the
 typed hook for the future dead-letter-queue task. There is no per-chunk resume: a rerun sends all
 chunks again.
+
+## D7: Mutation testing with PIT in a separate profile (TD3, 2026-11-17)
+
+**Decision:** `pitest-maven` runs only in the Maven profile `mutation`, over `com.video2podcast.*` in `src/main`, with the unit tests of `src/test` only (`com.video2podcast.functional.*`, the ITs and Cucumber steps, is excluded). The build fails when the mutation score is below 85% (`pit.mutation.threshold`). Default `./mvnw verify` and `-Dno-it` do not run PIT.
+
+**Why:** JaCoCo (90%) shows which lines run; PIT shows whether a test notices a wrong result. A separate profile keeps the default build fast. `src/it` is left out because it is owned by the Tester, runs the whole application and would make a PIT run very slow.
+
+**Consequences:** unit tests must assert behaviour, not only execute lines. Exclusions of classes from PIT are listed in `pom.xml` with a reason and need the owner's approval.

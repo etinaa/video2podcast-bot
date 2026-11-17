@@ -255,3 +255,14 @@ Work that is not scheduled in a phase. Technical debt carries the `[debt]` mark.
   - Verify: `./mvnw test -Dtest=JobQueueTest`, then a full `./mvnw verify`.
   - Depends on: T7
   - Files: `job/JobQueue.java`, `JobQueueTest.java`
+
+- [~] **TD3: Mutation tests for main code with PIT (min 85%)** (M)
+  - Why: the 90% JaCoCo gate shows which lines run, not whether the tests would notice a wrong result. PIT shows that.
+  - Acceptance:
+    - `pitest-maven` is configured in a Maven profile `mutation`, for `src/main` code only (`src/test` unit tests; `src/it` is not run by PIT). The profile fails the build when the mutation score is below 85%.
+    - The default `./mvnw verify` and `./mvnw verify -Dno-it` are unchanged and not slower.
+    - Current score is measured. Where it is below 85%, the Developer adds or strengthens unit tests (`src/test/java`) until `./mvnw verify -Pmutation` passes. Production code changes only if a surviving mutant shows a real bug. Excluded classes (config, generated code, main class), if any, are listed in `pom.xml` with a reason for each, and the owner approves the list.
+    - `CLAUDE.md` and `docs/` mention the command and the threshold.
+  - Verify: `./mvnw verify -Pmutation` is green, and it goes red when the threshold is raised above the current score (one-off check).
+  - Depends on: none (all merged tasks T1–T9 are covered)
+  - Files: `pom.xml`, `src/test/java/**`, `CLAUDE.md`, `docs/`
