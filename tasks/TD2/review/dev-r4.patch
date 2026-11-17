@@ -1,0 +1,123 @@
+diff --git a/src/test/java/com/video2podcast/job/JobQueueTest.java b/src/test/java/com/video2podcast/job/JobQueueTest.java
+index 8902c20..5094ad8 100644
+--- a/src/test/java/com/video2podcast/job/JobQueueTest.java
++++ b/src/test/java/com/video2podcast/job/JobQueueTest.java
+@@ -3,6 +3,11 @@ package com.video2podcast.job;
+ import static org.assertj.core.api.Assertions.assertThat;
+ import static org.assertj.core.api.Assertions.assertThatThrownBy;
+ 
++import ch.qos.logback.classic.Level;
++import ch.qos.logback.classic.Logger;
++import ch.qos.logback.classic.spi.ILoggingEvent;
++import ch.qos.logback.classic.spi.ThrowableProxy;
++import ch.qos.logback.core.read.ListAppender;
+ import java.time.Duration;
+ import java.util.ArrayList;
+ import java.util.Collections;
+@@ -17,6 +22,7 @@ import java.util.concurrent.atomic.AtomicInteger;
+ import java.util.concurrent.atomic.AtomicReference;
+ import org.junit.jupiter.api.AfterEach;
+ import org.junit.jupiter.api.Test;
++import org.slf4j.LoggerFactory;
+ 
+ class JobQueueTest {
+ 
+@@ -90,12 +96,16 @@ class JobQueueTest {
+   @Test
+   void sizeIsZeroInsideTheCallbackOfTheLastSucceededTask() throws Exception {
+     AtomicInteger observed = new AtomicInteger(-1);
++    AtomicReference<Object> callbackValue = new AtomicReference<>("unset");
++    AtomicReference<Throwable> callbackError = new AtomicReference<>(new Throwable("unset"));
+     CountDownLatch called = new CountDownLatch(1);
+     CountDownLatch release = new CountDownLatch(1);
+     queue.submit(() -> await(release));
+     CompletableFuture<Void> last = queue.submit(() -> {});
+     last.whenComplete((value, error) -> {
+       observed.set(queue.size());
++      callbackValue.set(value);
++      callbackError.set(error);
+       called.countDown();
+     });
+ 
+@@ -104,6 +114,8 @@ class JobQueueTest {
+ 
+     assertThat(last.get(5, TimeUnit.SECONDS)).isNull();
+     assertThat(observed).hasValue(0);
++    assertThat(callbackValue.get()).isNull();
++    assertThat(callbackError.get()).isNull();
+   }
+ 
+   @Test
+@@ -137,6 +149,7 @@ class JobQueueTest {
+   @Test
+   void sizeIsZeroInsideTheCallbackOfTheLastTaskThatThrowsAnError() throws Exception {
+     AtomicInteger observed = new AtomicInteger(-1);
++    AtomicReference<Throwable> callbackError = new AtomicReference<>();
+     CountDownLatch called = new CountDownLatch(1);
+     CountDownLatch release = new CountDownLatch(1);
+     queue.submit(() -> await(release));
+@@ -146,6 +159,7 @@ class JobQueueTest {
+         });
+     last.whenComplete((value, error) -> {
+       observed.set(queue.size());
++      callbackError.set(error);
+       called.countDown();
+     });
+ 
+@@ -157,6 +171,56 @@ class JobQueueTest {
+         .hasCauseInstanceOf(IllegalStateException.class)
+         .hasMessageContaining("Queued task ended abnormally");
+     assertThat(observed).hasValue(0);
++    assertThat(callbackError.get())
++        .isInstanceOf(IllegalStateException.class)
++        .hasMessage("Queued task ended abnormally");
++  }
++
++  @Test
++  void aCompletedTaskLeavesTheOtherWorkCounted() throws Exception {
++    CountDownLatch release = new CountDownLatch(1);
++    CountDownLatch secondStarted = new CountDownLatch(1);
++    CompletableFuture<Void> first = queue.submit(() -> {});
++    CompletableFuture<Void> second =
++        queue.submit(() -> {
++          secondStarted.countDown();
++          await(release);
++        });
++
++    first.get(5, TimeUnit.SECONDS);
++    assertThat(secondStarted.await(5, TimeUnit.SECONDS)).isTrue();
++    assertThat(queue.size()).isEqualTo(1);
++
++    release.countDown();
++    second.get(5, TimeUnit.SECONDS);
++    assertThat(queue.size()).isZero();
++  }
++
++  @Test
++  void aRuntimeFailureIsLoggedOnceAsAnErrorWithTheOriginalThrowable() throws Exception {
++    Logger logger = (Logger) LoggerFactory.getLogger(JobQueue.class);
++    ListAppender<ILoggingEvent> appender = new ListAppender<>();
++    appender.start();
++    logger.addAppender(appender);
++    try {
++      IllegalStateException thrown = new IllegalStateException("boom");
++      CompletableFuture<Void> failing =
++          queue.submit(() -> {
++            throw thrown;
++          });
++      assertThatThrownBy(() -> failing.get(5, TimeUnit.SECONDS))
++          .isInstanceOf(ExecutionException.class);
++
++      List<ILoggingEvent> errors =
++          appender.list.stream().filter(event -> event.getLevel() == Level.ERROR).toList();
++      assertThat(errors).hasSize(1);
++      assertThat(errors.get(0).getFormattedMessage()).isEqualTo("Queued task failed");
++      assertThat(((ThrowableProxy) errors.get(0).getThrowableProxy()).getThrowable())
++          .isSameAs(thrown);
++    } finally {
++      logger.detachAppender(appender);
++      appender.stop();
++    }
+   }
+ 
+   @Test
