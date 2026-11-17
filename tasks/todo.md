@@ -267,7 +267,7 @@ Work that is not scheduled in a phase. Technical debt carries the `[debt]` mark.
   - Depends on: none (all merged tasks T1–T9 are covered)
   - Files: `pom.xml`, `src/test/java/**`, `CLAUDE.md`, `docs/`
 
-- [~] **TD4 [debt]: Rewrite the T8, T9 and TD2 scenarios through the external boundary** (S)
+- [x] **TD4 [debt]: Rewrite the T8, T9 and TD2 scenarios through the external boundary** (S)
   - Why: the owner's rule is that Cucumber scenarios do not call service code. They go through what can be seen from outside: Telegram, HTTP calls, files, the queue. The scenarios of T8 (`When media preparation validates the URL ...`), T9 (`When transcription runs for the job`) and TD2 name internal components. They are excluded from `CucumberIT` for that reason and run nowhere.
   - Acceptance:
     - `src/features/T8-media.feature`, `T9-transcription.feature` and `TD2-job-queue.feature` have no step that names or calls a class, a component or a method. Steps send a Telegram update to the bot, set up a mock of Whisper, Ollama or the process runner, and check Telegram calls, HTTP requests received by a mock and files in the job directory.
