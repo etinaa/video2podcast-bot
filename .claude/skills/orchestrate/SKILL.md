@@ -39,9 +39,13 @@ While roles work, wait with `.claude/scripts/wait.sh` (`review` for a review rou
 ## Stage 1: intake (with the owner)
 
 1. Read `SPEC.md`, `tasks/plan.md` and `tasks/todo.md`. Check that the task does not duplicate or contradict an existing one.
-2. Ask the owner about what is unclear, one question at a time: why the task is needed, its scope and what is out of it, the acceptance criteria, dependencies, and the constraints. Recommend an answer with every question.
-3. Show the owner the task as it will appear in `tasks/todo.md`: the title, size, Acceptance, Verify, Depends on and Files, in the existing format. Write nothing until the owner says it is right.
-4. Add the task to `tasks/todo.md` with status `[~]`. Write `tasks/T<N>/brief.md` with the owner's original words, every question with its answer, and the agreed task.
+2. Ask the owner first what type the task is, and recommend one:
+   - **Product task** (user-visible behaviour): the full team, as in the stages below.
+   - **Technical task** (build, tooling, tests, infrastructure; no new behaviour for the user): no Analyst and no Gherkin scenarios, and no Tester or `src/it` tests unless the owner asks for them. The Architect, the Developer and both reviewers stay, and the design review is the Developer's and the orchestrator's. The Developer collects the evidence (commands, results) and the orchestrator writes it to `tasks/T<N>/evidence.md`, because the Developer may not edit `tasks/*/*.md`. Skip the stages and zones of the roles that are left out, and write the chosen type and the roles that take part in `tasks/T<N>/brief.md` and in the task's Verify line.
+   Do not choose the type yourself.
+3. Ask the owner about what is unclear, one question at a time: why the task is needed, its scope and what is out of it, the acceptance criteria, dependencies, and the constraints. Recommend an answer with every question.
+4. Show the owner the task as it will appear in `tasks/todo.md`: the title, size, Acceptance, Verify, Depends on and Files, in the existing format. Write nothing until the owner says it is right.
+5. Add the task to `tasks/todo.md` with status `[~]`. Write `tasks/T<N>/brief.md` with the owner's original words, every question with its answer, and the agreed task.
 
 ## Stage 2: design (Architect and Analyst in parallel)
 
