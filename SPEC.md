@@ -190,7 +190,7 @@ While work is running, one status message is edited with the current stage (queu
   - Respond to non-allowlisted users with anything other than the access-request flow, the rate-limited refusal, and `/whoami`.
   - Process messages from group chats or channels.
   - Run shell commands built from unsanitized user input.
-  - Create or send the audio or the transcript file before the user taps its button.
+  - Send the audio or the transcript file to the chat before the user taps its button.
   - Delete or skip failing tests, or add SpotBugs or PMD suppressions, to get a build green without approval.
   - Expose any port of the bot to the network.
 
