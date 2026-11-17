@@ -6,7 +6,7 @@ Status: analyst draft for team design review. Date: 2026-11-17.
 
 Transcribe the ordered WAV chunks prepared by T8 through the local whisper-server and create the complete plain-text transcript for T10/T11 and later T12 delivery. Authority: T9 in `tasks/todo.md`, the owner answers in `brief.md`, `SPEC.md`, and the real-service contract captured by T3 in `docs/host-setup.md`.
 
-T9 depends on T3 and T8. Input is an existing job directory with `source.*`, `audio.wav`, and a nonempty ordered list of WAV chunks in `chunks/`. T8 enforces the default inclusive PT3H maximum and produces approximately ten-minute chunks; T9 must process the entire supplied list, including a short final chunk. It must not impose a smaller duration or chunk-count limit. Malformed caller inputs and reuse of a directory containing a prior transcript need an architectural contract; this specification does not invent a replay/recovery policy.
+T9 depends on T3 and T8. Input is an existing job directory with `source.*`, `audio.wav`, and a nonempty ordered list of WAV chunks in `chunks/`. T8 enforces the default inclusive PT3H maximum and produces approximately ten-minute chunks; T9 must process the entire supplied list, including a short final chunk. It must not impose a smaller duration or chunk-count limit. Architectural argument and existing-transcript contracts are recorded in R9, following the answer to Q-analyst-1; these do not introduce replay/recovery.
 
 This is a component contract, not a Telegram flow. The Gherkin examples describe HTTP requests, caller-visible progress/failure and disk effects. No new functional `*IT` tests are required in T9, as explicitly agreed in the brief. Existing project style, constructor injection and quality gates are inherited from SPEC; no production code is part of this analyst step.
 
@@ -25,7 +25,7 @@ Acceptance:
 
 ### R2 — Normalize and merge plain text
 
-Trim every chunk's text and collapse whitespace runs, including spaces, tabs, CR and LF, to one ordinary space. Merge nonempty normalized chunks in input order.
+Trim every chunk's text and collapse whitespace runs, including Unicode whitespace (such as U+00A0), spaces, tabs, CR and LF, to one ordinary space. Merge nonempty normalized chunks in input order.
 
 Acceptance:
 - Text `  First\n\tpart.  ` followed by ` Second\r\npart. ` becomes `First part. Second part.\n` on disk. Here and in prose examples, backslash escapes denote actual characters.
@@ -97,13 +97,25 @@ Acceptance:
 - Successful transcription leaves a readable transcript and unchanged source bytes, with neither `audio.wav` nor `chunks/` remaining. Other job files, such as `job.json`, are kept.
 - No WAV/chunk deletion starts before the transcript write succeeds.
 - On terminal HTTP/response/timeout failure, NO_SPEECH, or transcript-write failure, preserve source, WAV, chunks and unrelated job files; T11 owns eventual failure-directory cleanup.
-- A transcript-write failure must not be reported as success. Exact local-I/O error mapping, handling of partial output and a deletion failure after a successful write are an architectural clarification in Q-analyst-1. No scenario assumes multi-file cleanup is atomic or invents rollback of a deletion already performed.
+- Persist atomically: the final transcript is the complete new text or remains untouched. An IOException while writing gives FAILED with `Transcription failed. Please try again later.` and preserves inputs; no partial final transcript is exposed.
+- Per the Architect’s answer to Q-analyst-1, a deletion error after persistence is logged at WARN with the file name only; the other deletions are still attempted, the result stays success, and completed deletions are not rolled back. T11/T14 handle leftovers. The clean-disk success criterion above applies when deletion operations succeed.
+
+### R9 — Architectural caller and existing-artifact contracts
+
+These are component argument contracts from `api.md`, `flows.md` and A: Q-analyst-1, not additional Telegram product behavior.
+
+Acceptance:
+- A null argument is a programming error and gives NullPointerException. An empty chunk list gives FAILED without progress or requests; a job directory that is not an existing directory gives FAILED without requests.
+- A missing or unreadable chunk is an ordinary nonconnection attempt failure: retry once, then FAILED with the transcription-specific message; preserve inputs and stop later chunks.
+- Supplied list order wins even when it differs from filename order. A supplied chunk outside the job's chunks directory is accepted; T8 is responsible for supplying the normal paths.
+- An existing transcript is never read for resume. Success atomically replaces it; chunk failure, NO_SPEECH or write failure leaves its bytes untouched.
+- A throwing progress callback propagates its original exception unchanged before that chunk is sent. No transcript is written and no cleanup begins.
 
 ## Verification and handoff
 
 - Developer: `./mvnw test -Dtest=TranscriptionClientTest`, with WireMock and temporary directories, using `whisper-inference-ok.json` and `whisper-inference-bad-request.txt` from T3. Add focused merger/configuration tests as needed. Verify request bytes/fields, order, malformed responses, normalization, UTF-8, retry success/exhaustion and mixed failure kinds, progress ordering, deadlines, no partial transcript on chunk failure and disk cleanup/preservation.
 - Use short configured answer timeouts in tests; do not wait ten minutes. A localhost refused-connection test proves error classification, not a five-second connection deadline. Verify connection-deadline wiring separately with controlled transport behavior; an ordinary delayed WireMock response only tests the answer timeout.
-- Tester: `src/features/T9-transcription.feature` supplies acceptance examples for later integration. The current Cucumber runner excludes only T8 and TD2. Exclude `@T9` during T9 (or an equivalent scoped mechanism) so these unwired steps do not break `verify`; keep existing scenarios enabled. Q-analyst-2 requests this owner-zone change. T11 will integrate the Telegram behavior and corresponding steps.
+- Tester: `src/features/T9-transcription.feature` supplies acceptance examples for later integration. The current Cucumber runner excludes only T8 and TD2. Exclude `@T9` during T9 (or an equivalent scoped mechanism) so these unwired steps do not break `verify`; keep existing scenarios enabled. A: Q-analyst-2 confirms the Tester will apply `not @T8 and not @TD2 and not @T9` in Step 2; Step 1 design is approved, and no test code changes are needed in this analyst step. T11 will integrate the Telegram behavior and corresponding steps.
 - Project gate before the orchestrator commits: `./mvnw clean verify`, including at least 90% line and branch coverage, Spotless, SpotBugs and PMD. This document does not claim that implementation tests have run or passed.
 - Review the draft with Developer, Tester and orchestrator under the existing team workflow. Open design clarifications live in append-only `comms/questions.md`.
 

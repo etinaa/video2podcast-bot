@@ -290,3 +290,144 @@ Feature: Transcribe ordered WAV chunks into one plain-text transcript
     Then transcription does not report success
     And no "transcript.txt" exists in the job directory
     And "source.m4a", "audio.wav" and every chunk remain unchanged
+
+  @R2
+  Scenario: Collapse nonbreaking whitespace between words
+    Given the job has the ordered WAV chunks "chunk-000.wav"
+    And Whisper returns JSON {"text":"\u00a0First\u00a0\u00a0part.\u00a0"}
+    When transcription runs for the job
+    Then "transcript.txt" contains exactly this UTF-8 text followed by one LF newline:
+      """
+      First part.
+      """
+
+  @R7 @R8
+  Scenario: A failed atomic replacement leaves no partial final transcript
+    Given the job has the ordered WAV chunks "chunk-000.wav"
+    And Whisper returns JSON {"text":"Complete speech"}
+    And atomic transcript persistence is forced to fail after temporary output is written but before replacement
+    When transcription runs for the job
+    Then transcription fails with kind "FAILED"
+    And the safe failure message is "Transcription failed. Please try again later."
+    And no "transcript.txt" exists in the job directory
+    And "source.m4a", "audio.wav" and every chunk remain unchanged
+
+  @R8
+  Scenario Outline: Cleanup errors after persistence preserve success and permit remaining deletions
+    Given the job has the ordered WAV chunks "chunk-000.wav, chunk-001.wav"
+    And Whisper returns nonempty text for both chunks
+    And deletion of "<path>" is forced to fail
+    And all other possible temporary file deletions can succeed
+    When transcription runs for the job
+    Then transcription succeeds with a complete readable "transcript.txt"
+    And a WARN log identifies the failed deletion by file name without file content
+    And every remaining temporary deletion is attempted
+    And successfully deleted files are not restored
+    And "source.m4a" remains unchanged
+
+    Examples:
+      | path                  |
+      | audio.wav             |
+      | chunks/chunk-000.wav  |
+      | chunks                |
+
+  @R7 @R9
+  Scenario Outline: Reject invalid job inputs before making HTTP requests
+    Given the transcription input has <invalid_input>
+    When transcription runs with that input
+    Then transcription fails with kind "FAILED"
+    And the safe failure message is "Transcription failed. Please try again later."
+    And no transcription request is sent
+    And no transcript is written or temporary audio deleted
+
+    Examples:
+      | invalid_input                    |
+      | an empty chunk list              |
+      | a job directory that is missing  |
+      | a job directory that is a file   |
+
+  @R9
+  Scenario Outline: Null arguments are caller programming errors
+    Given the transcription argument "<argument>" is null
+    When transcription runs with that input
+    Then the caller receives a NullPointerException
+
+    Examples:
+      | argument |
+      | jobDir   |
+      | chunks   |
+      | progress |
+
+  @R4 @R7 @R9
+  Scenario Outline: An unavailable chunk fails locally without misclassifying the server
+    Given the job has the ordered WAV chunks "chunk-000.wav, chunk-001.wav"
+    And "chunk-000.wav" is <condition>
+    When transcription runs for the job
+    Then reading "chunk-000.wav" is attempted twice without a scheduled delay
+    And transcription fails with kind "FAILED"
+    And the safe failure message is "Transcription failed. Please try again later."
+    And "chunk-001.wav" is never sent
+    And no transcript is written or temporary audio deleted
+
+    Examples:
+      | condition  |
+      | missing    |
+      | unreadable |
+
+  @R1 @R9
+  Scenario: Supplied chunk order wins over filename order
+    Given the job has the ordered WAV chunks "chunk-001.wav, chunk-000.wav"
+    And Whisper returns text "First supplied" and "Second supplied" for those chunks
+    When transcription runs for the job
+    Then the server receives chunks in order "chunk-001.wav, chunk-000.wav"
+    And "transcript.txt" contains exactly this UTF-8 text followed by one LF newline:
+      """
+      First supplied Second supplied
+      """
+
+  @R1 @R9
+  Scenario: Accept a supplied chunk outside the usual chunks directory
+    Given the supplied chunk list contains one readable WAV in a separate temporary directory
+    And Whisper returns JSON {"text":"Speech"}
+    When transcription runs for the job
+    Then the server receives the bytes of the supplied WAV
+    And transcription succeeds with a complete readable "transcript.txt"
+
+  @R2 @R9
+  Scenario: Replace an existing transcript on success without resuming it
+    Given the job has the ordered WAV chunks "chunk-000.wav"
+    And "transcript.txt" already contains "Old text" followed by one LF newline
+    And Whisper returns JSON {"text":"New text"}
+    When transcription runs for the job
+    Then "chunk-000.wav" is sent exactly once
+    And "transcript.txt" contains exactly this UTF-8 text followed by one LF newline:
+      """
+      New text
+      """
+
+  @R8 @R9
+  Scenario Outline: A failed run preserves an existing transcript
+    Given the job has the ordered WAV chunks "chunk-000.wav"
+    And "transcript.txt" already contains "Old text" followed by one LF newline
+    And the run will end with <failure>
+    When transcription runs for the job
+    Then transcription does not report success
+    And the bytes of "transcript.txt" are unchanged
+    And "source.m4a", "audio.wav" and every chunk remain unchanged
+
+    Examples:
+      | failure                                           |
+      | two failed chunk attempts                          |
+      | NO_SPEECH                                          |
+      | an atomic write failure before replacement          |
+
+  @R6 @R9
+  Scenario: A failed progress callback stops before sending its chunk
+    Given the job has the ordered WAV chunks "chunk-000.wav, chunk-001.wav"
+    And Whisper returns JSON {"text":"First"} for "chunk-000.wav"
+    And the callback throws an IllegalStateException "callback failed" for progress "2/2"
+    When transcription runs for the job
+    Then the original callback exception reaches the caller unchanged
+    And "chunk-001.wav" is never sent
+    And no "transcript.txt" exists in the job directory
+    And "source.m4a", "audio.wav" and every chunk remain unchanged
