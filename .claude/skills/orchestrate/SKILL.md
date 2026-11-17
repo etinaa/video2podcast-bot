@@ -22,13 +22,14 @@ Tools:
 
 - `.claude/scripts/role.sh start|stop|stop-all`: starts a role agent in the task's Herdr tab (one tab per task, labelled `T<N>`), with its model, sandbox and permissions, and gives it the task. Use it instead of raw `herdr agent start`.
 - `.claude/scripts/zone.sh patch|commit`: snapshots a zone of the working tree for review, and commits it only if it still equals the approved snapshot. You make every commit, and only through this script.
+- `.claude/scripts/wait.sh review|roles`: waits for a review round or for roles to finish, and returns at once if one of them is blocked on a dialog. Use it instead of waiting on status files.
 - `herdr agent get|read|prompt|wait <name>`: follow and talk to the agents. Load the `herdr` skill for the details.
 
 Before anything else, check `test "${HERDR_ENV:-}" = 1`. If it fails, tell the owner to start Claude Code inside Herdr and stop. Otherwise name yourself so the roles can reach you: `herdr agent rename "$HERDR_PANE_ID" orchestrator`.
 
 ## Following the agents
 
-While roles work, poll every minute or two: read `tasks/T<N>/comms/status/*` and `herdr agent list`. Do not prompt a working agent just to ask how it is going.
+While roles work, wait with `.claude/scripts/wait.sh` (`review` for a review round, `roles` for the others), which also returns at once when an agent is blocked on a dialog, and read `tasks/T<N>/comms/status/*` and `herdr agent list` when it returns. Do not prompt a working agent just to ask how it is going. A status file is a hint, not proof: a role may not write it, and an old `DONE` stays after the next step starts. Judge by the report file and the pane state.
 
 - `NEEDS_OWNER <id>`: read the question in `tasks/T<N>/comms/questions.md` and ask the owner, quoting it with the asker's role. Append the answer as `## A: <id> · owner`, then `herdr agent prompt <asker> "[orchestrator] Owner answered <id> in tasks/T<N>/comms/questions.md"`.
 - `BLOCKED`, or Herdr reports `blocked` (an approval or a question dialog in the agent's UI): `herdr agent read <name> --source recent-unwrapped --lines 80`, show it to the owner and do what they decide. Never approve a tool prompt on your own.
@@ -51,7 +52,7 @@ While roles work, poll every minute or two: read `tasks/T<N>/comms/status/*` and
    .claude/scripts/role.sh start architect T<N> "Start: design the change."
    ```
 
-2. Follow them until both status files say `DONE`.
+2. Follow them with `.claude/scripts/wait.sh roles T<N> analyst architect` until both are finished. The status files are only a hint, because a stale `DONE` from an earlier step and a forgotten file both mislead.
 
 ## Stage 3: design approval
 
@@ -94,7 +95,7 @@ Round K, starting from 1:
    .claude/scripts/role.sh start reviewer-codex T<N> "Review zone <zone>, round <K>, patch tasks/T<N>/review/<zone>-r<K>.patch. Checks: <result of step 1>."
    ```
 
-4. Wait until both status files say `DONE`. Do not read one report before the other is finished, and never pass one reviewer's report or verdict to the other. Then stop both: `role.sh stop reviewer-claude T<N>` and `role.sh stop reviewer-codex T<N>`.
+4. Wait with `.claude/scripts/wait.sh review T<N> <zone> <K>`, never on the status files alone: the Claude reviewer sometimes forgets to write its status file, and a loop that waits for it burns the whole timeout after the review is long done. The script returns when both reports exist and both panes stopped working. Exit 2 means a reviewer is blocked on a dialog (handle it as in "Following the agents"), exit 3 is a timeout (run it again). Do not read one report before the other is finished, and never pass one reviewer's report or verdict to the other. Then stop both: `role.sh stop reviewer-claude T<N>` and `role.sh stop reviewer-codex T<N>`.
 5. Read both reports, `tasks/T<N>/review/<zone>-r<K>-reviewer-*.md`.
    - **Both `VERDICT: APPROVED`:** commit the zone (step 6).
    - **Otherwise:** send the author the paths of both reports and ask for every Critical and Important finding to be fixed. Run round K+1 when the author is `DONE`. If the author disputes a finding, or the zone is not approved after round 3, show the owner both verdicts and the dispute.

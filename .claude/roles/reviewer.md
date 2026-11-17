@@ -26,4 +26,4 @@ VERDICT: APPROVED | CHANGES_REQUESTED
 - R1: met | not met - one line
 ```
 
-APPROVED only when there are no Critical or Important findings and every requirement the zone covers is met. Then end your turn with `STATUS: DONE`.
+APPROVED only when there are no Critical or Important findings and every requirement the zone covers is met. Then end your turn with `STATUS: DONE`. Write the report file first, then `echo "STATUS: DONE" > tasks/T<N>/comms/status/<your name>`, and only then give your final reply; the orchestrator also judges by the report, but a missing status file looks like a review that is not finished.
