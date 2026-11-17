@@ -180,6 +180,19 @@ Sizes: S = 1-2 files, M = 3-5 files.
   - Depends on: T7, T12, T13
   - Files: `job/RetentionSweeper.java`, `job/JobRecovery.java`, `bot/Keyboards.java`, tests
 
+- [ ] **T18: Deferred jobs: park on service outage, notify the user, retry every 2 hours** (M)
+  - Draft from the owner's request during T9; it is settled at intake before any work starts (the open points are marked).
+  - Why: when Whisper (T9) or Ollama (T10) is down, the job fails with `SERVICE_UNREACHABLE` and the user has to resend the link. The owner wants the job kept in a dead-letter queue (DLQ) and finished automatically after the service is back.
+  - Acceptance:
+    - A job that fails with `SERVICE_UNREACHABLE` is not dropped. It is parked in a DLQ together with what is needed to run it again (job id, owner user id, chat id, URL, the stage that failed, attempt count, the time it was parked).
+    - The user gets one message: "Service temporarily unavailable. We will send the result after it recovers." (exact English text to confirm at intake). The existing status message is edited, not a second message.
+    - Every 2 hours (`@Scheduled`, the interval configurable, default `PT2H`) the DLQ is checked and each entry is run again through the normal pipeline (T11). On success the user gets the usual summary message with both buttons and the entry leaves the DLQ. If the service is still down the entry stays and the user is not messaged again.
+    - Open at intake: where the DLQ lives (a separate file if everything stays in files; `SPEC.md` says no database), how long a parked job and its working files are kept (`JOB_RETENTION` is 1 hour and would delete them first), the maximum number of attempts or age before giving up and telling the user, whether the retry starts from the failed stage or from scratch, what happens to the DLQ at restart, and whether the queue order is kept.
+    - Functional test `DeferredJobIT`: Whisper is down, the user gets the "temporarily unavailable" message and the job is parked; after the scheduler runs with Whisper back, the summary message with two buttons is sent and the DLQ is empty.
+  - Verify: `./mvnw test -Dtest=DeadLetterQueueTest` with a fake clock and a temp directory (park, scheduled retry, success, still failing, restart, give-up), and `./mvnw verify -Dit.test=DeferredJobIT`.
+  - Depends on: T9, T10, T11, T14
+  - Files: `job/DeadLetterQueue.java`, `job/DeferredJobRunner.java`, `job/PipelineService.java`, `config/AppProperties.java`, `application.yml`, `SPEC.md`, tests
+
 ### Checkpoint 4: Full flow
 - [ ] All tests pass
 - [ ] Manual: link, summary, tap transcript, tap audio, and the job directory is deleted. A second job left alone is deleted after 1 hour.
