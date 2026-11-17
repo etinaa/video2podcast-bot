@@ -73,3 +73,12 @@ private services other than the host ones it is meant to reach).
 `DefaultProcessRunner` only (`config/spotbugs-exclude.xml`), because find-sec-bugs flags any
 non-constant argument list and a typed command did not help (spike in T8). No PMD suppression is
 approved. The exclusion is tracked as technical debt in `tasks/todo.md` (TD1).
+
+## D5: Queue size is updated before the future completes (TD2, 2026-11-17)
+
+**Decision:** `JobQueue.run` removes a task from `open` before it completes the task's future, on all
+paths (success, `RuntimeException`, `Error`). Fixed in production code, not with a bounded wait in the
+test, because `size()` is the queue position T11 shows to users.
+
+**Consequences:** a caller that reads `size()` after `get()` or inside a `whenComplete` callback never
+sees the finished task. Callbacks run on the worker thread, so they must not block.

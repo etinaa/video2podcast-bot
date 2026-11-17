@@ -231,11 +231,12 @@ Work that is not scheduled in a phase. Technical debt carries the `[debt]` mark.
   - Depends on: T8
   - Files: `config/spotbugs-exclude.xml`, `pom.xml`, `media/DefaultProcessRunner.java`
 
-- [ ] **TD2 [debt]: Fix the flaky `JobQueueTest.sizeCountsWaitingAndRunningTasksUntilTheyFinish`** (S)
-  - Why: it failed once in four full `./mvnw verify` runs during T8 (`expected: 0 but was: 1` at `JobQueueTest.java:86`). The test reads `queue.size()` right after `second.get()`, but the queue decrements its counter after it completes the future, so the check can run first. The race is in the T7 code or its test, not in T8.
+- [~] **TD2 [debt]: Fix the flaky `JobQueueTest.sizeCountsWaitingAndRunningTasksUntilTheyFinish`** (S)
+  - Why: it failed once in four full `./mvnw verify` runs during T8 (`expected: 0 but was: 1` at `JobQueueTest.java:86`). `JobQueue.run` completes the task's future first and removes the task from `open` only in `finally`, so `size()` still counts a task whose future is already done. The test is right; the race is in the production code, and `size()` is the queue position T11 will show to users.
   - Acceptance:
-    - `JobQueue.size()` is zero as soon as a task's future completes, or the test waits for it with a bounded wait. The choice is recorded in the fix commit message.
-    - The test passes 200 times in a row (a loop or `@RepeatedTest(200)` run once locally; the loop is not kept).
-  - Verify: `./mvnw test -Dtest=JobQueueTest` repeated, and a full `./mvnw verify`.
+    - `JobQueue.run` removes the task from `open` before it completes the task's future, on all paths (success, `RuntimeException`, `Error`). `size()` is already updated when a caller waiting on the future, or a `whenComplete` callback, runs. Behaviour is otherwise unchanged (order, error logging, `close()`).
+    - A new deterministic test reads `queue.size()` inside a `whenComplete` callback of the last task and asserts zero, for a task that succeeds and for one that throws. It fails on the current code.
+    - `sizeCountsWaitingAndRunningTasksUntilTheyFinish` is unchanged and passes 200 times in a row (a one-off local loop, not kept in the code).
+  - Verify: `./mvnw test -Dtest=JobQueueTest`, then a full `./mvnw verify`.
   - Depends on: T7
   - Files: `job/JobQueue.java`, `JobQueueTest.java`
