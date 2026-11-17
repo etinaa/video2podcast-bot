@@ -8,7 +8,8 @@
 #   wait.sh roles  <task> <role>... [-t seconds]     roles that work without a report file
 #
 # Exit codes: 0 all finished, 2 someone is blocked on a dialog (read it and ask the owner),
-# 3 timed out (run it again if the roles are still working). It prints no verdicts.
+# 3 timed out (run it again if the roles are still working), 4 a reviewer is not running and left no
+# report (it never started or its pane was closed). It prints no verdicts.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
@@ -22,7 +23,7 @@ state() {
 
 review() {
   local task="$1" zone="$2" round="$3" timeout="${4:-$default_timeout}"
-  local deadline=$((SECONDS + timeout))
+  local deadline=$((SECONDS + timeout)) grace=$((SECONDS + 15))
   while true; do
     local pending=() blocked=() reviewer report st
     for reviewer in reviewer-claude reviewer-codex; do
@@ -38,6 +39,14 @@ review() {
     done
     if [ ${#blocked[@]} -gt 0 ]; then echo "BLOCKED: ${blocked[*]}"; exit 2; fi
     if [ ${#pending[@]} -eq 0 ]; then echo "both reviewers finished ($zone round $round)"; exit 0; fi
+    # A reviewer that does not exist and left no report never started or was closed: do not wait.
+    if [ "$SECONDS" -ge "$grace" ]; then
+      local missing=()
+      for reviewer in "${pending[@]}"; do
+        [ "$(state "$reviewer")" = gone ] && missing+=("$reviewer")
+      done
+      if [ ${#missing[@]} -gt 0 ]; then echo "NOT RUNNING, no report: ${missing[*]}"; exit 4; fi
+    fi
     if [ "$SECONDS" -ge "$deadline" ]; then echo "TIMEOUT, still working: ${pending[*]}"; exit 3; fi
     sleep "$poll"
   done

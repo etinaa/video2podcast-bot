@@ -29,6 +29,8 @@ Before anything else, check `test "${HERDR_ENV:-}" = 1`. If it fails, tell the o
 
 ## Following the agents
 
+After every `role.sh start` read its output. An error line (`pane not found`, `agent_pane_not_found`) means the role did not start: fix it and start again before you wait for anything. Never wait for a role that is not running, and never wait out a timeout once a report or a `DONE` is there: look at the files and the pane at once.
+
 While roles work, wait with `.claude/scripts/wait.sh` (`review` for a review round, `roles` for the others), which also returns at once when an agent is blocked on a dialog, and read `tasks/T<N>/comms/status/*` and `herdr agent list` when it returns. Do not prompt a working agent just to ask how it is going. A status file is a hint, not proof: a role may not write it, and an old `DONE` stays after the next step starts. Judge by the report file and the pane state.
 
 - `NEEDS_OWNER <id>`: read the question in `tasks/T<N>/comms/questions.md` and ask the owner, quoting it with the asker's role. Append the answer as `## A: <id> · owner`, then `herdr agent prompt <asker> "[orchestrator] Owner answered <id> in tasks/T<N>/comms/questions.md"`.
@@ -99,7 +101,7 @@ Round K, starting from 1:
    .claude/scripts/role.sh start reviewer-codex T<N> "Review zone <zone>, round <K>, patch tasks/T<N>/review/<zone>-r<K>.patch. Checks: <result of step 1>."
    ```
 
-4. Wait with `.claude/scripts/wait.sh review T<N> <zone> <K>`, never on the status files alone: the Claude reviewer sometimes forgets to write its status file, and a loop that waits for it burns the whole timeout after the review is long done. The script returns when both reports exist and both panes stopped working. Exit 2 means a reviewer is blocked on a dialog (handle it as in "Following the agents"), exit 3 is a timeout (run it again). Do not read one report before the other is finished, and never pass one reviewer's report or verdict to the other. Then stop both: `role.sh stop reviewer-claude T<N>` and `role.sh stop reviewer-codex T<N>`.
+4. Wait with `.claude/scripts/wait.sh review T<N> <zone> <K>`, never on the status files alone: the Claude reviewer sometimes forgets to write its status file, and a loop that waits for it burns the whole timeout after the review is long done. The script returns when both reports exist and both panes stopped working. Exit 2 means a reviewer is blocked on a dialog (handle it as in "Following the agents"), exit 3 is a timeout (run it again), exit 4 means a reviewer is not running and has no report (it never started: read the output of `role.sh start`, fix the cause and start it again; do not wait). Do not read one report before the other is finished, and never pass one reviewer's report or verdict to the other. Then stop both: `role.sh stop reviewer-claude T<N>` and `role.sh stop reviewer-codex T<N>`.
 5. Read both reports, `tasks/T<N>/review/<zone>-r<K>-reviewer-*.md`.
    - **Both `VERDICT: APPROVED`:** commit the zone (step 6).
    - **Otherwise:** send the author the paths of both reports and ask for every Critical and Important finding to be fixed. Run round K+1 when the author is `DONE`. If the author disputes a finding, or the zone is not approved after round 3, show the owner both verdicts and the dispute.

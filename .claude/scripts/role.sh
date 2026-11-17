@@ -78,8 +78,14 @@ free_pane() {
   local splits direction pane
   splits="$(cat "$count_file")"
   if [ $((splits % 2)) -eq 0 ]; then direction=right; else direction=down; fi
-  pane="$(herdr pane split --pane "$(cat "$last_file")" --direction "$direction" --cwd "$root" --no-focus \
-    | jq -r '.result.pane.pane_id')"
+  pane="$(herdr pane split --pane "$(cat "$last_file")" --direction "$direction" --cwd "$root" --no-focus 2>/dev/null \
+    | jq -r '.result.pane.pane_id // empty' 2>/dev/null || true)"
+  if [ -z "$pane" ]; then
+    # The saved pane or tab is gone (the last pane of the tab was closed): start a new tab.
+    rm -f "$tab_file" "$last_file" "$count_file"
+    free_pane "$task"
+    return
+  fi
   echo $((splits + 1)) >"$count_file"
   echo "$pane" | tee "$last_file"
 }
@@ -112,7 +118,7 @@ stop() {
   # The next split must not start from the closed pane.
   if [ "$(cat "$state/$task.last-pane" 2>/dev/null)" = "$pane" ]; then
     local other
-    other="$(ls "$state"/"$task".*.pane 2>/dev/null | head -1)"
+    other="$(ls "$state"/"$task".*.pane 2>/dev/null | head -1 || true)"
     if [ -n "$other" ]; then cp "$other" "$state/$task.last-pane"; else rm -f "$state/$task".*; fi
   fi
   echo "$role stopped"
