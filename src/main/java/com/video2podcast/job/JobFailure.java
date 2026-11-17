@@ -16,7 +16,9 @@ public class JobFailure extends RuntimeException {
     UNSUPPORTED,
     TOO_LONG,
     FAILED,
-    TIMEOUT
+    TIMEOUT,
+    NO_SPEECH,
+    SERVICE_UNREACHABLE
   }
 
   private final Kind kind;
@@ -53,6 +55,11 @@ public class JobFailure extends RuntimeException {
     return new JobFailure(Kind.TOO_LONG, "The video is longer than " + formatLimit(limit) + ".");
   }
 
+  /** A {@code FAILED} with the transcription message; {@code cause} may be null. */
+  public static JobFailure transcriptionFailed(Throwable cause) {
+    return new JobFailure(Kind.FAILED, "Transcription failed. Please try again later.", cause);
+  }
+
   private static String messageOf(Kind kind) {
     return switch (kind) {
       case PRIVATE -> "This video is private or needs a sign-in.";
@@ -60,6 +67,8 @@ public class JobFailure extends RuntimeException {
       case TOO_LONG -> "The video is too long.";
       case FAILED -> "Could not process this video. Please try again later.";
       case TIMEOUT -> "Processing took too long and was stopped.";
+      case NO_SPEECH -> "No speech was found in this video.";
+      case SERVICE_UNREACHABLE -> "The transcription server is unreachable.";
     };
   }
 

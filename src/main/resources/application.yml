@@ -16,6 +16,7 @@ app:
     model: ${OLLAMA_MODEL:qwen3:32b}
   whisper:
     base-url: ${WHISPER_BASE_URL:http://host.containers.internal:8081}
+    timeout: ${WHISPER_TIMEOUT:PT10M}
   jobs:
     work-dir: ${WORK_DIR:/work}
     max-video-duration: ${MAX_VIDEO_DURATION:PT3H}

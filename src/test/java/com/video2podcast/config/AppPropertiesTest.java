@@ -26,6 +26,7 @@ class AppPropertiesTest {
     assertThat(props.ollama().model()).isEqualTo("qwen3:32b");
     assertThat(props.ollama().baseUrl()).isEqualTo("http://host.containers.internal:11434");
     assertThat(props.whisper().baseUrl()).isEqualTo("http://host.containers.internal:8081");
+    assertThat(props.whisper().timeout()).isEqualTo(Duration.ofMinutes(10));
     assertThat(props.access().file()).isEqualTo(Path.of("/data/allowed-users.json"));
     assertThat(props.access().requestCooldown()).isEqualTo(Duration.ofHours(24));
     assertThat(props.jobs().workDir()).isEqualTo(Path.of("/work"));

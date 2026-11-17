@@ -15,7 +15,8 @@ public record AppProperties(
 
   public record Ollama(String baseUrl, String model) {}
 
-  public record Whisper(String baseUrl) {}
+  /** {@code timeout} is how long one chunk may wait for its answer. */
+  public record Whisper(String baseUrl, Duration timeout) {}
 
   public record Jobs(
       Path workDir,

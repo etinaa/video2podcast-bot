@@ -23,6 +23,21 @@ class JobFailureTest {
   }
 
   @Test
+  void transcriptionKindsHaveTheirOwnMessages() {
+    assertThat(JobFailure.of(JobFailure.Kind.NO_SPEECH).getMessage())
+        .isEqualTo("No speech was found in this video.");
+    assertThat(JobFailure.of(JobFailure.Kind.SERVICE_UNREACHABLE).getMessage())
+        .isEqualTo("The transcription server is unreachable.");
+
+    Exception cause = new java.io.IOException("/secret/path");
+    JobFailure failure = JobFailure.transcriptionFailed(cause);
+    assertThat(failure.kind()).isEqualTo(JobFailure.Kind.FAILED);
+    assertThat(failure.getMessage()).isEqualTo("Transcription failed. Please try again later.");
+    assertThat(failure.getCause()).isSameAs(cause);
+    assertThat(JobFailure.transcriptionFailed(null).getCause()).isNull();
+  }
+
+  @Test
   void tooLongFormatsTheLimit() {
     assertThat(JobFailure.tooLong(Duration.ofHours(3)).getMessage())
         .isEqualTo("The video is longer than 3 hours.");
