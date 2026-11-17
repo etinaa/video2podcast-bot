@@ -37,7 +37,9 @@ public class JobQueue implements AutoCloseable {
 
   /**
    * Queues a task. The returned future completes when the task has run, exceptionally if it threw,
-   * and is cancelled if the queue is stopped before the task could finish.
+   * and is cancelled if the queue is stopped before the task could finish. When the queue completes
+   * the future, the task has already stopped counting toward {@link #size()}, so a waiter or a
+   * {@code whenComplete} callback sees the updated size.
    *
    * @throws RejectedExecutionException after {@link #close()}
    */
@@ -53,24 +55,34 @@ public class JobQueue implements AutoCloseable {
     return result;
   }
 
-  /** How many tasks are waiting or running, which is also the position a new task would get. */
+  /**
+   * How many tasks are waiting or running, which is also the position a new task would get. A task
+   * stops counting before the queue completes its future.
+   */
   public int size() {
     return open.size();
   }
 
   private void run(Runnable task, CompletableFuture<Void> result) {
+    Throwable failure = new IllegalStateException("Queued task ended abnormally");
     try {
       if (!result.isDone()) {
         task.run();
-        result.complete(null);
+        failure = null;
       }
     } catch (RuntimeException e) {
       LOG.error("Queued task failed", e);
-      result.completeExceptionally(e);
+      failure = e;
     } finally {
-      // An Error skips both branches above; its future must still complete so nobody waits forever.
-      result.completeExceptionally(new IllegalStateException("Queued task ended abnormally"));
+      // Leave the open set first, so size() is already correct when the future's waiters run.
       open.remove(result);
+      // An Error skips both branches above and keeps the "abnormal" failure; the future must still
+      // complete so nobody waits forever.
+      if (failure == null) {
+        result.complete(null);
+      } else {
+        result.completeExceptionally(failure);
+      }
     }
   }
 

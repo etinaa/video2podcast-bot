@@ -14,6 +14,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -84,6 +85,78 @@ class JobQueueTest {
     first.get(5, TimeUnit.SECONDS);
     second.get(5, TimeUnit.SECONDS);
     assertThat(queue.size()).isZero();
+  }
+
+  @Test
+  void sizeIsZeroInsideTheCallbackOfTheLastSucceededTask() throws Exception {
+    AtomicInteger observed = new AtomicInteger(-1);
+    CountDownLatch called = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+    queue.submit(() -> await(release));
+    CompletableFuture<Void> last = queue.submit(() -> {});
+    last.whenComplete((value, error) -> {
+      observed.set(queue.size());
+      called.countDown();
+    });
+
+    release.countDown();
+    assertThat(called.await(5, TimeUnit.SECONDS)).isTrue();
+
+    assertThat(last.get(5, TimeUnit.SECONDS)).isNull();
+    assertThat(observed).hasValue(0);
+  }
+
+  @Test
+  void sizeIsZeroInsideTheCallbackOfTheLastFailedTask() throws Exception {
+    IllegalStateException thrown = new IllegalStateException("boom");
+    AtomicInteger observed = new AtomicInteger(-1);
+    AtomicReference<Throwable> callbackError = new AtomicReference<>();
+    CountDownLatch called = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+    queue.submit(() -> await(release));
+    CompletableFuture<Void> last =
+        queue.submit(() -> {
+          throw thrown;
+        });
+    last.whenComplete((value, error) -> {
+      observed.set(queue.size());
+      callbackError.set(error);
+      called.countDown();
+    });
+
+    release.countDown();
+    assertThat(called.await(5, TimeUnit.SECONDS)).isTrue();
+
+    assertThatThrownBy(() -> last.get(5, TimeUnit.SECONDS))
+        .isInstanceOf(ExecutionException.class)
+        .hasCause(thrown);
+    assertThat(callbackError.get()).isSameAs(thrown);
+    assertThat(observed).hasValue(0);
+  }
+
+  @Test
+  void sizeIsZeroInsideTheCallbackOfTheLastTaskThatThrowsAnError() throws Exception {
+    AtomicInteger observed = new AtomicInteger(-1);
+    CountDownLatch called = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+    queue.submit(() -> await(release));
+    CompletableFuture<Void> last =
+        queue.submit(() -> {
+          throw new AssertionError("boom");
+        });
+    last.whenComplete((value, error) -> {
+      observed.set(queue.size());
+      called.countDown();
+    });
+
+    release.countDown();
+    assertThat(called.await(5, TimeUnit.SECONDS)).isTrue();
+
+    assertThatThrownBy(() -> last.get(5, TimeUnit.SECONDS))
+        .isInstanceOf(ExecutionException.class)
+        .hasCauseInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("Queued task ended abnormally");
+    assertThat(observed).hasValue(0);
   }
 
   @Test
