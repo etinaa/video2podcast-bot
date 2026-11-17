@@ -16,5 +16,6 @@ import org.junit.platform.suite.api.Suite;
 @ConfigurationParameter(key = GLUE_PROPERTY_NAME, value = "com.video2podcast.functional")
 @ConfigurationParameter(key = PLUGIN_PROPERTY_NAME, value = "summary")
 // T8 scenarios are deferred to the pipeline wiring in T11.
-@ConfigurationParameter(key = FILTER_TAGS_PROPERTY_NAME, value = "not @T8")
+// TD2 scenarios are covered by the Developer-owned JobQueueTest.
+@ConfigurationParameter(key = FILTER_TAGS_PROPERTY_NAME, value = "not @T8 and not @TD2")
 public class CucumberIT {}
