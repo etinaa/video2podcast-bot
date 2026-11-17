@@ -139,10 +139,10 @@ Sizes: S = 1-2 files, M = 3-5 files.
     - An allowed user's URL message gets an acknowledgement within 5 seconds, then one status message that is edited through the stages (queued, downloading, transcribing n/N, summarizing).
     - On success the bot sends the HTML message (title, duration, bullets) with **Download audio** and **Download transcript** buttons (`audio:<jobId>`, `transcript:<jobId>`) and saves `job.json` with `expiresAt` = send time + 1 hour. **No audio or transcript file is sent.**
     - Failures produce a clear message and remove the job directory. Title and summary are HTML-escaped.
-    - The tag filters `not @T8` and `not @T9` in `CucumberIT` are removed (`not @TD2` stays: those scenarios are covered by `JobQueueTest`), and `src/features/T8-media.feature` and `src/features/T9-transcription.feature` are rewritten by the Analyst through the external boundary (a link message to the bot, files in the job directory, Whisper and Ollama as WireMock servers, `yt-dlp`/`ffmpeg` as a fake `ProcessRunner`), not through internal classes (the owner's decision: Cucumber scenarios may not call service code directly). Examples that only fit a component, such as the six URLs of "Accept a public HTTP URL unchanged", become examples of the link-message scenario, and the rest stays in the unit tests. The step definitions are written for the rewritten scenarios. The `@manual_media` scenarios stay manual.
+    - The tag filters `not @T8` and `not @T9` in `CucumberIT` are removed (`not @TD2` stays: those scenarios are covered by `JobQueueTest`), and `src/features/T8-media.feature` and `src/features/T9-transcription.feature` are rewritten in TD4 through the external boundary, so this task writes the step definitions for the rewritten scenarios (a link message to the bot, files in the job directory, Whisper and Ollama as WireMock servers, `yt-dlp`/`ffmpeg` as a fake `ProcessRunner`). The `@manual_media` scenarios stay manual.
     - Functional test `SummaryFlowIT` (replaces `PipelineIntegrationTest`): link, status edits, final message with two buttons, `job.json`, no file uploads; Whisper and Ollama are WireMock servers built from the T3 fixtures and `yt-dlp`/`ffmpeg` are a fake `ProcessRunner`.
   - Verify: `./mvnw verify -Dit.test=SummaryFlowIT` (functional test on the T4a harness): link, status edits, final message with two buttons, `job.json` content, no file uploads. Failure paths clean up the directory.
-  - Depends on: T5, T7, T8, T9, T10
+  - Depends on: T5, T7, T8, T9, T10, TD4
   - Files: `job/PipelineService.java`, `bot/UrlMessageHandler.java`, `bot/SummaryMessageFormatter.java`, `bot/BotUpdateHandler.java`, test
 
 ### Checkpoint 3: Summary pipeline
@@ -266,3 +266,14 @@ Work that is not scheduled in a phase. Technical debt carries the `[debt]` mark.
   - Verify: `./mvnw verify -Pmutation` is green, and it goes red when the threshold is raised above the current score (one-off check). Technical task: no Tester and no `src/it` tests; the Developer keeps the evidence in `tasks/TD3/`.
   - Depends on: none (all merged tasks T1–T9 are covered)
   - Files: `pom.xml`, `src/test/java/**`, `CLAUDE.md`, `docs/`
+
+- [~] **TD4 [debt]: Rewrite the T8, T9 and TD2 scenarios through the external boundary** (S)
+  - Why: the owner's rule is that Cucumber scenarios do not call service code. They go through what can be seen from outside: Telegram, HTTP calls, files, the queue. The scenarios of T8 (`When media preparation validates the URL ...`), T9 (`When transcription runs for the job`) and TD2 name internal components. They are excluded from `CucumberIT` for that reason and run nowhere.
+  - Acceptance:
+    - `src/features/T8-media.feature`, `T9-transcription.feature` and `TD2-job-queue.feature` have no step that names or calls a class, a component or a method. Steps send a Telegram update to the bot, set up a mock of Whisper, Ollama or the process runner, and check Telegram calls, HTTP requests received by a mock and files in the job directory.
+    - Each old scenario is either rewritten, folded into another one as an example (for example the six URLs of "Accept a public HTTP URL unchanged" become examples of one link-message scenario), or removed with a line in `tasks/TD4/requirements.md` saying which unit test covers it. No requirement of T8, T9 and TD2 loses coverage: a table in `requirements.md` maps every old scenario to its new place. For TD2 the Analyst keeps what shows in the "Queued: position N" reply and leaves the rest to the unit tests, with a note in the table.
+    - The scenarios use the step wording of `whoami.feature` where they can, and the `@manual_media` scenarios stay tagged as manual.
+    - `CucumberIT` and its filter are not changed (the scenarios stay deferred until T11 writes the steps), so `./mvnw verify` is unchanged.
+  - Verify: the Architect and the orchestrator review the features and the mapping table. A text check shows no step with a class or method name. `./mvnw verify` stays green. Technical task: the Analyst writes, the Architect and the orchestrator review; no Developer, no Tester, no code reviewers.
+  - Depends on: T8, T9, TD2
+  - Files: `src/features/T8-media.feature`, `src/features/T9-transcription.feature`, `src/features/TD2-job-queue.feature`, `tasks/TD4/requirements.md`
