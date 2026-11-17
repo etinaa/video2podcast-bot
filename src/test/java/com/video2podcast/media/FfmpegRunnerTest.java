@@ -123,6 +123,18 @@ class FfmpegRunnerTest {
   }
 
   @Test
+  void splitTimeoutPropagatesUnchanged() {
+    write(dir.resolve("audio.wav"), "RIFF");
+    FakeProcessRunner runner =
+        new FakeProcessRunner((args, timeout) -> {
+          throw JobFailure.of(Kind.TIMEOUT);
+        });
+
+    assertKind(
+        () -> new FfmpegRunner(runner, JOBS).split(dir.resolve("audio.wav"), dir), Kind.TIMEOUT);
+  }
+
+  @Test
   void splitCommandAndOrderedResult() {
     Path wav = dir.resolve("audio.wav");
     write(wav, "RIFF");

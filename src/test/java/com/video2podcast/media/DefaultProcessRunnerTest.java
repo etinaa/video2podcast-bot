@@ -57,6 +57,20 @@ class DefaultProcessRunnerTest {
   }
 
   @Test
+  void bothStreamsAreCappedAndDrainedWhenBothExceedTheCap() {
+    ProcessResult result =
+        runner.run(
+            sh(
+                "head -c 9000000 /dev/zero | tr '\\0' a; "
+                    + "head -c 9000000 /dev/zero | tr '\\0' b >&2"),
+            Duration.ofSeconds(60));
+
+    assertThat(result.exitCode()).isZero();
+    assertThat(result.stdout()).hasSize(DefaultProcessRunner.MAX_OUTPUT_BYTES);
+    assertThat(result.stderr()).hasSize(DefaultProcessRunner.MAX_OUTPUT_BYTES);
+  }
+
+  @Test
   void timeoutKillsTheWholeTree() throws Exception {
     Path pidFile = dir.resolve("child.pid");
     long start = System.nanoTime();

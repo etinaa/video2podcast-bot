@@ -22,6 +22,9 @@ class UrlValidatorTest {
         "https://[2001:4860:4860::8888]/x",
         "https://example.com./x",
         "https://172.32.0.1/x",
+        "https://172.15.1.1/x",
+        "https://192.169.1.1/x",
+        "https://unresolvable.example/x",
         "https://100.128.0.1/x",
       })
   void acceptsPublicLinks(String url) {
@@ -35,6 +38,12 @@ class UrlValidatorTest {
         " ",
         "https://example.com/a b",
         "https://example.com/a\nb",
+        "https://example.com/a\tb",
+        "https://example.com/a\rb",
+        "https://example.com/a\u0000b",
+        "https://user:@example.com/x",
+        "http://172.31.255.254/x",
+        "http://192.168.255.255/x",
         "not a url",
         "ftp://example.com/x",
         "file:///etc/passwd",

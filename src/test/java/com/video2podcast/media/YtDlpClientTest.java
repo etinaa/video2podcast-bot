@@ -237,6 +237,43 @@ class YtDlpClientTest {
   }
 
   @Test
+  void downloadTimeoutPropagatesUnchanged() {
+    touch(dir.resolve("source.m4a"));
+    FakeProcessRunner runner =
+        new FakeProcessRunner((args, timeout) -> {
+          throw JobFailure.of(Kind.TIMEOUT);
+        });
+
+    assertKind(() -> client(runner).downloadAudio(URL, dir), Kind.TIMEOUT);
+
+    assertThat(dir.resolve("source.m4a")).doesNotExist();
+  }
+
+  @Test
+  void warningsOnStderrDoNotFailAnExitZeroRun() {
+    FakeProcessRunner runner =
+        FakeProcessRunner.returning(
+            new ProcessResult(
+                0,
+                "{\"title\":\"T\",\"duration\":61}",
+                "WARNING: private playlist skipped, sign in for more"));
+
+    assertThat(client(runner).fetchMetadata(URL))
+        .isEqualTo(new VideoMetadata("T", Duration.ofSeconds(61)));
+  }
+
+  @Test
+  void downloadWithPrivateWordInStderrStillSucceedsOnExitZero() {
+    FakeProcessRunner runner =
+        new FakeProcessRunner((args, timeout) -> {
+          touch(dir.resolve("source.m4a"));
+          return new ProcessResult(0, "", "members-only extras are private");
+        });
+
+    assertThat(client(runner).downloadAudio(URL, dir)).isEqualTo(dir.resolve("source.m4a"));
+  }
+
+  @Test
   void downloadCommandAndResult() {
     Path source = dir.resolve("source.m4a");
     FakeProcessRunner runner =
