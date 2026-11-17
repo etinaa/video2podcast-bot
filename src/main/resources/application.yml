@@ -20,3 +20,6 @@ app:
     work-dir: ${WORK_DIR:/work}
     max-video-duration: ${MAX_VIDEO_DURATION:PT3H}
     retention: ${JOB_RETENTION:PT1H}
+    metadata-timeout: ${METADATA_TIMEOUT:PT1M}
+    download-timeout: ${DOWNLOAD_TIMEOUT:PT30M}
+    ffmpeg-timeout: ${FFMPEG_TIMEOUT:PT30M}

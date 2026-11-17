@@ -22,7 +22,13 @@ class TelegramConfigTest {
         new AppProperties.Access(Path.of("a.json"), Duration.ofHours(24)),
         new AppProperties.Ollama("http://localhost:11434", "m"),
         new AppProperties.Whisper("http://localhost:8081"),
-        new AppProperties.Jobs(Path.of("w"), Duration.ofHours(3), Duration.ofHours(1)));
+        new AppProperties.Jobs(
+            Path.of("w"),
+            Duration.ofHours(3),
+            Duration.ofHours(1),
+            Duration.ofMinutes(1),
+            Duration.ofMinutes(30),
+            Duration.ofMinutes(30)));
   }
 
   private ApplicationContextRunner runner(String token, long admin, boolean enabled) {

@@ -31,6 +31,9 @@ class AppPropertiesTest {
     assertThat(props.jobs().workDir()).isEqualTo(Path.of("/work"));
     assertThat(props.jobs().maxVideoDuration()).isEqualTo(Duration.ofHours(3));
     assertThat(props.jobs().retention()).isEqualTo(Duration.ofHours(1));
+    assertThat(props.jobs().metadataTimeout()).isEqualTo(Duration.ofMinutes(1));
+    assertThat(props.jobs().downloadTimeout()).isEqualTo(Duration.ofMinutes(30));
+    assertThat(props.jobs().ffmpegTimeout()).isEqualTo(Duration.ofMinutes(30));
   }
 
   @Test

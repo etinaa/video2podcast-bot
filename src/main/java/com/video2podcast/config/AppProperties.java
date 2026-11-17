@@ -17,5 +17,11 @@ public record AppProperties(
 
   public record Whisper(String baseUrl) {}
 
-  public record Jobs(Path workDir, Duration maxVideoDuration, Duration retention) {}
+  public record Jobs(
+      Path workDir,
+      Duration maxVideoDuration,
+      Duration retention,
+      Duration metadataTimeout,
+      Duration downloadTimeout,
+      Duration ffmpegTimeout) {}
 }
