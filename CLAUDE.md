@@ -28,6 +28,7 @@ In short:
 - Integration and acceptance tests: `src/it/java`, `*IT.java` and Cucumber steps, run by Failsafe. They are owned by the Tester. The Developer may not change them.
 - Scenarios: `src/features/*.feature`, in Gherkin and in English. They are owned by the Analyst.
 - `./mvnw verify` runs everything. `./mvnw verify -Dno-it` leaves out `src/it`.
+- `./mvnw verify -Pmutation` also runs PIT mutation testing on `src/main` with the unit tests only (`src/it` does not count) and fails when the mutation score is below 85%. Plain `verify` does not run PIT. See `docs/architecture/mutation-testing.md`.
 
 ## Commits
 
