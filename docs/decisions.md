@@ -82,3 +82,18 @@ test, because `size()` is the queue position T11 shows to users.
 
 **Consequences:** a caller that reads `size()` after `get()` or inside a `whenComplete` callback never
 sees the finished task. Callbacks run on the worker thread, so they must not block.
+
+## D6: Transcription client (T9, 2026-11-17)
+
+**Decision:** `WhisperClient` makes one `POST /inference` call with the JDK `HttpClient` (no new
+dependency) and reports `WhisperException(connection)`. `TranscriptionClient` owns the policy: one
+immediate retry per chunk, the retry's failure decides `SERVICE_UNREACHABLE` or `FAILED`, an
+all-empty transcript is `NO_SPEECH`. `transcript.txt` is written atomically only after every chunk
+succeeded; then `audio.wav` and `chunks/` are deleted best effort (a deletion error is logged and
+does not fail the job). `source.*` stays. On failure nothing is deleted; the pipeline cleans the
+job directory.
+
+**Consequences:** `JobFailure.Kind` gains `NO_SPEECH` and `SERVICE_UNREACHABLE`; transcription
+`FAILED` has its own message through `JobFailure.transcriptionFailed`. `SERVICE_UNREACHABLE` is the
+typed hook for the future dead-letter-queue task. There is no per-chunk resume: a rerun sends all
+chunks again.

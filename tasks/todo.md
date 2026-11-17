@@ -112,15 +112,17 @@ Sizes: S = 1-2 files, M = 3-5 files.
   - Depends on: T1
   - Files: `media/ProcessRunner.java`, `media/UrlValidator.java`, `media/YtDlpClient.java`, `media/FfmpegRunner.java`, `job/JobFailure.java`, `config/AppProperties.java`, `application.yml`, tests
 
-- [ ] **T9: Transcription client and merged transcript** (S)
+- [~] **T9: Transcription client and merged transcript** (S)
   - Acceptance:
-    - `TranscriptionClient` sends each WAV chunk to `whisper-server` (language `en`) and merges the results in order into `transcript.txt`.
-    - A failed chunk is retried once, and a second failure fails the job with a clear message. An unreachable server gives a clear "Whisper server unreachable" failure.
-    - A progress callback reports "transcribing n/N".
-    - Each chunk's text is trimmed and its inner newlines are collapsed before merging (the server wraps text per segment and starts with a space).
-  - Verify: `./mvnw test -Dtest=TranscriptionClientTest` using the T3 fixtures in WireMock (merge order, retry, unreachable, progress callbacks).
+    - `TranscriptionClient` sends each WAV chunk of a job, in order, to `whisper-server` (`POST /inference`, `response_format=json`, language `en`) and merges the results in order into `transcript.txt` in the job directory (UTF-8, chunks joined by one space, one trailing newline, no header or timestamps).
+    - Each chunk's text is trimmed and its whitespace (including inner newlines) is collapsed before merging. A chunk that is empty after that is skipped. If the whole transcript is empty, the job fails with `JobFailure(NO_SPEECH)` ("No speech was found in this video.") and no `transcript.txt` is written.
+    - A failed chunk (connection error, non-2xx answer, broken response, timeout) is retried once, immediately. A second failure stops the job: a connection error on the retry gives `JobFailure(SERVICE_UNREACHABLE)` ("The transcription server is unreachable."), any other failure gives `JobFailure(FAILED)` ("Transcription failed. Please try again later."). The remaining chunks are not sent.
+    - A progress callback is called with `n` and `N` ("transcribing n/N") before chunk `n` is sent, once per chunk (not again on the retry).
+    - The wait for one chunk's answer is `app.whisper.timeout` (env `WHISPER_TIMEOUT`, default `PT10M`); the connection wait is a fixed 5 seconds. A timeout counts as a failed chunk. `SPEC.md` lists the new variable.
+    - After `transcript.txt` is written, `audio.wav` and the `chunks/` directory are deleted. The source audio (`source.*`) is kept. On failure nothing is deleted (the pipeline cleans the job directory, T11).
+  - Verify: `./mvnw test -Dtest=TranscriptionClientTest` using the T3 fixtures in WireMock (merge order, whitespace collapsing, empty chunk and empty transcript, retry, unreachable, `400`, timeout, progress callbacks, file deletion).
   - Depends on: T3, T8
-  - Files: `transcript/TranscriptionClient.java`, `transcript/TranscriptMerger.java`, tests
+  - Files: `transcript/TranscriptionClient.java`, `transcript/TranscriptMerger.java`, `job/JobFailure.java` (kinds `NO_SPEECH`, `SERVICE_UNREACHABLE`), `config/AppProperties.java`, `application.yml`, `SPEC.md`, tests
 
 - [ ] **T10: Ollama client and map-reduce summary** (M)
   - Acceptance:
