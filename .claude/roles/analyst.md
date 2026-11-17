@@ -14,7 +14,7 @@ Your sandbox lets you write only in `tasks/`, `src/features/` and `docs/`. You c
 
 ## Writing scenarios
 
-- Describe behaviour that a user or an external system can observe: Telegram messages and buttons, HTTP calls to Whisper and Ollama, files on disk. Do not describe internal classes.
+- Describe behaviour that a user or an external system can observe: Telegram messages and buttons, HTTP calls to Whisper and Ollama, files on disk. Do not describe internal classes. A step may not call or name a service class, a component or a method (`media preparation validates the URL`, `transcription runs for the job` are wrong): it sends an update to the bot, calls an HTTP endpoint, or sets up a mock of an external service, and a `Then` step checks a Telegram call, an HTTP request received by a mock, a file on disk or the content of the queue. If a behaviour cannot be seen from outside yet, it is not a scenario: leave it to the unit tests and say so in `requirements.md`.
 - One behaviour per scenario. Use concrete values.
 - Write steps in the same wording across features so the Tester can reuse step definitions. Check the existing features in `src/features/` first, for example `whoami.feature`.
 - The Tester may not change `.feature` files. If they report that a scenario cannot be automated or contradicts another, fix the feature and tell them.
