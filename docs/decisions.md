@@ -68,3 +68,8 @@ raw stderr goes to the log only. Metadata comes from `yt-dlp --dump-json`, the U
 streams (no duration) are `UNSUPPORTED`. DNS names are not resolved, so a public name that points
 to a private address is not caught by the validator (accepted; the container has no access to
 private services other than the host ones it is meant to reach).
+
+**Approved exception (T8):** the owner approved one SpotBugs exclusion, `COMMAND_INJECTION` in
+`DefaultProcessRunner` only (`config/spotbugs-exclude.xml`), because find-sec-bugs flags any
+non-constant argument list and a typed command did not help (spike in T8). No PMD suppression is
+approved. The exclusion is tracked as technical debt in `tasks/todo.md` (TD1).

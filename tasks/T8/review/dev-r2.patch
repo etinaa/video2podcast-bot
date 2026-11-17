@@ -1,0 +1,2104 @@
+diff --git a/config/spotbugs-exclude.xml b/config/spotbugs-exclude.xml
+new file mode 100644
+index 0000000..fe94666
+--- /dev/null
++++ b/config/spotbugs-exclude.xml
+@@ -0,0 +1,11 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<FindBugsFilter>
++  <!-- Approved by the owner (A: Q-developer-3 in tasks/T8/comms/questions.md). To be removed under
++       TD1 in tasks/todo.md. DefaultProcessRunner starts yt-dlp and ffmpeg from an argument list
++       (no shell); URLs pass UrlValidator and follow the end-of-options marker. find-sec-bugs
++       flags any non-constant argument, and a typed command did not change that. -->
++  <Match>
++    <Class name="~com\.video2podcast\.media\.DefaultProcessRunner(\$Child)?"/>
++    <Bug pattern="COMMAND_INJECTION"/>
++  </Match>
++</FindBugsFilter>
+diff --git a/pom.xml b/pom.xml
+index 965b341..f4ab5db 100644
+--- a/pom.xml
++++ b/pom.xml
+@@ -200,6 +200,7 @@
+           <effort>Max</effort>
+           <threshold>Medium</threshold>
+           <failOnError>true</failOnError>
++          <excludeFilterFile>${project.basedir}/config/spotbugs-exclude.xml</excludeFilterFile>
+           <plugins>
+             <plugin>
+               <groupId>com.h3xstream.findsecbugs</groupId>
+diff --git a/src/main/java/com/video2podcast/config/AppProperties.java b/src/main/java/com/video2podcast/config/AppProperties.java
+index 583163c..b329a28 100644
+--- a/src/main/java/com/video2podcast/config/AppProperties.java
++++ b/src/main/java/com/video2podcast/config/AppProperties.java
+@@ -17,5 +17,11 @@ public record AppProperties(
+ 
+   public record Whisper(String baseUrl) {}
+ 
+-  public record Jobs(Path workDir, Duration maxVideoDuration, Duration retention) {}
++  public record Jobs(
++      Path workDir,
++      Duration maxVideoDuration,
++      Duration retention,
++      Duration metadataTimeout,
++      Duration downloadTimeout,
++      Duration ffmpegTimeout) {}
+ }
+diff --git a/src/main/java/com/video2podcast/config/MediaConfig.java b/src/main/java/com/video2podcast/config/MediaConfig.java
+new file mode 100644
+index 0000000..7fc9c6a
+--- /dev/null
++++ b/src/main/java/com/video2podcast/config/MediaConfig.java
+@@ -0,0 +1,35 @@
++package com.video2podcast.config;
++
++import com.video2podcast.media.DefaultProcessRunner;
++import com.video2podcast.media.FfmpegRunner;
++import com.video2podcast.media.ProcessRunner;
++import com.video2podcast.media.UrlValidator;
++import com.video2podcast.media.YtDlpClient;
++import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
++import org.springframework.context.annotation.Bean;
++import org.springframework.context.annotation.Configuration;
++
++@Configuration(proxyBeanMethods = false)
++public class MediaConfig {
++
++  @Bean
++  @ConditionalOnMissingBean(ProcessRunner.class)
++  ProcessRunner processRunner() {
++    return new DefaultProcessRunner();
++  }
++
++  @Bean
++  UrlValidator urlValidator() {
++    return new UrlValidator();
++  }
++
++  @Bean
++  YtDlpClient ytDlpClient(ProcessRunner runner, UrlValidator validator, AppProperties props) {
++    return new YtDlpClient(runner, validator, props.jobs());
++  }
++
++  @Bean
++  FfmpegRunner ffmpegRunner(ProcessRunner runner, AppProperties props) {
++    return new FfmpegRunner(runner, props.jobs());
++  }
++}
+diff --git a/src/main/java/com/video2podcast/job/JobFailure.java b/src/main/java/com/video2podcast/job/JobFailure.java
+new file mode 100644
+index 0000000..427b9bb
+--- /dev/null
++++ b/src/main/java/com/video2podcast/job/JobFailure.java
+@@ -0,0 +1,81 @@
++package com.video2podcast.job;
++
++import java.time.Duration;
++
++/**
++ * A job failed in a way the user may be told about. The message is one of a few fixed English
++ * sentences and never contains stderr, paths or the URL.
++ */
++public class JobFailure extends RuntimeException {
++
++  private static final long serialVersionUID = 1L;
++
++  /** Why the job failed. */
++  public enum Kind {
++    PRIVATE,
++    UNSUPPORTED,
++    TOO_LONG,
++    FAILED,
++    TIMEOUT
++  }
++
++  private final Kind kind;
++
++  public JobFailure(Kind kind, String safeMessage) {
++    this(kind, safeMessage, null);
++  }
++
++  /** The cause is for logs only; it is never part of the message. */
++  private JobFailure(Kind kind, String safeMessage, Throwable cause) {
++    super(safeMessage, cause);
++    this.kind = kind;
++  }
++
++  public Kind kind() {
++    return kind;
++  }
++
++  /** A failure with the fixed message of {@code kind}; {@code TOO_LONG} uses {@link #tooLong}. */
++  public static JobFailure of(Kind kind) {
++    return new JobFailure(kind, messageOf(kind));
++  }
++
++  /** Like {@link #of(Kind)}, keeping {@code cause} for the log. */
++  public static JobFailure of(Kind kind, Throwable cause) {
++    return new JobFailure(kind, messageOf(kind), cause);
++  }
++
++  public static JobFailure unsupportedLiveStream() {
++    return new JobFailure(Kind.UNSUPPORTED, "Live streams are not supported.");
++  }
++
++  public static JobFailure tooLong(Duration limit) {
++    return new JobFailure(Kind.TOO_LONG, "The video is longer than " + formatLimit(limit) + ".");
++  }
++
++  private static String messageOf(Kind kind) {
++    return switch (kind) {
++      case PRIVATE -> "This video is private or needs a sign-in.";
++      case UNSUPPORTED -> "This link is not a supported video.";
++      case TOO_LONG -> "The video is too long.";
++      case FAILED -> "Could not process this video. Please try again later.";
++      case TIMEOUT -> "Processing took too long and was stopped.";
++    };
++  }
++
++  private static String formatLimit(Duration limit) {
++    long hours = limit.toHours();
++    long minutes = limit.toMinutesPart();
++    StringBuilder text = new StringBuilder();
++    if (hours > 0) {
++      text.append(hours).append(hours == 1 ? " hour" : " hours");
++    }
++    if (minutes > 0) {
++      if (!text.isEmpty()) {
++        text.append(' ');
++      }
++      text.append(minutes).append(minutes == 1 ? " minute" : " minutes");
++    }
++    return text.isEmpty() ? "0 minutes" : text.toString();
++  }
++}
+diff --git a/src/main/java/com/video2podcast/media/ChunkSplitter.java b/src/main/java/com/video2podcast/media/ChunkSplitter.java
+new file mode 100644
+index 0000000..db11093
+--- /dev/null
++++ b/src/main/java/com/video2podcast/media/ChunkSplitter.java
+@@ -0,0 +1,79 @@
++package com.video2podcast.media;
++
++import com.video2podcast.job.JobFailure;
++import java.io.IOException;
++import java.nio.file.DirectoryStream;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.util.ArrayList;
++import java.util.Comparator;
++import java.util.List;
++import java.util.Objects;
++import java.util.regex.Pattern;
++
++/** The pure part of splitting: the ffmpeg segment arguments and the list of produced chunks. */
++final class ChunkSplitter {
++
++  static final int SEGMENT_SECONDS = 600;
++
++  private static final Pattern CHUNK = Pattern.compile("chunk-\\d{3}\\.wav");
++
++  private ChunkSplitter() {}
++
++  static List<String> splitArgs(Path wav, Path chunksDir) {
++    // ffmpeg reads % in the output pattern as a format marker; %% is a literal percent sign.
++    String pattern = chunksDir.toString().replace("%", "%%") + "/chunk-%03d.wav";
++    return List.of(
++        "ffmpeg",
++        "-nostdin",
++        "-hide_banner",
++        "-loglevel",
++        "error",
++        "-y",
++        "-i",
++        wav.toString(),
++        "-f",
++        "segment",
++        "-segment_time",
++        String.valueOf(SEGMENT_SECONDS),
++        "-c",
++        "copy",
++        pattern);
++  }
++
++  /** The chunk files in {@code chunksDir}, sorted by name. */
++  static List<Path> collect(Path chunksDir) {
++    List<Path> chunks = list(chunksDir);
++    chunks.sort(Comparator.comparing(ChunkSplitter::name));
++    return chunks;
++  }
++
++  /** Deletes the chunk files left in {@code chunksDir} by an earlier run. */
++  static void deleteExisting(Path chunksDir) {
++    try {
++      for (Path stale : list(chunksDir)) {
++        Files.deleteIfExists(stale);
++      }
++    } catch (IOException e) {
++      throw JobFailure.of(JobFailure.Kind.FAILED, e);
++    }
++  }
++
++  private static String name(Path path) {
++    return Objects.toString(path.getFileName(), "");
++  }
++
++  private static List<Path> list(Path chunksDir) {
++    List<Path> found = new ArrayList<>();
++    try (DirectoryStream<Path> stream = Files.newDirectoryStream(chunksDir)) {
++      for (Path path : stream) {
++        if (CHUNK.matcher(name(path)).matches() && Files.isRegularFile(path)) {
++          found.add(path);
++        }
++      }
++    } catch (IOException e) {
++      throw JobFailure.of(JobFailure.Kind.FAILED, e);
++    }
++    return found;
++  }
++}
+diff --git a/src/main/java/com/video2podcast/media/DefaultProcessRunner.java b/src/main/java/com/video2podcast/media/DefaultProcessRunner.java
+new file mode 100644
+index 0000000..83822be
+--- /dev/null
++++ b/src/main/java/com/video2podcast/media/DefaultProcessRunner.java
+@@ -0,0 +1,169 @@
++package com.video2podcast.media;
++
++import com.video2podcast.job.JobFailure;
++import java.io.ByteArrayOutputStream;
++import java.io.Closeable;
++import java.io.IOException;
++import java.io.InputStream;
++import java.nio.charset.StandardCharsets;
++import java.time.Duration;
++import java.util.List;
++import java.util.concurrent.TimeUnit;
++
++/**
++ * Runs a process without a shell, reads both output streams on their own threads and kills the
++ * whole process tree when the timeout ends. Nothing here waits without a bound.
++ */
++public class DefaultProcessRunner implements ProcessRunner {
++
++  static final int MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
++  private static final Duration CLEANUP_BUDGET = Duration.ofSeconds(5);
++  private static final long GRACE_NANOS = TimeUnit.MILLISECONDS.toNanos(200);
++
++  /** Collects up to {@link #MAX_OUTPUT_BYTES} and keeps reading (and dropping) the rest. */
++  private static final class Reader implements Runnable {
++    private final InputStream in;
++    private final ByteArrayOutputStream buffer = new ByteArrayOutputStream();
++
++    Reader(InputStream in) {
++      this.in = in;
++    }
++
++    @Override
++    public void run() {
++      byte[] chunk = new byte[8192];
++      try {
++        int n = in.read(chunk);
++        while (n >= 0) {
++          append(chunk, n);
++          n = in.read(chunk);
++        }
++      } catch (IOException ignored) {
++        // The stream was closed under us (cleanup) or the process died: keep what we have.
++      }
++    }
++
++    private synchronized void append(byte[] data, int length) {
++      int room = MAX_OUTPUT_BYTES - buffer.size();
++      if (room > 0) {
++        buffer.write(data, 0, Math.min(room, length));
++      }
++    }
++
++    synchronized String text() {
++      return buffer.toString(StandardCharsets.UTF_8);
++    }
++  }
++
++  /** A started process; closing it closes all three of its streams. */
++  private static final class Child implements AutoCloseable {
++    private final Process process;
++
++    private Child(Process process) {
++      this.process = process;
++    }
++
++    static Child start(List<String> args) {
++      try {
++        Child child = new Child(new ProcessBuilder(args).start());
++        // Nothing is ever sent to the child; closing stdin keeps a reader from waiting on it.
++        closeQuietly(child.process.getOutputStream());
++        return child;
++      } catch (IOException e) {
++        throw JobFailure.of(JobFailure.Kind.FAILED, e);
++      }
++    }
++
++    InputStream stdout() {
++      return process.getInputStream();
++    }
++
++    InputStream stderr() {
++      return process.getErrorStream();
++    }
++
++    boolean waitFor(long nanos) throws InterruptedException {
++      return process.waitFor(nanos, TimeUnit.NANOSECONDS);
++    }
++
++    int exitCode() {
++      return process.exitValue();
++    }
++
++    void killTree() {
++      List<ProcessHandle> descendants = process.descendants().toList();
++      descendants.forEach(ProcessHandle::destroyForcibly);
++      process.destroyForcibly();
++    }
++
++    @Override
++    public void close() {
++      closeQuietly(process.getInputStream());
++      closeQuietly(process.getErrorStream());
++      closeQuietly(process.getOutputStream());
++    }
++  }
++
++  @Override
++  public ProcessResult run(List<String> args, Duration timeout) {
++    if (timeout == null || timeout.isZero() || timeout.isNegative()) {
++      throw new IllegalArgumentException("timeout must be positive");
++    }
++    try (Child child = Child.start(args)) {
++      Reader out = new Reader(child.stdout());
++      Reader err = new Reader(child.stderr());
++      Thread outThread = daemon(out, "process-stdout");
++      Thread errThread = daemon(err, "process-stderr");
++      outThread.start();
++      errThread.start();
++      try {
++        if (!child.waitFor(timeout.toNanos())) {
++          killAndCleanUp(child, outThread, errThread);
++          throw JobFailure.of(JobFailure.Kind.TIMEOUT);
++        }
++        long deadline = System.nanoTime() + CLEANUP_BUDGET.toNanos();
++        join(outThread, deadline);
++        join(errThread, deadline);
++        child.close();
++        join(outThread, System.nanoTime() + GRACE_NANOS);
++        join(errThread, System.nanoTime() + GRACE_NANOS);
++        return new ProcessResult(child.exitCode(), out.text(), err.text());
++      } catch (InterruptedException e) {
++        Thread.currentThread().interrupt();
++        child.killTree();
++        throw JobFailure.of(JobFailure.Kind.FAILED, e);
++      }
++    }
++  }
++
++  private static Thread daemon(Runnable task, String name) {
++    Thread thread = new Thread(task, name);
++    thread.setDaemon(true);
++    return thread;
++  }
++
++  private static void killAndCleanUp(Child child, Thread outThread, Thread errThread)
++      throws InterruptedException {
++    long deadline = System.nanoTime() + CLEANUP_BUDGET.toNanos();
++    child.killTree();
++    child.waitFor(Math.max(0, deadline - System.nanoTime()));
++    child.close();
++    join(outThread, deadline);
++    join(errThread, deadline);
++  }
++
++  private static void closeQuietly(Closeable stream) {
++    try {
++      stream.close();
++    } catch (IOException ignored) {
++      // Nothing left to do for a stream that will not close.
++    }
++  }
++
++  private static void join(Thread thread, long deadlineNanos) throws InterruptedException {
++    long left = deadlineNanos - System.nanoTime();
++    if (left > 0) {
++      thread.join(Math.max(1, TimeUnit.NANOSECONDS.toMillis(left)));
++    }
++  }
++}
+diff --git a/src/main/java/com/video2podcast/media/FfmpegRunner.java b/src/main/java/com/video2podcast/media/FfmpegRunner.java
+new file mode 100644
+index 0000000..df852e8
+--- /dev/null
++++ b/src/main/java/com/video2podcast/media/FfmpegRunner.java
+@@ -0,0 +1,103 @@
++package com.video2podcast.media;
++
++import com.video2podcast.config.AppProperties;
++import com.video2podcast.job.JobFailure;
++import java.io.IOException;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.util.List;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
++/** Turns a downloaded source into a 16 kHz mono WAV and cuts it into ten-minute chunks. */
++public class FfmpegRunner {
++
++  private static final Logger LOG = LoggerFactory.getLogger(FfmpegRunner.class);
++
++  private final ProcessRunner runner;
++  private final AppProperties.Jobs jobs;
++
++  public FfmpegRunner(ProcessRunner runner, AppProperties.Jobs jobs) {
++    this.runner = runner;
++    this.jobs = jobs;
++  }
++
++  /**
++   * Creates {@code audio.wav} (16 kHz, mono, pcm_s16le) in {@code jobDir} and returns it.
++   *
++   * @throws JobFailure FAILED or TIMEOUT
++   */
++  public Path toWav(Path source, Path jobDir) {
++    Path wav = jobDir.resolve("audio.wav");
++    try {
++      Files.deleteIfExists(wav);
++    } catch (IOException e) {
++      throw JobFailure.of(JobFailure.Kind.FAILED, e);
++    }
++    run(
++        List.of(
++            "ffmpeg",
++            "-nostdin",
++            "-hide_banner",
++            "-loglevel",
++            "error",
++            "-y",
++            "-i",
++            source.toString(),
++            "-vn",
++            "-ar",
++            "16000",
++            "-ac",
++            "1",
++            "-c:a",
++            "pcm_s16le",
++            wav.toString()));
++    if (!nonEmptyFile(wav)) {
++      throw JobFailure.of(JobFailure.Kind.FAILED);
++    }
++    return wav;
++  }
++
++  /**
++   * Splits {@code wav} into {@code <jobDir>/chunks/chunk-NNN.wav} of about ten minutes.
++   *
++   * @return the chunks in order
++   */
++  public List<Path> split(Path wav, Path jobDir) {
++    if (!Files.isRegularFile(wav)) {
++      throw JobFailure.of(JobFailure.Kind.FAILED);
++    }
++    Path chunksDir = jobDir.resolve("chunks");
++    try {
++      Files.createDirectories(chunksDir);
++    } catch (IOException e) {
++      throw JobFailure.of(JobFailure.Kind.FAILED, e);
++    }
++    ChunkSplitter.deleteExisting(chunksDir);
++    run(ChunkSplitter.splitArgs(wav, chunksDir));
++    List<Path> chunks = ChunkSplitter.collect(chunksDir);
++    if (chunks.isEmpty()) {
++      throw JobFailure.of(JobFailure.Kind.FAILED);
++    }
++    return chunks;
++  }
++
++  private void run(List<String> args) {
++    ProcessResult result = runner.run(args, jobs.ffmpegTimeout());
++    if (result.exitCode() != 0) {
++      String stderr = result.stderr() == null ? "" : result.stderr();
++      if (LOG.isWarnEnabled()) {
++        LOG.warn("ffmpeg exited with {}: {}", result.exitCode(), YtDlpClient.forLog(stderr));
++      }
++      throw JobFailure.of(JobFailure.Kind.FAILED);
++    }
++  }
++
++  private static boolean nonEmptyFile(Path file) {
++    try {
++      return Files.isRegularFile(file) && Files.size(file) > 0;
++    } catch (IOException e) {
++      return false;
++    }
++  }
++}
+diff --git a/src/main/java/com/video2podcast/media/ProcessResult.java b/src/main/java/com/video2podcast/media/ProcessResult.java
+new file mode 100644
+index 0000000..4b0d05b
+--- /dev/null
++++ b/src/main/java/com/video2podcast/media/ProcessResult.java
+@@ -0,0 +1,4 @@
++package com.video2podcast.media;
++
++/** What an external process left behind. */
++public record ProcessResult(int exitCode, String stdout, String stderr) {}
+diff --git a/src/main/java/com/video2podcast/media/ProcessRunner.java b/src/main/java/com/video2podcast/media/ProcessRunner.java
+new file mode 100644
+index 0000000..ce34bd7
+--- /dev/null
++++ b/src/main/java/com/video2podcast/media/ProcessRunner.java
+@@ -0,0 +1,18 @@
++package com.video2podcast.media;
++
++import com.video2podcast.job.JobFailure;
++import java.time.Duration;
++import java.util.List;
++
++/** The only seam to the operating system; tests and the functional harness replace it. */
++public interface ProcessRunner {
++
++  /**
++   * Runs {@code args[0]} with {@code args[1..]} (no shell) and waits at most {@code timeout}. A
++   * non-zero exit is reported in the result, not thrown.
++   *
++   * @throws JobFailure {@code TIMEOUT} when the process had to be killed, {@code FAILED} when it
++   *     cannot start or the thread is interrupted
++   */
++  ProcessResult run(List<String> args, Duration timeout);
++}
+diff --git a/src/main/java/com/video2podcast/media/StderrClassifier.java b/src/main/java/com/video2podcast/media/StderrClassifier.java
+new file mode 100644
+index 0000000..c5d45f7
+--- /dev/null
++++ b/src/main/java/com/video2podcast/media/StderrClassifier.java
+@@ -0,0 +1,33 @@
++package com.video2podcast.media;
++
++import com.video2podcast.job.JobFailure;
++import java.util.List;
++import java.util.Locale;
++
++/**
++ * The one table that turns yt-dlp's stderr into a failure kind. The bare {@code age} marker is
++ * broad (it also matches "language"); that tradeoff was accepted by the owner.
++ */
++final class StderrClassifier {
++
++  private static final List<String> PRIVATE_MARKERS =
++      List.of("private", "sign in", "members-only", "age");
++  private static final List<String> UNSUPPORTED_MARKERS = List.of("unsupported url");
++
++  private StderrClassifier() {}
++
++  static JobFailure.Kind classify(String stderr) {
++    String text = stderr == null ? "" : stderr.toLowerCase(Locale.ROOT);
++    if (containsAny(text, PRIVATE_MARKERS)) {
++      return JobFailure.Kind.PRIVATE;
++    }
++    if (containsAny(text, UNSUPPORTED_MARKERS)) {
++      return JobFailure.Kind.UNSUPPORTED;
++    }
++    return JobFailure.Kind.FAILED;
++  }
++
++  private static boolean containsAny(String text, List<String> markers) {
++    return markers.stream().anyMatch(text::contains);
++  }
++}
+diff --git a/src/main/java/com/video2podcast/media/UrlValidator.java b/src/main/java/com/video2podcast/media/UrlValidator.java
+new file mode 100644
+index 0000000..31b6368
+--- /dev/null
++++ b/src/main/java/com/video2podcast/media/UrlValidator.java
+@@ -0,0 +1,100 @@
++package com.video2podcast.media;
++
++import com.video2podcast.job.JobFailure;
++import java.net.InetAddress;
++import java.net.URI;
++import java.net.URISyntaxException;
++import java.net.UnknownHostException;
++import java.util.Locale;
++import java.util.regex.Pattern;
++
++/**
++ * Checks a link before any process sees it. Only http(s) links to public hosts pass. No DNS lookup
++ * is made: a host name is accepted or rejected by its spelling alone.
++ */
++public class UrlValidator {
++
++  private static final int MAX_LENGTH = 2048;
++  private static final Pattern DIGITS_AND_DOTS = Pattern.compile("[0-9.]+");
++  private static final Pattern DOTTED_QUAD =
++      Pattern.compile(
++          "(?:(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.){3}(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)");
++
++  /**
++   * Returns the URL unchanged when valid.
++   *
++   * @throws JobFailure {@code UNSUPPORTED} otherwise
++   */
++  public String validate(String url) {
++    if (url == null || url.isBlank() || url.length() > MAX_LENGTH || hasForbiddenChar(url)) {
++      throw reject();
++    }
++    URI uri;
++    try {
++      uri = new URI(url);
++    } catch (URISyntaxException e) {
++      throw JobFailure.of(JobFailure.Kind.UNSUPPORTED, e);
++    }
++    String scheme = uri.getScheme();
++    String host = uri.getHost();
++    if (scheme == null
++        || !("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme))
++        || host == null
++        || uri.getUserInfo() != null
++        || isForbiddenHost(host)) {
++      throw reject();
++    }
++    return url;
++  }
++
++  private static boolean hasForbiddenChar(String url) {
++    return url.codePoints().anyMatch(c -> Character.isWhitespace(c) || Character.isISOControl(c));
++  }
++
++  private static boolean isForbiddenHost(String rawHost) {
++    String host = rawHost.toLowerCase(Locale.ROOT);
++    while (host.endsWith(".")) {
++      host = host.substring(0, host.length() - 1);
++    }
++    if (host.isEmpty() || "localhost".equals(host) || host.endsWith(".localhost")) {
++      return true;
++    }
++    if (host.startsWith("[") && host.endsWith("]")) {
++      return isForbiddenAddress(host.substring(1, host.length() - 1));
++    }
++    if (DIGITS_AND_DOTS.matcher(host).matches()) {
++      return !DOTTED_QUAD.matcher(host).matches() || isForbiddenAddress(host);
++    }
++    return false;
++  }
++
++  /** {@code literal} is an IP literal, so {@code getByName} parses it without a lookup. */
++  private static boolean isForbiddenAddress(String literal) {
++    if (literal.indexOf('%') >= 0) {
++      return true;
++    }
++    byte[] bytes;
++    InetAddress address;
++    try {
++      address = InetAddress.getByName(literal);
++    } catch (UnknownHostException e) {
++      return true;
++    }
++    bytes = address.getAddress();
++    if (address.isLoopbackAddress()
++        || address.isAnyLocalAddress()
++        || address.isLinkLocalAddress()
++        || address.isSiteLocalAddress()) {
++      return true;
++    }
++    if (bytes.length == 16) {
++      return (bytes[0] & 0xFE) == 0xFC;
++    }
++    // 100.64.0.0/10
++    return (bytes[0] & 0xFF) == 100 && (bytes[1] & 0xC0) == 64;
++  }
++
++  private static JobFailure reject() {
++    return JobFailure.of(JobFailure.Kind.UNSUPPORTED);
++  }
++}
+diff --git a/src/main/java/com/video2podcast/media/VideoMetadata.java b/src/main/java/com/video2podcast/media/VideoMetadata.java
+new file mode 100644
+index 0000000..ceaefb3
+--- /dev/null
++++ b/src/main/java/com/video2podcast/media/VideoMetadata.java
+@@ -0,0 +1,5 @@
++package com.video2podcast.media;
++
++import java.time.Duration;
++
++public record VideoMetadata(String title, Duration duration) {}
+diff --git a/src/main/java/com/video2podcast/media/YtDlpClient.java b/src/main/java/com/video2podcast/media/YtDlpClient.java
+new file mode 100644
+index 0000000..cf652a7
+--- /dev/null
++++ b/src/main/java/com/video2podcast/media/YtDlpClient.java
+@@ -0,0 +1,174 @@
++package com.video2podcast.media;
++
++import com.fasterxml.jackson.databind.JsonNode;
++import com.video2podcast.config.AppProperties;
++import com.video2podcast.job.JobFailure;
++import com.video2podcast.storage.Json;
++import java.io.IOException;
++import java.math.BigDecimal;
++import java.math.RoundingMode;
++import java.nio.file.DirectoryStream;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.time.Duration;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Objects;
++import java.util.Set;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
++/** Asks yt-dlp for a video's metadata and downloads its audio. */
++public class YtDlpClient {
++
++  private static final Logger LOG = LoggerFactory.getLogger(YtDlpClient.class);
++
++  private static final int LOG_LIMIT = 2000;
++  private static final Set<String> COLLECTIONS = Set.of("playlist", "multi_video");
++
++  private final ProcessRunner runner;
++  private final UrlValidator validator;
++  private final AppProperties.Jobs jobs;
++
++  public YtDlpClient(ProcessRunner runner, UrlValidator validator, AppProperties.Jobs jobs) {
++    this.runner = runner;
++    this.validator = validator;
++    this.jobs = jobs;
++  }
++
++  /**
++   * @throws JobFailure UNSUPPORTED (bad URL, live or no duration), TOO_LONG, PRIVATE, FAILED,
++   *     TIMEOUT
++   */
++  public VideoMetadata fetchMetadata(String url) {
++    validator.validate(url);
++    ProcessResult result =
++        runner.run(
++            List.of(
++                "yt-dlp",
++                "--no-playlist",
++                "--playlist-items",
++                "1",
++                "--no-warnings",
++                "--skip-download",
++                "--dump-single-json",
++                "--",
++                url),
++            jobs.metadataTimeout());
++    requireSuccess(result);
++    return parse(result.stdout());
++  }
++
++  /**
++   * Downloads into {@code jobDir} as {@code source.<ext>} and returns that file.
++   *
++   * @throws JobFailure as for {@link #fetchMetadata}
++   */
++  public Path downloadAudio(String url, Path jobDir) {
++    validator.validate(url);
++    if (!Files.isDirectory(jobDir)) {
++      throw JobFailure.of(JobFailure.Kind.FAILED);
++    }
++    for (Path stale : sourceFiles(jobDir, true)) {
++      try {
++        Files.deleteIfExists(stale);
++      } catch (IOException e) {
++        throw JobFailure.of(JobFailure.Kind.FAILED, e);
++      }
++    }
++    // yt-dlp reads % in -o as a template marker, and the work directory is configurable.
++    String template = jobDir.toString().replace("%", "%%") + "/source.%(ext)s";
++    ProcessResult result =
++        runner.run(
++            List.of(
++                "yt-dlp",
++                "--no-playlist",
++                "--playlist-items",
++                "1",
++                "--no-warnings",
++                "-f",
++                "bestaudio[ext=m4a]/bestaudio",
++                "-o",
++                template,
++                "--",
++                url),
++            jobs.downloadTimeout());
++    requireSuccess(result);
++    List<Path> sources = sourceFiles(jobDir, false);
++    if (sources.size() != 1) {
++      throw JobFailure.of(JobFailure.Kind.FAILED);
++    }
++    return sources.get(0);
++  }
++
++  private void requireSuccess(ProcessResult result) {
++    if (result.exitCode() != 0) {
++      String stderr = result.stderr() == null ? "" : result.stderr();
++      if (LOG.isWarnEnabled()) {
++        LOG.warn("yt-dlp exited with {}: {}", result.exitCode(), forLog(stderr));
++      }
++      throw JobFailure.of(StderrClassifier.classify(stderr));
++    }
++  }
++
++  private VideoMetadata parse(String stdout) {
++    JsonNode root;
++    try {
++      root = Json.MAPPER.readTree(stdout);
++    } catch (IOException | RuntimeException e) {
++      throw JobFailure.of(JobFailure.Kind.FAILED, e);
++    }
++    if (root == null || !root.isObject()) {
++      throw JobFailure.of(JobFailure.Kind.FAILED);
++    }
++    if (COLLECTIONS.contains(root.path("_type").asText(""))) {
++      throw JobFailure.of(JobFailure.Kind.UNSUPPORTED);
++    }
++    JsonNode title = root.path("title");
++    if (!title.isTextual() || title.asText().isBlank()) {
++      throw JobFailure.of(JobFailure.Kind.FAILED);
++    }
++    JsonNode live = root.path("is_live");
++    if (live.isBoolean() && live.booleanValue()) {
++      throw JobFailure.unsupportedLiveStream();
++    }
++    JsonNode seconds = root.path("duration");
++    if (!seconds.isNumber() || seconds.decimalValue().signum() <= 0) {
++      throw JobFailure.of(JobFailure.Kind.UNSUPPORTED);
++    }
++    // Round up, so 10800.1 s never slips under a 3 h limit.
++    long whole =
++        seconds
++            .decimalValue()
++            .setScale(0, RoundingMode.CEILING)
++            .min(BigDecimal.valueOf(Long.MAX_VALUE / 2))
++            .longValueExact();
++    Duration duration = Duration.ofSeconds(whole);
++    if (duration.compareTo(jobs.maxVideoDuration()) > 0) {
++      throw JobFailure.tooLong(jobs.maxVideoDuration());
++    }
++    return new VideoMetadata(title.asText(), duration);
++  }
++
++  /** {@code source.*} files in {@code jobDir}; partial downloads only when {@code withPartial}. */
++  private static List<Path> sourceFiles(Path jobDir, boolean withPartial) {
++    List<Path> found = new ArrayList<>();
++    try (DirectoryStream<Path> stream = Files.newDirectoryStream(jobDir, "source.*")) {
++      for (Path path : stream) {
++        String name = Objects.toString(path.getFileName(), "");
++        boolean partial = name.endsWith(".part") || name.endsWith(".ytdl");
++        if (Files.isRegularFile(path) && (withPartial || !partial)) {
++          found.add(path);
++        }
++      }
++    } catch (IOException e) {
++      throw JobFailure.of(JobFailure.Kind.FAILED, e);
++    }
++    return found;
++  }
++
++  static String forLog(String stderr) {
++    String text = stderr.length() > LOG_LIMIT ? stderr.substring(0, LOG_LIMIT) : stderr;
++    return text.replace('\r', ' ').replace('\n', ' ');
++  }
++}
+diff --git a/src/main/resources/application.yml b/src/main/resources/application.yml
+index 4c4b944..4290fb2 100644
+--- a/src/main/resources/application.yml
++++ b/src/main/resources/application.yml
+@@ -20,3 +20,6 @@ app:
+     work-dir: ${WORK_DIR:/work}
+     max-video-duration: ${MAX_VIDEO_DURATION:PT3H}
+     retention: ${JOB_RETENTION:PT1H}
++    metadata-timeout: ${METADATA_TIMEOUT:PT1M}
++    download-timeout: ${DOWNLOAD_TIMEOUT:PT30M}
++    ffmpeg-timeout: ${FFMPEG_TIMEOUT:PT30M}
+diff --git a/src/test/java/com/video2podcast/config/AppPropertiesTest.java b/src/test/java/com/video2podcast/config/AppPropertiesTest.java
+index e8ca8ee..6381dba 100644
+--- a/src/test/java/com/video2podcast/config/AppPropertiesTest.java
++++ b/src/test/java/com/video2podcast/config/AppPropertiesTest.java
+@@ -31,6 +31,9 @@ class AppPropertiesTest {
+     assertThat(props.jobs().workDir()).isEqualTo(Path.of("/work"));
+     assertThat(props.jobs().maxVideoDuration()).isEqualTo(Duration.ofHours(3));
+     assertThat(props.jobs().retention()).isEqualTo(Duration.ofHours(1));
++    assertThat(props.jobs().metadataTimeout()).isEqualTo(Duration.ofMinutes(1));
++    assertThat(props.jobs().downloadTimeout()).isEqualTo(Duration.ofMinutes(30));
++    assertThat(props.jobs().ffmpegTimeout()).isEqualTo(Duration.ofMinutes(30));
+   }
+ 
+   @Test
+diff --git a/src/test/java/com/video2podcast/config/MediaConfigTest.java b/src/test/java/com/video2podcast/config/MediaConfigTest.java
+new file mode 100644
+index 0000000..ed4ed67
+--- /dev/null
++++ b/src/test/java/com/video2podcast/config/MediaConfigTest.java
+@@ -0,0 +1,59 @@
++package com.video2podcast.config;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++import com.video2podcast.media.DefaultProcessRunner;
++import com.video2podcast.media.FfmpegRunner;
++import com.video2podcast.media.ProcessResult;
++import com.video2podcast.media.ProcessRunner;
++import com.video2podcast.media.UrlValidator;
++import com.video2podcast.media.YtDlpClient;
++import java.nio.file.Path;
++import java.time.Duration;
++import org.junit.jupiter.api.Test;
++import org.springframework.boot.test.context.runner.ApplicationContextRunner;
++
++class MediaConfigTest {
++
++  private static AppProperties props() {
++    return new AppProperties(
++        null,
++        null,
++        null,
++        null,
++        new AppProperties.Jobs(
++            Path.of("w"),
++            Duration.ofHours(3),
++            Duration.ofHours(1),
++            Duration.ofMinutes(1),
++            Duration.ofMinutes(30),
++            Duration.ofMinutes(30)));
++  }
++
++  private ApplicationContextRunner runner() {
++    return new ApplicationContextRunner()
++        .withBean(AppProperties.class, MediaConfigTest::props)
++        .withUserConfiguration(MediaConfig.class);
++  }
++
++  @Test
++  void createsTheRealRunnerAndTheMediaBeans() {
++    runner()
++        .run(context -> {
++          assertThat(context.getBean(ProcessRunner.class)).isInstanceOf(DefaultProcessRunner.class);
++          assertThat(context).hasSingleBean(UrlValidator.class);
++          assertThat(context).hasSingleBean(YtDlpClient.class);
++          assertThat(context).hasSingleBean(FfmpegRunner.class);
++        });
++  }
++
++  @Test
++  void aSuppliedProcessRunnerReplacesTheRealOne() {
++    ProcessRunner fake = (args, timeout) -> new ProcessResult(0, "", "");
++    new ApplicationContextRunner()
++        .withBean(AppProperties.class, MediaConfigTest::props)
++        .withBean(ProcessRunner.class, () -> fake)
++        .withUserConfiguration(MediaConfig.class)
++        .run(context -> assertThat(context.getBean(ProcessRunner.class)).isSameAs(fake));
++  }
++}
+diff --git a/src/test/java/com/video2podcast/config/TelegramConfigTest.java b/src/test/java/com/video2podcast/config/TelegramConfigTest.java
+index 9a28aa3..670a450 100644
+--- a/src/test/java/com/video2podcast/config/TelegramConfigTest.java
++++ b/src/test/java/com/video2podcast/config/TelegramConfigTest.java
+@@ -22,7 +22,13 @@ class TelegramConfigTest {
+         new AppProperties.Access(Path.of("a.json"), Duration.ofHours(24)),
+         new AppProperties.Ollama("http://localhost:11434", "m"),
+         new AppProperties.Whisper("http://localhost:8081"),
+-        new AppProperties.Jobs(Path.of("w"), Duration.ofHours(3), Duration.ofHours(1)));
++        new AppProperties.Jobs(
++            Path.of("w"),
++            Duration.ofHours(3),
++            Duration.ofHours(1),
++            Duration.ofMinutes(1),
++            Duration.ofMinutes(30),
++            Duration.ofMinutes(30)));
+   }
+ 
+   private ApplicationContextRunner runner(String token, long admin, boolean enabled) {
+diff --git a/src/test/java/com/video2podcast/job/JobFailureTest.java b/src/test/java/com/video2podcast/job/JobFailureTest.java
+new file mode 100644
+index 0000000..d9fdf17
+--- /dev/null
++++ b/src/test/java/com/video2podcast/job/JobFailureTest.java
+@@ -0,0 +1,56 @@
++package com.video2podcast.job;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++import java.time.Duration;
++import org.junit.jupiter.api.Test;
++
++class JobFailureTest {
++
++  @Test
++  void fixedMessagesPerKind() {
++    assertThat(JobFailure.of(JobFailure.Kind.PRIVATE).getMessage())
++        .isEqualTo("This video is private or needs a sign-in.");
++    assertThat(JobFailure.of(JobFailure.Kind.UNSUPPORTED).getMessage())
++        .isEqualTo("This link is not a supported video.");
++    assertThat(JobFailure.of(JobFailure.Kind.FAILED).getMessage())
++        .isEqualTo("Could not process this video. Please try again later.");
++    assertThat(JobFailure.of(JobFailure.Kind.TIMEOUT).getMessage())
++        .isEqualTo("Processing took too long and was stopped.");
++    assertThat(JobFailure.of(JobFailure.Kind.TOO_LONG).kind()).isEqualTo(JobFailure.Kind.TOO_LONG);
++    assertThat(JobFailure.unsupportedLiveStream().getMessage())
++        .isEqualTo("Live streams are not supported.");
++  }
++
++  @Test
++  void tooLongFormatsTheLimit() {
++    assertThat(JobFailure.tooLong(Duration.ofHours(3)).getMessage())
++        .isEqualTo("The video is longer than 3 hours.");
++    assertThat(JobFailure.tooLong(Duration.ofHours(1)).getMessage())
++        .isEqualTo("The video is longer than 1 hour.");
++    assertThat(JobFailure.tooLong(Duration.ofMinutes(90)).getMessage())
++        .isEqualTo("The video is longer than 1 hour 30 minutes.");
++    assertThat(JobFailure.tooLong(Duration.ofMinutes(1)).getMessage())
++        .isEqualTo("The video is longer than 1 minute.");
++    assertThat(JobFailure.tooLong(Duration.ZERO).getMessage())
++        .isEqualTo("The video is longer than 0 minutes.");
++  }
++
++  @Test
++  void causeIsKeptForLogsButNotInTheMessage() {
++    Exception cause = new java.io.IOException("/secret/path");
++
++    JobFailure failure = JobFailure.of(JobFailure.Kind.FAILED, cause);
++
++    assertThat(failure.getCause()).isSameAs(cause);
++    assertThat(failure.getMessage())
++        .isEqualTo("Could not process this video. Please try again later.");
++  }
++
++  @Test
++  void publicConstructorKeepsKindAndMessage() {
++    JobFailure failure = new JobFailure(JobFailure.Kind.FAILED, "x");
++    assertThat(failure.kind()).isEqualTo(JobFailure.Kind.FAILED);
++    assertThat(failure).hasMessage("x").hasNoCause();
++  }
++}
+diff --git a/src/test/java/com/video2podcast/media/ChunkSplitterTest.java b/src/test/java/com/video2podcast/media/ChunkSplitterTest.java
+new file mode 100644
+index 0000000..c402845
+--- /dev/null
++++ b/src/test/java/com/video2podcast/media/ChunkSplitterTest.java
+@@ -0,0 +1,75 @@
++package com.video2podcast.media;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.assertj.core.api.Assertions.assertThatThrownBy;
++
++import com.video2podcast.job.JobFailure;
++import java.io.IOException;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.util.List;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.io.TempDir;
++
++class ChunkSplitterTest {
++
++  @TempDir Path dir;
++
++  private static void write(Path file) throws IOException {
++    Files.createDirectories(file.getParent());
++    Files.writeString(file, "x");
++  }
++
++  @Test
++  void segmentArgumentsUseTenMinutes() {
++    List<String> args = ChunkSplitter.splitArgs(Path.of("/w/a.wav"), Path.of("/w/chunks"));
++
++    assertThat(args)
++        .containsSubsequence("-f", "segment", "-segment_time", "600", "-c", "copy")
++        .endsWith("/w/chunks/chunk-%03d.wav");
++    assertThat(ChunkSplitter.SEGMENT_SECONDS).isEqualTo(600);
++  }
++
++  @Test
++  void splitEscapesPercentInTheOutputPattern() {
++    List<String> args = ChunkSplitter.splitArgs(Path.of("/w/a.wav"), Path.of("/w/50%/chunks"));
++
++    assertThat(args.get(args.size() - 1)).isEqualTo("/w/50%%/chunks/chunk-%03d.wav");
++  }
++
++  @Test
++  void collectSortsByNameAndIgnoresOtherFiles() throws IOException {
++    Path chunks = dir.resolve("chunks");
++    write(chunks.resolve("chunk-001.wav"));
++    write(chunks.resolve("chunk-000.wav"));
++    write(chunks.resolve("chunk-1.wav"));
++    write(chunks.resolve("chunk-001.wav.tmp"));
++
++    assertThat(ChunkSplitter.collect(chunks))
++        .containsExactly(chunks.resolve("chunk-000.wav"), chunks.resolve("chunk-001.wav"));
++  }
++
++  @Test
++  void deleteExistingRemovesOnlyChunks() throws IOException {
++    Path chunks = dir.resolve("chunks");
++    write(chunks.resolve("chunk-000.wav"));
++    write(chunks.resolve("keep.txt"));
++
++    ChunkSplitter.deleteExisting(chunks);
++
++    assertThat(chunks.resolve("chunk-000.wav")).doesNotExist();
++    assertThat(chunks.resolve("keep.txt")).exists();
++  }
++
++  @Test
++  void missingChunksDirIsFailed() {
++    Path missing = dir.resolve("nope");
++
++    assertThatThrownBy(() -> ChunkSplitter.collect(missing))
++        .isInstanceOfSatisfying(
++            JobFailure.class, f -> assertThat(f.kind()).isEqualTo(JobFailure.Kind.FAILED));
++    assertThatThrownBy(() -> ChunkSplitter.deleteExisting(missing))
++        .isInstanceOfSatisfying(
++            JobFailure.class, f -> assertThat(f.kind()).isEqualTo(JobFailure.Kind.FAILED));
++  }
++}
+diff --git a/src/test/java/com/video2podcast/media/DefaultProcessRunnerTest.java b/src/test/java/com/video2podcast/media/DefaultProcessRunnerTest.java
+new file mode 100644
+index 0000000..1a09acf
+--- /dev/null
++++ b/src/test/java/com/video2podcast/media/DefaultProcessRunnerTest.java
+@@ -0,0 +1,226 @@
++package com.video2podcast.media;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.assertj.core.api.Assertions.assertThatThrownBy;
++
++import com.video2podcast.job.JobFailure;
++import com.video2podcast.job.JobFailure.Kind;
++import java.io.IOException;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.time.Duration;
++import java.util.List;
++import java.util.Optional;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.io.TempDir;
++
++/** Uses {@code /bin/sh} as the controlled helper process; no media tools are needed. */
++class DefaultProcessRunnerTest {
++
++  private final DefaultProcessRunner runner = new DefaultProcessRunner();
++
++  @TempDir Path dir;
++
++  private static List<String> sh(String script) {
++    return List.of("/bin/sh", "-c", script);
++  }
++
++  @Test
++  void capturesOutputAndExitCode() {
++    ProcessResult result = runner.run(sh("echo out; echo err >&2; exit 3"), Duration.ofSeconds(10));
++
++    assertThat(result.exitCode()).isEqualTo(3);
++    assertThat(result.stdout()).isEqualTo("out\n");
++    assertThat(result.stderr()).isEqualTo("err\n");
++  }
++
++  @Test
++  void largeOutputOnBothStreamsDoesNotDeadlock() {
++    ProcessResult result =
++        runner.run(
++            sh(
++                "head -c 2000000 /dev/zero | tr '\\0' a; head -c 2000000 /dev/zero | tr '\\0' b >&2"),
++            Duration.ofSeconds(30));
++
++    assertThat(result.exitCode()).isZero();
++    assertThat(result.stdout()).hasSize(2_000_000);
++    assertThat(result.stderr()).hasSize(2_000_000);
++  }
++
++  @Test
++  void outputIsCappedButStillDrained() {
++    ProcessResult result =
++        runner.run(sh("head -c 9000000 /dev/zero | tr '\\0' a"), Duration.ofSeconds(60));
++
++    assertThat(result.exitCode()).isZero();
++    assertThat(result.stdout()).hasSize(DefaultProcessRunner.MAX_OUTPUT_BYTES);
++  }
++
++  @Test
++  void timeoutKillsTheWholeTree() throws Exception {
++    Path pidFile = dir.resolve("child.pid");
++    long start = System.nanoTime();
++
++    assertThatThrownBy(() ->
++            runner.run(sh("sleep 60 & echo $! > '" + pidFile + "'; wait"), Duration.ofSeconds(1)))
++        .isInstanceOfSatisfying(
++            JobFailure.class, f -> assertThat(f.kind()).isEqualTo(Kind.TIMEOUT));
++
++    assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(Duration.ofSeconds(12));
++    long childPid = Long.parseLong(Files.readString(pidFile).trim());
++    Optional<ProcessHandle> child = ProcessHandle.of(childPid);
++    for (int i = 0; i < 50 && child.isPresent() && child.get().isAlive(); i++) {
++      Thread.sleep(100);
++    }
++    assertThat(child.map(ProcessHandle::isAlive).orElse(false)).isFalse();
++  }
++
++  @Test
++  void lingeringPipeHolderReturnsWithinTheCleanupBudget() throws Exception {
++    Path pidFile = dir.resolve("orphan.pid");
++    long start = System.nanoTime();
++    ProcessResult result;
++    try {
++      result =
++          runner.run(
++              sh("echo hello; sleep 60 & echo $! > '" + pidFile + "'; exit 0"),
++              Duration.ofSeconds(30));
++    } finally {
++      killOrphan(pidFile);
++    }
++
++    Duration took = Duration.ofNanos(System.nanoTime() - start);
++    assertThat(took).isGreaterThan(Duration.ofSeconds(3)).isLessThan(Duration.ofSeconds(9));
++    assertThat(result.exitCode()).isZero();
++    assertThat(result.stdout()).isEqualTo("hello\n");
++  }
++
++  private static void killOrphan(Path pidFile) throws IOException {
++    if (Files.exists(pidFile)) {
++      long pid = Long.parseLong(Files.readString(pidFile).trim());
++      ProcessHandle.of(pid).ifPresent(ProcessHandle::destroyForcibly);
++    }
++  }
++
++  @Test
++  void missingBinaryIsFailed() {
++    assertThatThrownBy(() -> runner.run(List.of("/no/such/binary"), Duration.ofSeconds(5)))
++        .isInstanceOfSatisfying(JobFailure.class, f -> assertThat(f.kind()).isEqualTo(Kind.FAILED));
++  }
++
++  @Test
++  void nonPositiveTimeoutIsRejected() {
++    assertThatThrownBy(() -> runner.run(sh("true"), Duration.ZERO))
++        .isInstanceOf(IllegalArgumentException.class);
++    assertThatThrownBy(() -> runner.run(sh("true"), Duration.ofSeconds(-1)))
++        .isInstanceOf(IllegalArgumentException.class);
++    assertThatThrownBy(() -> runner.run(sh("true"), null))
++        .isInstanceOf(IllegalArgumentException.class);
++  }
++
++  @Test
++  void interruptKillsTheWholeTreeAndKeepsTheFlag() throws Exception {
++    Path shellPidFile = dir.resolve("sh.pid");
++    Path childPidFile = dir.resolve("child.pid");
++    Throwable[] thrown = new Throwable[1];
++    boolean[] flag = new boolean[1];
++    Thread thread =
++        new Thread(() -> {
++          try {
++            runner.run(
++                sh(
++                    "sleep 60 & echo $! > '"
++                        + childPidFile
++                        + "'; echo $$ > '"
++                        + shellPidFile
++                        + "'; wait"),
++                Duration.ofSeconds(60));
++          } catch (JobFailure e) {
++            thrown[0] = e;
++          }
++          flag[0] = Thread.currentThread().isInterrupted();
++        });
++    thread.start();
++    long shellPid = 0;
++    long childPid = 0;
++    try {
++      shellPid = awaitPid(shellPidFile);
++      childPid = awaitPid(childPidFile);
++      thread.interrupt();
++      thread.join(10_000);
++
++      assertThat(thread.isAlive()).isFalse();
++      assertThat(thrown[0])
++          .isInstanceOfSatisfying(
++              JobFailure.class, f -> assertThat(f.kind()).isEqualTo(Kind.FAILED));
++      assertThat(flag[0]).isTrue();
++      assertThat(diesWithin(shellPid)).as("shell process ended").isTrue();
++      assertThat(diesWithin(childPid)).as("child process ended").isTrue();
++    } finally {
++      thread.interrupt();
++      destroy(shellPid);
++      destroy(childPid);
++    }
++  }
++
++  @Test
++  void argumentsReachTheProcessLiterallyWithoutSideEffects() throws Exception {
++    Path sentinel = dir.resolve("sentinel");
++    Path spaced = Files.createDirectory(dir.resolve("my job dir"));
++    List<String> hostile =
++        List.of(
++            "https://example.com/a?x=1&y=2;z=$(touch '" + sentinel + "')|`touch " + sentinel + "`",
++            "; touch " + sentinel + " #",
++            "$HOME ${HOME} *",
++            spaced + "/source.%(ext)s",
++            "--",
++            "");
++    List<String> command = new java.util.ArrayList<>();
++    command.addAll(
++        List.of("/bin/sh", "-c", "for a in \"$@\"; do printf '%s\\0' \"$a\"; done", "helper"));
++    command.addAll(hostile);
++
++    ProcessResult result = runner.run(command, Duration.ofSeconds(10));
++
++    assertThat(result.exitCode()).isZero();
++    String[] received = result.stdout().split("\0", -1);
++    assertThat(List.of(received).subList(0, received.length - 1))
++        .containsExactlyElementsOf(hostile);
++    assertThat(sentinel).doesNotExist();
++  }
++
++  @Test
++  void childCannotWaitForInput() {
++    ProcessResult result = runner.run(sh("cat; echo done"), Duration.ofSeconds(10));
++
++    assertThat(result.exitCode()).isZero();
++    assertThat(result.stdout()).isEqualTo("done\n");
++  }
++
++  private static long awaitPid(Path file) throws Exception {
++    for (int i = 0; i < 200; i++) {
++      if (Files.exists(file) && !Files.readString(file).isBlank()) {
++        return Long.parseLong(Files.readString(file).trim());
++      }
++      Thread.sleep(50);
++    }
++    throw new AssertionError("no pid written to " + file);
++  }
++
++  private static boolean diesWithin(long pid) throws InterruptedException {
++    for (int i = 0; i < 100; i++) {
++      if (ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false)) {
++        Thread.sleep(100);
++      } else {
++        return true;
++      }
++    }
++    return false;
++  }
++
++  private static void destroy(long pid) {
++    if (pid > 0) {
++      ProcessHandle.of(pid).ifPresent(ProcessHandle::destroyForcibly);
++    }
++  }
++}
+diff --git a/src/test/java/com/video2podcast/media/FakeProcessRunner.java b/src/test/java/com/video2podcast/media/FakeProcessRunner.java
+new file mode 100644
+index 0000000..a8181a4
+--- /dev/null
++++ b/src/test/java/com/video2podcast/media/FakeProcessRunner.java
+@@ -0,0 +1,29 @@
++package com.video2podcast.media;
++
++import java.time.Duration;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.function.BiFunction;
++
++/** Records every call and answers with whatever the test supplied. */
++final class FakeProcessRunner implements ProcessRunner {
++
++  final List<List<String>> calls = new ArrayList<>();
++  final List<Duration> timeouts = new ArrayList<>();
++  private final BiFunction<List<String>, Duration, ProcessResult> answer;
++
++  FakeProcessRunner(BiFunction<List<String>, Duration, ProcessResult> answer) {
++    this.answer = answer;
++  }
++
++  static FakeProcessRunner returning(ProcessResult result) {
++    return new FakeProcessRunner((args, timeout) -> result);
++  }
++
++  @Override
++  public ProcessResult run(List<String> args, Duration timeout) {
++    calls.add(args);
++    timeouts.add(timeout);
++    return answer.apply(args, timeout);
++  }
++}
+diff --git a/src/test/java/com/video2podcast/media/FfmpegRunnerTest.java b/src/test/java/com/video2podcast/media/FfmpegRunnerTest.java
+new file mode 100644
+index 0000000..26fd429
+--- /dev/null
++++ b/src/test/java/com/video2podcast/media/FfmpegRunnerTest.java
+@@ -0,0 +1,192 @@
++package com.video2podcast.media;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.assertj.core.api.Assertions.assertThatThrownBy;
++
++import com.video2podcast.config.AppProperties;
++import com.video2podcast.job.JobFailure;
++import com.video2podcast.job.JobFailure.Kind;
++import java.io.IOException;
++import java.io.UncheckedIOException;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.time.Duration;
++import java.util.List;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.io.TempDir;
++
++class FfmpegRunnerTest {
++
++  private static final AppProperties.Jobs JOBS =
++      new AppProperties.Jobs(
++          Path.of("w"),
++          Duration.ofHours(3),
++          Duration.ofHours(1),
++          Duration.ofMinutes(1),
++          Duration.ofMinutes(30),
++          Duration.ofMinutes(20));
++
++  @TempDir Path dir;
++
++  private static void write(Path file, String content) {
++    try {
++      Files.createDirectories(file.getParent());
++      Files.writeString(file, content);
++    } catch (IOException e) {
++      throw new UncheckedIOException(e);
++    }
++  }
++
++  private static ProcessResult ok() {
++    return new ProcessResult(0, "", "");
++  }
++
++  private static void assertKind(Runnable action, Kind kind) {
++    assertThatThrownBy(action::run)
++        .isInstanceOfSatisfying(JobFailure.class, f -> assertThat(f.kind()).isEqualTo(kind));
++  }
++
++  @Test
++  void toWavCommandAndResult() {
++    Path source = dir.resolve("source.m4a");
++    Path wav = dir.resolve("audio.wav");
++    FakeProcessRunner runner =
++        new FakeProcessRunner((args, timeout) -> {
++          write(wav, "RIFF");
++          return ok();
++        });
++
++    Path result = new FfmpegRunner(runner, JOBS).toWav(source, dir);
++
++    assertThat(result).isEqualTo(wav);
++    assertThat(runner.calls.get(0))
++        .containsExactly(
++            "ffmpeg",
++            "-nostdin",
++            "-hide_banner",
++            "-loglevel",
++            "error",
++            "-y",
++            "-i",
++            source.toString(),
++            "-vn",
++            "-ar",
++            "16000",
++            "-ac",
++            "1",
++            "-c:a",
++            "pcm_s16le",
++            wav.toString());
++    assertThat(runner.timeouts.get(0)).isEqualTo(Duration.ofMinutes(20));
++  }
++
++  @Test
++  void toWavDeletesStaleWavAndRequiresNewOutput() {
++    write(dir.resolve("audio.wav"), "old");
++    FakeProcessRunner runner = FakeProcessRunner.returning(ok());
++
++    assertKind(
++        () -> new FfmpegRunner(runner, JOBS).toWav(dir.resolve("source.m4a"), dir), Kind.FAILED);
++
++    assertThat(dir.resolve("audio.wav")).doesNotExist();
++  }
++
++  @Test
++  void toWavRejectsEmptyOutput() {
++    FakeProcessRunner runner =
++        new FakeProcessRunner((args, timeout) -> {
++          write(dir.resolve("audio.wav"), "");
++          return ok();
++        });
++    assertKind(() -> new FfmpegRunner(runner, JOBS).toWav(dir.resolve("s.m4a"), dir), Kind.FAILED);
++  }
++
++  @Test
++  void toWavNonZeroExitIsFailed() {
++    FakeProcessRunner runner = FakeProcessRunner.returning(new ProcessResult(1, "", "boom /x"));
++    assertThatThrownBy(() -> new FfmpegRunner(runner, JOBS).toWav(dir.resolve("s.m4a"), dir))
++        .isInstanceOfSatisfying(
++            JobFailure.class,
++            f -> {
++              assertThat(f.kind()).isEqualTo(Kind.FAILED);
++              assertThat(f.getMessage()).doesNotContain("boom");
++            });
++  }
++
++  @Test
++  void toWavTimeoutPropagates() {
++    FakeProcessRunner runner =
++        new FakeProcessRunner((args, timeout) -> {
++          throw JobFailure.of(Kind.TIMEOUT);
++        });
++    assertKind(() -> new FfmpegRunner(runner, JOBS).toWav(dir.resolve("s.m4a"), dir), Kind.TIMEOUT);
++  }
++
++  @Test
++  void splitCommandAndOrderedResult() {
++    Path wav = dir.resolve("audio.wav");
++    write(wav, "RIFF");
++    Path chunks = dir.resolve("chunks");
++    write(chunks.resolve("chunk-009.wav"), "stale");
++    write(chunks.resolve("keep.txt"), "other");
++    FakeProcessRunner runner =
++        new FakeProcessRunner((args, timeout) -> {
++          assertThat(chunks.resolve("chunk-009.wav")).doesNotExist();
++          write(chunks.resolve("chunk-002.wav"), "c");
++          write(chunks.resolve("chunk-000.wav"), "a");
++          write(chunks.resolve("chunk-001.wav"), "b");
++          return ok();
++        });
++
++    List<Path> result = new FfmpegRunner(runner, JOBS).split(wav, dir);
++
++    assertThat(result)
++        .containsExactly(
++            chunks.resolve("chunk-000.wav"),
++            chunks.resolve("chunk-001.wav"),
++            chunks.resolve("chunk-002.wav"));
++    assertThat(chunks.resolve("keep.txt")).exists();
++    assertThat(runner.calls.get(0))
++        .containsExactly(
++            "ffmpeg",
++            "-nostdin",
++            "-hide_banner",
++            "-loglevel",
++            "error",
++            "-y",
++            "-i",
++            wav.toString(),
++            "-f",
++            "segment",
++            "-segment_time",
++            "600",
++            "-c",
++            "copy",
++            chunks + "/chunk-%03d.wav");
++    assertThat(runner.timeouts.get(0)).isEqualTo(Duration.ofMinutes(20));
++  }
++
++  @Test
++  void splitWithoutWavIsFailed() {
++    FakeProcessRunner runner = FakeProcessRunner.returning(ok());
++    assertKind(
++        () -> new FfmpegRunner(runner, JOBS).split(dir.resolve("audio.wav"), dir), Kind.FAILED);
++    assertThat(runner.calls).isEmpty();
++  }
++
++  @Test
++  void splitWithNoChunksIsFailed() {
++    write(dir.resolve("audio.wav"), "RIFF");
++    FakeProcessRunner runner = FakeProcessRunner.returning(ok());
++    assertKind(
++        () -> new FfmpegRunner(runner, JOBS).split(dir.resolve("audio.wav"), dir), Kind.FAILED);
++  }
++
++  @Test
++  void splitNonZeroExitIsFailed() {
++    write(dir.resolve("audio.wav"), "RIFF");
++    FakeProcessRunner runner = FakeProcessRunner.returning(new ProcessResult(1, "", "err"));
++    assertKind(
++        () -> new FfmpegRunner(runner, JOBS).split(dir.resolve("audio.wav"), dir), Kind.FAILED);
++  }
++}
+diff --git a/src/test/java/com/video2podcast/media/StderrClassifierTest.java b/src/test/java/com/video2podcast/media/StderrClassifierTest.java
+new file mode 100644
+index 0000000..e386cbf
+--- /dev/null
++++ b/src/test/java/com/video2podcast/media/StderrClassifierTest.java
+@@ -0,0 +1,34 @@
++package com.video2podcast.media;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++import com.video2podcast.job.JobFailure.Kind;
++import org.junit.jupiter.api.Test;
++
++class StderrClassifierTest {
++
++  @Test
++  void privateMarkers() {
++    assertThat(StderrClassifier.classify("ERROR: Private video")).isEqualTo(Kind.PRIVATE);
++    assertThat(StderrClassifier.classify("Sign in to confirm")).isEqualTo(Kind.PRIVATE);
++    assertThat(StderrClassifier.classify("members-only content")).isEqualTo(Kind.PRIVATE);
++    assertThat(StderrClassifier.classify("confirm your age")).isEqualTo(Kind.PRIVATE);
++  }
++
++  @Test
++  void unsupportedUrl() {
++    assertThat(StderrClassifier.classify("ERROR: Unsupported URL: x")).isEqualTo(Kind.UNSUPPORTED);
++  }
++
++  @Test
++  void privateWinsWhenBothMatch() {
++    assertThat(StderrClassifier.classify("Unsupported URL, private")).isEqualTo(Kind.PRIVATE);
++  }
++
++  @Test
++  void otherwiseFailed() {
++    assertThat(StderrClassifier.classify("HTTP 500")).isEqualTo(Kind.FAILED);
++    assertThat(StderrClassifier.classify("")).isEqualTo(Kind.FAILED);
++    assertThat(StderrClassifier.classify(null)).isEqualTo(Kind.FAILED);
++  }
++}
+diff --git a/src/test/java/com/video2podcast/media/UrlValidatorTest.java b/src/test/java/com/video2podcast/media/UrlValidatorTest.java
+new file mode 100644
+index 0000000..fb0134e
+--- /dev/null
++++ b/src/test/java/com/video2podcast/media/UrlValidatorTest.java
+@@ -0,0 +1,83 @@
++package com.video2podcast.media;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.assertj.core.api.Assertions.assertThatThrownBy;
++
++import com.video2podcast.job.JobFailure;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.params.ParameterizedTest;
++import org.junit.jupiter.params.provider.NullAndEmptySource;
++import org.junit.jupiter.params.provider.ValueSource;
++
++class UrlValidatorTest {
++
++  private final UrlValidator validator = new UrlValidator();
++
++  @ParameterizedTest
++  @ValueSource(
++      strings = {
++        "https://www.youtube.com/watch?v=abc",
++        "HTTP://example.com/x",
++        "https://8.8.8.8/x",
++        "https://[2001:4860:4860::8888]/x",
++        "https://example.com./x",
++        "https://172.32.0.1/x",
++        "https://100.128.0.1/x",
++      })
++  void acceptsPublicLinks(String url) {
++    assertThat(validator.validate(url)).isEqualTo(url);
++  }
++
++  @ParameterizedTest
++  @NullAndEmptySource
++  @ValueSource(
++      strings = {
++        " ",
++        "https://example.com/a b",
++        "https://example.com/a\nb",
++        "not a url",
++        "ftp://example.com/x",
++        "file:///etc/passwd",
++        "//example.com/x",
++        "https:///x",
++        "https://user@example.com/x",
++        "http://localhost/x",
++        "http://LOCALHOST./x",
++        "http://app.localhost/x",
++        "http://127.0.0.1/x",
++        "http://0.0.0.0/x",
++        "http://[::]/x",
++        "http://[::1]/x",
++        "http://169.254.169.254/x",
++        "http://[fe80::1]/x",
++        "http://[fe80::1%25eth0]/x",
++        "http://10.0.0.1/x",
++        "http://172.16.0.1/x",
++        "http://192.168.1.1/x",
++        "http://100.64.0.1/x",
++        "http://[fc00::1]/x",
++        "http://[fd12::1]/x",
++        "http://[::ffff:127.0.0.1]/x",
++        "http://[::ffff:10.0.0.1]/x",
++        "http://2130706433/x",
++        "http://127.1/x",
++        "http://256.1.1.1/x",
++        "http://[zzz]/x",
++      })
++  void rejectsEverythingElse(String url) {
++    assertThatThrownBy(() -> validator.validate(url))
++        .isInstanceOfSatisfying(
++            JobFailure.class, f -> assertThat(f.kind()).isEqualTo(JobFailure.Kind.UNSUPPORTED));
++  }
++
++  @Test
++  void rejectsOverlongUrls() {
++    String prefix = "https://example.com/";
++    String longUrl = prefix + "a".repeat(2049 - prefix.length());
++    assertThat(longUrl).hasSize(2049);
++    assertThatThrownBy(() -> validator.validate(longUrl)).isInstanceOf(JobFailure.class);
++    String limit = prefix + "a".repeat(2048 - prefix.length());
++    assertThat(limit).hasSize(2048);
++    assertThat(validator.validate(limit)).isEqualTo(limit);
++  }
++}
+diff --git a/src/test/java/com/video2podcast/media/YtDlpClientTest.java b/src/test/java/com/video2podcast/media/YtDlpClientTest.java
+new file mode 100644
+index 0000000..c3091da
+--- /dev/null
++++ b/src/test/java/com/video2podcast/media/YtDlpClientTest.java
+@@ -0,0 +1,339 @@
++package com.video2podcast.media;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.assertj.core.api.Assertions.assertThatThrownBy;
++
++import com.video2podcast.config.AppProperties;
++import com.video2podcast.job.JobFailure;
++import com.video2podcast.job.JobFailure.Kind;
++import java.io.IOException;
++import java.io.UncheckedIOException;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.time.Duration;
++import java.util.List;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.io.TempDir;
++
++class YtDlpClientTest {
++
++  private static final String URL = "https://example.com/v";
++
++  private static final AppProperties.Jobs JOBS =
++      new AppProperties.Jobs(
++          Path.of("w"),
++          Duration.ofHours(3),
++          Duration.ofHours(1),
++          Duration.ofMinutes(1),
++          Duration.ofMinutes(30),
++          Duration.ofMinutes(20));
++
++  @TempDir Path dir;
++
++  private static ProcessResult ok(String stdout) {
++    return new ProcessResult(0, stdout, "");
++  }
++
++  private static YtDlpClient client(FakeProcessRunner runner) {
++    return new YtDlpClient(runner, new UrlValidator(), JOBS);
++  }
++
++  private static void assertKind(Runnable action, Kind kind) {
++    assertThatThrownBy(action::run)
++        .isInstanceOfSatisfying(JobFailure.class, f -> assertThat(f.kind()).isEqualTo(kind));
++  }
++
++  private static void touch(Path file) {
++    try {
++      Files.writeString(file, "x");
++    } catch (IOException e) {
++      throw new UncheckedIOException(e);
++    }
++  }
++
++  @Test
++  void metadataCommandAndResult() {
++    FakeProcessRunner runner = FakeProcessRunner.returning(ok("{\"title\":\"T\",\"duration\":61}"));
++
++    VideoMetadata meta = client(runner).fetchMetadata(URL);
++
++    assertThat(meta).isEqualTo(new VideoMetadata("T", Duration.ofSeconds(61)));
++    assertThat(runner.calls.get(0))
++        .containsExactly(
++            "yt-dlp",
++            "--no-playlist",
++            "--playlist-items",
++            "1",
++            "--no-warnings",
++            "--skip-download",
++            "--dump-single-json",
++            "--",
++            URL);
++    assertThat(runner.timeouts.get(0)).isEqualTo(Duration.ofMinutes(1));
++  }
++
++  private static final AppProperties.Jobs TWO_HOURS =
++      new AppProperties.Jobs(
++          Path.of("w"),
++          Duration.ofHours(2),
++          Duration.ofHours(1),
++          Duration.ofSeconds(7),
++          Duration.ofSeconds(11),
++          Duration.ofSeconds(13));
++
++  @Test
++  void configuredLimitAndTimeoutsAreUsed() {
++    FakeProcessRunner at = FakeProcessRunner.returning(ok("{\"title\":\"T\",\"duration\":7200}"));
++    YtDlpClient client = new YtDlpClient(at, new UrlValidator(), TWO_HOURS);
++    assertThat(client.fetchMetadata(URL).duration()).isEqualTo(Duration.ofHours(2));
++    assertThat(at.timeouts).containsExactly(Duration.ofSeconds(7));
++
++    FakeProcessRunner over = FakeProcessRunner.returning(ok("{\"title\":\"T\",\"duration\":7201}"));
++    assertThatThrownBy(
++            () -> new YtDlpClient(over, new UrlValidator(), TWO_HOURS).fetchMetadata(URL))
++        .isInstanceOfSatisfying(
++            JobFailure.class,
++            f -> {
++              assertThat(f.kind()).isEqualTo(Kind.TOO_LONG);
++              assertThat(f).hasMessage("The video is longer than 2 hours.");
++            });
++
++    FakeProcessRunner download =
++        new FakeProcessRunner((args, timeout) -> {
++          touch(dir.resolve("source.m4a"));
++          return ok("");
++        });
++    new YtDlpClient(download, new UrlValidator(), TWO_HOURS).downloadAudio(URL, dir);
++    assertThat(download.timeouts).containsExactly(Duration.ofSeconds(11));
++  }
++
++  @Test
++  void hostileUrlAndSpacedDirectoryStayOneArgumentEach() throws IOException {
++    String url = "https://example.com/a?x=1&y=2;z=$(id)&w=%7Cq";
++    Path spaced = Files.createDirectory(dir.resolve("my job dir"));
++    FakeProcessRunner runner =
++        new FakeProcessRunner((args, timeout) -> {
++          touch(spaced.resolve("source.m4a"));
++          return ok("{\"title\":\"T\",\"duration\":5}");
++        });
++    YtDlpClient client = client(runner);
++
++    client.fetchMetadata(url);
++    client.downloadAudio(url, spaced);
++
++    for (List<String> args : runner.calls) {
++      assertThat(args.get(args.size() - 1)).isEqualTo(url);
++      assertThat(args.get(args.size() - 2)).isEqualTo("--");
++      assertThat(args.stream().filter(a -> a.contains("$(id)"))).hasSize(1);
++    }
++    List<String> download = runner.calls.get(1);
++    assertThat(download.get(download.indexOf("-o") + 1))
++        .isEqualTo(spaced + "/source.%(ext)s")
++        .contains("my job dir");
++  }
++
++  @Test
++  void invalidUrlStartsNoProcess() {
++    FakeProcessRunner runner = FakeProcessRunner.returning(ok("{}"));
++    assertKind(() -> client(runner).fetchMetadata("http://localhost/x"), Kind.UNSUPPORTED);
++    assertKind(() -> client(runner).downloadAudio("http://localhost/x", dir), Kind.UNSUPPORTED);
++    assertThat(runner.calls).isEmpty();
++  }
++
++  @Test
++  void durationRoundsUpAndLimitIsInclusive() {
++    assertThat(
++            client(FakeProcessRunner.returning(ok("{\"title\":\"T\",\"duration\":10800}")))
++                .fetchMetadata(URL)
++                .duration())
++        .isEqualTo(Duration.ofHours(3));
++    assertThat(
++            client(FakeProcessRunner.returning(ok("{\"title\":\"T\",\"duration\":59.2}")))
++                .fetchMetadata(URL)
++                .duration())
++        .isEqualTo(Duration.ofSeconds(60));
++    FakeProcessRunner tooLong =
++        FakeProcessRunner.returning(ok("{\"title\":\"T\",\"duration\":10800.1}"));
++    assertThatThrownBy(() -> client(tooLong).fetchMetadata(URL))
++        .isInstanceOfSatisfying(
++            JobFailure.class,
++            f -> {
++              assertThat(f.kind()).isEqualTo(Kind.TOO_LONG);
++              assertThat(f).hasMessage("The video is longer than 3 hours.");
++            });
++  }
++
++  @Test
++  void badMetadata() {
++    String[] unsupported = {
++      "{\"_type\":\"playlist\",\"title\":\"T\",\"duration\":5}",
++      "{\"_type\":\"multi_video\",\"title\":\"T\",\"duration\":5}",
++      "{\"title\":\"T\"}",
++      "{\"title\":\"T\",\"duration\":null}",
++      "{\"title\":\"T\",\"duration\":\"5\"}",
++      "{\"title\":\"T\",\"duration\":0}",
++      "{\"title\":\"T\",\"duration\":-3}",
++      "{\"title\":\"T\",\"duration\":5,\"is_live\":true}",
++    };
++    for (String json : unsupported) {
++      assertKind(
++          () -> client(FakeProcessRunner.returning(ok(json))).fetchMetadata(URL), Kind.UNSUPPORTED);
++    }
++    String[] failed = {
++      "",
++      "not json",
++      "[1]",
++      "{\"duration\":5}",
++      "{\"title\":\" \",\"duration\":5}",
++      "{\"title\":3,\"duration\":5}",
++      "{\"title\":\"T\",\"duration\":5} trailing",
++    };
++    for (String json : failed) {
++      assertKind(
++          () -> client(FakeProcessRunner.returning(ok(json))).fetchMetadata(URL), Kind.FAILED);
++    }
++  }
++
++  @Test
++  void liveStreamHasItsOwnMessage() {
++    FakeProcessRunner runner =
++        FakeProcessRunner.returning(ok("{\"title\":\"T\",\"is_live\":true,\"duration\":5}"));
++    assertThatThrownBy(() -> client(runner).fetchMetadata(URL))
++        .hasMessage("Live streams are not supported.");
++  }
++
++  @Test
++  void liveFalseIsFine() {
++    FakeProcessRunner runner =
++        FakeProcessRunner.returning(ok("{\"title\":\"T\",\"is_live\":false,\"duration\":5}"));
++    assertThat(client(runner).fetchMetadata(URL).duration()).isEqualTo(Duration.ofSeconds(5));
++  }
++
++  @Test
++  void nonZeroExitIsClassifiedAndHidesStderr() {
++    String secret = "ERROR: Private video at /secret/path";
++    FakeProcessRunner runner = FakeProcessRunner.returning(new ProcessResult(1, "", secret));
++    assertThatThrownBy(() -> client(runner).fetchMetadata(URL))
++        .isInstanceOfSatisfying(
++            JobFailure.class,
++            f -> {
++              assertThat(f.kind()).isEqualTo(Kind.PRIVATE);
++              assertThat(f.getMessage()).doesNotContain("secret").doesNotContain(URL);
++            });
++    FakeProcessRunner unsupported =
++        FakeProcessRunner.returning(new ProcessResult(1, "", "Unsupported URL: x"));
++    assertKind(() -> client(unsupported).fetchMetadata(URL), Kind.UNSUPPORTED);
++    FakeProcessRunner other = FakeProcessRunner.returning(new ProcessResult(2, "", null));
++    assertKind(() -> client(other).fetchMetadata(URL), Kind.FAILED);
++  }
++
++  @Test
++  void timeoutFromRunnerPropagates() {
++    FakeProcessRunner runner =
++        new FakeProcessRunner((args, timeout) -> {
++          throw JobFailure.of(Kind.TIMEOUT);
++        });
++    assertKind(() -> client(runner).fetchMetadata(URL), Kind.TIMEOUT);
++  }
++
++  @Test
++  void downloadCommandAndResult() {
++    Path source = dir.resolve("source.m4a");
++    FakeProcessRunner runner =
++        new FakeProcessRunner((args, timeout) -> {
++          touch(source);
++          return ok("");
++        });
++
++    Path result = client(runner).downloadAudio(URL, dir);
++
++    assertThat(result).isEqualTo(source);
++    assertThat(runner.calls.get(0))
++        .containsExactly(
++            "yt-dlp",
++            "--no-playlist",
++            "--playlist-items",
++            "1",
++            "--no-warnings",
++            "-f",
++            "bestaudio[ext=m4a]/bestaudio",
++            "-o",
++            dir + "/source.%(ext)s",
++            "--",
++            URL);
++    assertThat(runner.timeouts.get(0)).isEqualTo(Duration.ofMinutes(30));
++  }
++
++  @Test
++  void percentInJobDirIsEscaped() throws IOException {
++    Path odd = Files.createDirectory(dir.resolve("a%b%(x)s"));
++    FakeProcessRunner runner =
++        new FakeProcessRunner((args, timeout) -> {
++          touch(odd.resolve("source.webm"));
++          return ok("");
++        });
++
++    Path result = client(runner).downloadAudio(URL, odd);
++
++    assertThat(result).isEqualTo(odd.resolve("source.webm"));
++    List<String> args = runner.calls.get(0);
++    assertThat(args.get(args.indexOf("-o") + 1)).isEqualTo(dir + "/a%%b%%(x)s/source.%(ext)s");
++  }
++
++  @Test
++  void staleSourceFilesAreRemovedBeforeRunning() {
++    touch(dir.resolve("source.m4a"));
++    touch(dir.resolve("source.webm.part"));
++    touch(dir.resolve("source.m4a.ytdl"));
++    touch(dir.resolve("audio.wav"));
++    FakeProcessRunner runner = FakeProcessRunner.returning(ok(""));
++
++    assertKind(() -> client(runner).downloadAudio(URL, dir), Kind.FAILED);
++
++    assertThat(dir.resolve("source.m4a")).doesNotExist();
++    assertThat(dir.resolve("source.webm.part")).doesNotExist();
++    assertThat(dir.resolve("source.m4a.ytdl")).doesNotExist();
++    assertThat(dir.resolve("audio.wav")).exists();
++  }
++
++  @Test
++  void partialFilesDoNotCountAsSuccess() {
++    FakeProcessRunner runner =
++        new FakeProcessRunner((args, timeout) -> {
++          touch(dir.resolve("source.webm.part"));
++          touch(dir.resolve("source.webm.ytdl"));
++          return ok("");
++        });
++    assertKind(() -> client(runner).downloadAudio(URL, dir), Kind.FAILED);
++  }
++
++  @Test
++  void moreThanOneSourceIsFailed() {
++    FakeProcessRunner runner =
++        new FakeProcessRunner((args, timeout) -> {
++          touch(dir.resolve("source.m4a"));
++          touch(dir.resolve("source.webm"));
++          return ok("");
++        });
++    assertKind(() -> client(runner).downloadAudio(URL, dir), Kind.FAILED);
++  }
++
++  @Test
++  void downloadNonZeroExitIsClassified() {
++    FakeProcessRunner runner = FakeProcessRunner.returning(new ProcessResult(1, "", "sign in"));
++    assertKind(() -> client(runner).downloadAudio(URL, dir), Kind.PRIVATE);
++  }
++
++  @Test
++  void missingJobDirIsFailed() {
++    FakeProcessRunner runner = FakeProcessRunner.returning(ok(""));
++    assertKind(() -> client(runner).downloadAudio(URL, dir.resolve("nope")), Kind.FAILED);
++    assertThat(runner.calls).isEmpty();
++  }
++
++  @Test
++  void logTextIsTruncatedAndOneLine() {
++    String text = YtDlpClient.forLog("a\r\nb" + "c".repeat(5000));
++    assertThat(text).hasSize(2000).doesNotContain("\n").doesNotContain("\r");
++  }
++}

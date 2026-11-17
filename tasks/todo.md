@@ -101,7 +101,7 @@ Sizes: S = 1-2 files, M = 3-5 files.
   - Depends on: T1
   - Files: `job/JobStore.java`, `job/JobRecord.java`, `job/FileState.java`, `job/JobQueue.java`, tests
 
-- [~] **T8: Media: URL validation, metadata, download, WAV chunks** (M)
+- [x] **T8: Media: URL validation, metadata, download, WAV chunks** (M)
   - Acceptance:
     - `ProcessRunner` is an interface, `run(List<String> args, Duration timeout)`, with a real implementation that runs an argument list (no shell strings), captures stdout and stderr, and on timeout kills the process and its children and fails with `JobFailure` (`TIMEOUT`). Timeouts are configurable under `jobs.*`, defaults: metadata 1 min, download 30 min, ffmpeg 30 min.
     - `UrlValidator` accepts only `http`/`https` URLs with a host, up to 2048 characters, no whitespace or control characters, no `user:password@`, and rejects `localhost` and literal loopback, private and link-local IPs. DNS names are not resolved. The URL is always passed to `yt-dlp` after `--`.
@@ -137,6 +137,7 @@ Sizes: S = 1-2 files, M = 3-5 files.
     - An allowed user's URL message gets an acknowledgement within 5 seconds, then one status message that is edited through the stages (queued, downloading, transcribing n/N, summarizing).
     - On success the bot sends the HTML message (title, duration, bullets) with **Download audio** and **Download transcript** buttons (`audio:<jobId>`, `transcript:<jobId>`) and saves `job.json` with `expiresAt` = send time + 1 hour. **No audio or transcript file is sent.**
     - Failures produce a clear message and remove the job directory. Title and summary are HTML-escaped.
+    - The tag filter `not @T8` in `CucumberIT` is removed, and the step definitions for `src/features/T8-media.feature` are written (the T8 scenarios were deferred to this task). The `@manual_media` scenarios stay manual.
     - Functional test `SummaryFlowIT` (replaces `PipelineIntegrationTest`): link, status edits, final message with two buttons, `job.json`, no file uploads; Whisper and Ollama are WireMock servers built from the T3 fixtures and `yt-dlp`/`ffmpeg` are a fake `ProcessRunner`.
   - Verify: `./mvnw verify -Dit.test=SummaryFlowIT` (functional test on the T4a harness): link, status edits, final message with two buttons, `job.json` content, no file uploads. Failure paths clean up the directory.
   - Depends on: T5, T7, T8, T9, T10
@@ -215,3 +216,26 @@ Sizes: S = 1-2 files, M = 3-5 files.
 - [ ] All 15 success criteria in `SPEC.md` are met
 - [ ] `./mvnw verify` is green and `podman compose up -d` works from a clean checkout
 - [ ] Ready for review
+
+## Backlog
+
+Work that is not scheduled in a phase. Technical debt carries the `[debt]` mark.
+
+- [ ] **TD1 [debt]: Remove the SpotBugs `COMMAND_INJECTION` exclusion for `DefaultProcessRunner`** (S)
+  - Why: T8 needed `config/spotbugs-exclude.xml` because find-sec-bugs flags `new ProcessBuilder(args)` in `DefaultProcessRunner` whenever the argument list is not a compile-time constant. A typed command (enum of tools plus argument list) was tried in a T8 spike and is flagged the same way. The owner approved this one narrow exclusion for T8, as a known false positive. Safeguards that stand in for the check: arguments are a list (no shell), the binary is always `yt-dlp` or `ffmpeg`, `UrlValidator` runs first and the URL follows `--`, and a real-process test proves hostile punctuation stays one literal argument.
+  - Acceptance:
+    - `config/spotbugs-exclude.xml` and its wiring in `pom.xml` are removed, or the exclusion is replaced by a narrower mechanism the owner approves.
+    - `./mvnw verify` passes with SpotBugs and find-sec-bugs on and no `COMMAND_INJECTION` suppression, for example because a newer find-sec-bugs or SpotBugs release no longer flags the pattern, or because the process start moves to a form the detector accepts without hiding the call.
+    - The real-process argument-preservation test of `DefaultProcessRunner` still passes.
+  - Verify: `./mvnw clean verify`, and a search showing no `COMMAND_INJECTION` entry left in `config/` or `pom.xml`.
+  - Depends on: T8
+  - Files: `config/spotbugs-exclude.xml`, `pom.xml`, `media/DefaultProcessRunner.java`
+
+- [ ] **TD2 [debt]: Fix the flaky `JobQueueTest.sizeCountsWaitingAndRunningTasksUntilTheyFinish`** (S)
+  - Why: it failed once in four full `./mvnw verify` runs during T8 (`expected: 0 but was: 1` at `JobQueueTest.java:86`). The test reads `queue.size()` right after `second.get()`, but the queue decrements its counter after it completes the future, so the check can run first. The race is in the T7 code or its test, not in T8.
+  - Acceptance:
+    - `JobQueue.size()` is zero as soon as a task's future completes, or the test waits for it with a bounded wait. The choice is recorded in the fix commit message.
+    - The test passes 200 times in a row (a loop or `@RepeatedTest(200)` run once locally; the loop is not kept).
+  - Verify: `./mvnw test -Dtest=JobQueueTest` repeated, and a full `./mvnw verify`.
+  - Depends on: T7
+  - Files: `job/JobQueue.java`, `JobQueueTest.java`

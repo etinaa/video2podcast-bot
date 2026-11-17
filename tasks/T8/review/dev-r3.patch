@@ -1,0 +1,123 @@
+diff --git a/src/test/java/com/video2podcast/media/DefaultProcessRunnerTest.java b/src/test/java/com/video2podcast/media/DefaultProcessRunnerTest.java
+index 1a09acf..8feb3f1 100644
+--- a/src/test/java/com/video2podcast/media/DefaultProcessRunnerTest.java
++++ b/src/test/java/com/video2podcast/media/DefaultProcessRunnerTest.java
+@@ -56,6 +56,20 @@ class DefaultProcessRunnerTest {
+     assertThat(result.stdout()).hasSize(DefaultProcessRunner.MAX_OUTPUT_BYTES);
+   }
+ 
++  @Test
++  void bothStreamsAreCappedAndDrainedWhenBothExceedTheCap() {
++    ProcessResult result =
++        runner.run(
++            sh(
++                "head -c 9000000 /dev/zero | tr '\\0' a; "
++                    + "head -c 9000000 /dev/zero | tr '\\0' b >&2"),
++            Duration.ofSeconds(60));
++
++    assertThat(result.exitCode()).isZero();
++    assertThat(result.stdout()).hasSize(DefaultProcessRunner.MAX_OUTPUT_BYTES);
++    assertThat(result.stderr()).hasSize(DefaultProcessRunner.MAX_OUTPUT_BYTES);
++  }
++
+   @Test
+   void timeoutKillsTheWholeTree() throws Exception {
+     Path pidFile = dir.resolve("child.pid");
+diff --git a/src/test/java/com/video2podcast/media/FfmpegRunnerTest.java b/src/test/java/com/video2podcast/media/FfmpegRunnerTest.java
+index 26fd429..2ab48cc 100644
+--- a/src/test/java/com/video2podcast/media/FfmpegRunnerTest.java
++++ b/src/test/java/com/video2podcast/media/FfmpegRunnerTest.java
+@@ -122,6 +122,18 @@ class FfmpegRunnerTest {
+     assertKind(() -> new FfmpegRunner(runner, JOBS).toWav(dir.resolve("s.m4a"), dir), Kind.TIMEOUT);
+   }
+ 
++  @Test
++  void splitTimeoutPropagatesUnchanged() {
++    write(dir.resolve("audio.wav"), "RIFF");
++    FakeProcessRunner runner =
++        new FakeProcessRunner((args, timeout) -> {
++          throw JobFailure.of(Kind.TIMEOUT);
++        });
++
++    assertKind(
++        () -> new FfmpegRunner(runner, JOBS).split(dir.resolve("audio.wav"), dir), Kind.TIMEOUT);
++  }
++
+   @Test
+   void splitCommandAndOrderedResult() {
+     Path wav = dir.resolve("audio.wav");
+diff --git a/src/test/java/com/video2podcast/media/UrlValidatorTest.java b/src/test/java/com/video2podcast/media/UrlValidatorTest.java
+index fb0134e..4c328c7 100644
+--- a/src/test/java/com/video2podcast/media/UrlValidatorTest.java
++++ b/src/test/java/com/video2podcast/media/UrlValidatorTest.java
+@@ -22,6 +22,9 @@ class UrlValidatorTest {
+         "https://[2001:4860:4860::8888]/x",
+         "https://example.com./x",
+         "https://172.32.0.1/x",
++        "https://172.15.1.1/x",
++        "https://192.169.1.1/x",
++        "https://unresolvable.example/x",
+         "https://100.128.0.1/x",
+       })
+   void acceptsPublicLinks(String url) {
+@@ -35,6 +38,12 @@ class UrlValidatorTest {
+         " ",
+         "https://example.com/a b",
+         "https://example.com/a\nb",
++        "https://example.com/a\tb",
++        "https://example.com/a\rb",
++        "https://example.com/a\u0000b",
++        "https://user:@example.com/x",
++        "http://172.31.255.254/x",
++        "http://192.168.255.255/x",
+         "not a url",
+         "ftp://example.com/x",
+         "file:///etc/passwd",
+diff --git a/src/test/java/com/video2podcast/media/YtDlpClientTest.java b/src/test/java/com/video2podcast/media/YtDlpClientTest.java
+index c3091da..4709a90 100644
+--- a/src/test/java/com/video2podcast/media/YtDlpClientTest.java
++++ b/src/test/java/com/video2podcast/media/YtDlpClientTest.java
+@@ -236,6 +236,43 @@ class YtDlpClientTest {
+     assertKind(() -> client(runner).fetchMetadata(URL), Kind.TIMEOUT);
+   }
+ 
++  @Test
++  void downloadTimeoutPropagatesUnchanged() {
++    touch(dir.resolve("source.m4a"));
++    FakeProcessRunner runner =
++        new FakeProcessRunner((args, timeout) -> {
++          throw JobFailure.of(Kind.TIMEOUT);
++        });
++
++    assertKind(() -> client(runner).downloadAudio(URL, dir), Kind.TIMEOUT);
++
++    assertThat(dir.resolve("source.m4a")).doesNotExist();
++  }
++
++  @Test
++  void warningsOnStderrDoNotFailAnExitZeroRun() {
++    FakeProcessRunner runner =
++        FakeProcessRunner.returning(
++            new ProcessResult(
++                0,
++                "{\"title\":\"T\",\"duration\":61}",
++                "WARNING: private playlist skipped, sign in for more"));
++
++    assertThat(client(runner).fetchMetadata(URL))
++        .isEqualTo(new VideoMetadata("T", Duration.ofSeconds(61)));
++  }
++
++  @Test
++  void downloadWithPrivateWordInStderrStillSucceedsOnExitZero() {
++    FakeProcessRunner runner =
++        new FakeProcessRunner((args, timeout) -> {
++          touch(dir.resolve("source.m4a"));
++          return new ProcessResult(0, "", "members-only extras are private");
++        });
++
++    assertThat(client(runner).downloadAudio(URL, dir)).isEqualTo(dir.resolve("source.m4a"));
++  }
++
+   @Test
+   void downloadCommandAndResult() {
+     Path source = dir.resolve("source.m4a");
