@@ -33,3 +33,31 @@ the callback latch (no `get`/`join` on the last future), then call `last.get(tim
 
 ## Q-tester-1 resolved · tester
 Reviewed the Architect's answer and updated api.md steps 4–5: callback latch first, original future get second. This resolves the deterministic-proof concern. Step 1 review covers all 10 scenario definitions / 15 expanded cases against submit/size/close, returned futures and logging. Success, RuntimeException and Error completion ordering are specified; shutdown and caller-initiated completion retain their scoped exclusions. No remaining tester design questions. No tests or runner changes made in Step 1.
+
+## TD2 Step 2 runner handoff · tester
+CucumberIT now filters `not @T8 and not @TD2`, with the approved one-line comment that TD2 scenarios are covered by Developer-owned JobQueueTest. No TD2 step definitions or functional IT classes were added.
+
+Validation with JAVA_HOME=/Users/andreietin/.sdkman/candidates/java/current:
+- `./mvnw spotless:apply -DspotlessFiles=src/it/java/com/video2podcast/functional/CucumberIT.java` passed (target/td2-tester-spotless.log).
+- Initial sandboxed `./mvnw verify` failed from sandbox restrictions: Mockito attachment, WireMock socket binding, and process-descendant sysctl access (target/td2-tester-step2-verify.log).
+- After permission approval, unsandboxed `./mvnw verify` passed, including unit/functional tests, coverage, Spotless, SpotBugs and PMD (target/td2-tester-step2-verify-unsandboxed.log).
+- Runner diff whitespace check passed.
+
+This is working-tree verification: latest commit remains 651fcc3 (TD2: design), and Developer-owned JobQueue/JobQueueTest changes are uncommitted. Post-commit checking of Developer tests and evidence remains for the orchestrator's Step 3 handoff. Step 2 runner work is complete.
+
+## TD2 Step 3 committed-test review · tester
+Reviewed commit 866912c against requirements R1–R7, all 10 scenario definitions / 15 expanded cases, and the updated api.md recipe. Developer-owned source/test files match the commit; only the approved CucumberIT filter remains modified in the tester zone. No Developer or Analyst files changed by Tester.
+
+Mandatory TD2 race proof is satisfied: success and RuntimeException callbacks are registered behind a gated predecessor, record size in AtomicInteger(-1), assert bounded callback-latch completion before get, and assert zero. RuntimeException identity is asserted both through get and the callback. The optional Error callback test is also present and checks zero plus the abnormal IllegalStateException outcome. Production removal precedes completion on all three paths; RuntimeException logging, Error propagation, FIFO and shutdown code remain intact. The original sizeCountsWaitingAndRunningTasksUntilTheyFinish method is unchanged.
+
+Scenario coverage gaps (no observed production defect; mandatory backlog callback tests are present):
+1. R1 / scenario "A completed task leaves remaining work counted": JobQueueTest never holds B running after A completes and asserts size == 1. The existing unchanged test checks 2 before release and 0 after both finish. Thus preservation of other work is supported by reviewing open.remove(result), but this scenario has no direct automated assertion. A Developer-owned follow-up could gate B, await A and B's start, assert 1, then release B.
+2. R3/R5 / scenario "A runtime failure keeps the existing error log": no unit assertion captures the ERROR event, message and original throwable. The unchanged LOG.error call and execution logs provide review/runtime evidence, but not a regression assertion for this scenario.
+
+The success callback's null result/no-exception and Error callback's abnormal exception are checked via the original future outcome rather than directly recording those callback arguments. RuntimeException callback identity is asserted directly. This is narrower assertion coverage than the literal callback example table, not a failure of the completion/count ordering tests.
+
+Inspected evidence logs: td2-red.log (12 tests / 2 callback failures observing 1), td2-green.log (12 / 0), td2-red2.log (13 / 3 callback failures), td2-repeat200.log (211 / 0, including 200 temporary repetitions of the original method). No repetition annotation remains committed. The 200-run mechanism was a temporary RepeatedTest rather than 200 separate Maven invocations; evidence.md discloses this and both Developer reviewers accepted it.
+
+Post-commit verification with JAVA_HOME=/Users/andreietin/.sdkman/candidates/java/current, outside the sandbox for required sockets/attachment/process inspection: `./mvnw verify` PASSED. Log: target/td2-tester-step3-verify.log. 323 unit tests passed; JobQueueTest: 13 passed; functional summary: 70 tests, 0 failures/errors, 51 excluded/skipped cases. Coverage, Spotless, SpotBugs and PMD passed. CucumberIT retains `not @T8 and not @TD2`; no undefined TD2 steps were selected. This run is verify, not clean verify; the separate project clean-verify gate is not claimed here.
+
+Step 3 review finished. No failing test or mandatory race-test gap requires a Tester-zone change; scenario assertion gaps above are reported for Developer/orchestrator disposition.

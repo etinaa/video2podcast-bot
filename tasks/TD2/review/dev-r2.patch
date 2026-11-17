@@ -1,0 +1,146 @@
+diff --git a/src/main/java/com/video2podcast/job/JobQueue.java b/src/main/java/com/video2podcast/job/JobQueue.java
+index 1722f17..1ce1565 100644
+--- a/src/main/java/com/video2podcast/job/JobQueue.java
++++ b/src/main/java/com/video2podcast/job/JobQueue.java
+@@ -37,7 +37,9 @@ public class JobQueue implements AutoCloseable {
+ 
+   /**
+    * Queues a task. The returned future completes when the task has run, exceptionally if it threw,
+-   * and is cancelled if the queue is stopped before the task could finish.
++   * and is cancelled if the queue is stopped before the task could finish. When the queue completes
++   * the future, the task has already stopped counting toward {@link #size()}, so a waiter or a
++   * {@code whenComplete} callback sees the updated size.
+    *
+    * @throws RejectedExecutionException after {@link #close()}
+    */
+@@ -53,24 +55,34 @@ public class JobQueue implements AutoCloseable {
+     return result;
+   }
+ 
+-  /** How many tasks are waiting or running, which is also the position a new task would get. */
++  /**
++   * How many tasks are waiting or running, which is also the position a new task would get. A task
++   * stops counting before the queue completes its future.
++   */
+   public int size() {
+     return open.size();
+   }
+ 
+   private void run(Runnable task, CompletableFuture<Void> result) {
++    Throwable failure = new IllegalStateException("Queued task ended abnormally");
+     try {
+       if (!result.isDone()) {
+         task.run();
+-        result.complete(null);
++        failure = null;
+       }
+     } catch (RuntimeException e) {
+       LOG.error("Queued task failed", e);
+-      result.completeExceptionally(e);
++      failure = e;
+     } finally {
+-      // An Error skips both branches above; its future must still complete so nobody waits forever.
+-      result.completeExceptionally(new IllegalStateException("Queued task ended abnormally"));
++      // Leave the open set first, so size() is already correct when the future's waiters run.
+       open.remove(result);
++      // An Error skips both branches above and keeps the "abnormal" failure; the future must still
++      // complete so nobody waits forever.
++      if (failure == null) {
++        result.complete(null);
++      } else {
++        result.completeExceptionally(failure);
++      }
+     }
+   }
+ 
+diff --git a/src/test/java/com/video2podcast/job/JobQueueTest.java b/src/test/java/com/video2podcast/job/JobQueueTest.java
+index a36de48..8902c20 100644
+--- a/src/test/java/com/video2podcast/job/JobQueueTest.java
++++ b/src/test/java/com/video2podcast/job/JobQueueTest.java
+@@ -14,6 +14,7 @@ import java.util.concurrent.ExecutionException;
+ import java.util.concurrent.RejectedExecutionException;
+ import java.util.concurrent.TimeUnit;
+ import java.util.concurrent.atomic.AtomicInteger;
++import java.util.concurrent.atomic.AtomicReference;
+ import org.junit.jupiter.api.AfterEach;
+ import org.junit.jupiter.api.Test;
+ 
+@@ -86,6 +87,78 @@ class JobQueueTest {
+     assertThat(queue.size()).isZero();
+   }
+ 
++  @Test
++  void sizeIsZeroInsideTheCallbackOfTheLastSucceededTask() throws Exception {
++    AtomicInteger observed = new AtomicInteger(-1);
++    CountDownLatch called = new CountDownLatch(1);
++    CountDownLatch release = new CountDownLatch(1);
++    queue.submit(() -> await(release));
++    CompletableFuture<Void> last = queue.submit(() -> {});
++    last.whenComplete((value, error) -> {
++      observed.set(queue.size());
++      called.countDown();
++    });
++
++    release.countDown();
++    assertThat(called.await(5, TimeUnit.SECONDS)).isTrue();
++
++    assertThat(last.get(5, TimeUnit.SECONDS)).isNull();
++    assertThat(observed).hasValue(0);
++  }
++
++  @Test
++  void sizeIsZeroInsideTheCallbackOfTheLastFailedTask() throws Exception {
++    IllegalStateException thrown = new IllegalStateException("boom");
++    AtomicInteger observed = new AtomicInteger(-1);
++    AtomicReference<Throwable> callbackError = new AtomicReference<>();
++    CountDownLatch called = new CountDownLatch(1);
++    CountDownLatch release = new CountDownLatch(1);
++    queue.submit(() -> await(release));
++    CompletableFuture<Void> last =
++        queue.submit(() -> {
++          throw thrown;
++        });
++    last.whenComplete((value, error) -> {
++      observed.set(queue.size());
++      callbackError.set(error);
++      called.countDown();
++    });
++
++    release.countDown();
++    assertThat(called.await(5, TimeUnit.SECONDS)).isTrue();
++
++    assertThatThrownBy(() -> last.get(5, TimeUnit.SECONDS))
++        .isInstanceOf(ExecutionException.class)
++        .hasCause(thrown);
++    assertThat(callbackError.get()).isSameAs(thrown);
++    assertThat(observed).hasValue(0);
++  }
++
++  @Test
++  void sizeIsZeroInsideTheCallbackOfTheLastTaskThatThrowsAnError() throws Exception {
++    AtomicInteger observed = new AtomicInteger(-1);
++    CountDownLatch called = new CountDownLatch(1);
++    CountDownLatch release = new CountDownLatch(1);
++    queue.submit(() -> await(release));
++    CompletableFuture<Void> last =
++        queue.submit(() -> {
++          throw new AssertionError("boom");
++        });
++    last.whenComplete((value, error) -> {
++      observed.set(queue.size());
++      called.countDown();
++    });
++
++    release.countDown();
++    assertThat(called.await(5, TimeUnit.SECONDS)).isTrue();
++
++    assertThatThrownBy(() -> last.get(5, TimeUnit.SECONDS))
++        .isInstanceOf(ExecutionException.class)
++        .hasCauseInstanceOf(IllegalStateException.class)
++        .hasMessageContaining("Queued task ended abnormally");
++    assertThat(observed).hasValue(0);
++  }
++
+   @Test
+   void aFailedTaskIsNoLongerCounted() throws Exception {
+     CompletableFuture<Void> failing =
