@@ -13,3 +13,9 @@
 
 ## Agreed task
 See TD3 in `tasks/todo.md`.
+
+## Owner decision during implementation (TD3 is a technical task)
+- The owner asked why the Tester writes tests for mutation testing; PIT is a build tool, so it needs no acceptance tests in `src/it`.
+- TD3 goes without the Tester and without Gherkin scenarios: `src/features/TD3-mutation.feature` is removed, and nothing is added to `src/it`.
+- Evidence is kept by the Developer in `tasks/TD3/` (baseline, final, red run with a raised threshold). Both reviewers still review the change.
+- Rule from the owner: ask the owner for the task type at intake. A technical task does not need every role.

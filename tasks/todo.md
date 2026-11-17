@@ -263,6 +263,6 @@ Work that is not scheduled in a phase. Technical debt carries the `[debt]` mark.
     - The default `./mvnw verify` and `./mvnw verify -Dno-it` are unchanged and not slower.
     - Current score is measured. Where it is below 85%, the Developer adds or strengthens unit tests (`src/test/java`) until `./mvnw verify -Pmutation` passes. Production code changes only if a surviving mutant shows a real bug. Excluded classes (config, generated code, main class), if any, are listed in `pom.xml` with a reason for each, and the owner approves the list.
     - `CLAUDE.md` and `docs/` mention the command and the threshold.
-  - Verify: `./mvnw verify -Pmutation` is green, and it goes red when the threshold is raised above the current score (one-off check).
+  - Verify: `./mvnw verify -Pmutation` is green, and it goes red when the threshold is raised above the current score (one-off check). Technical task: no Tester and no `src/it` tests; the Developer keeps the evidence in `tasks/TD3/`.
   - Depends on: none (all merged tasks T1–T9 are covered)
   - Files: `pom.xml`, `src/test/java/**`, `CLAUDE.md`, `docs/`

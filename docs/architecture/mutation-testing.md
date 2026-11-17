@@ -17,7 +17,7 @@ removed) and checks that some unit test fails. A mutant that no test notices *su
 
 ## Scope
 
-- Mutated: every class under `com.video2podcast` in `src/main`, except the classes listed with a reason in `pom.xml` (`excludedClasses`, owner-approved).
+- Mutated: every class under `com.video2podcast` in `src/main`. No class is excluded; if one ever has to be, it is listed with a reason in `pom.xml` (`excludedClasses`) after the owner approves it.
 - Tests that count: unit tests in `src/test/java` only. `src/it` (Failsafe, Cucumber) is left out by `excludedTestClasses`, so it cannot raise the score, and it does not count toward JaCoCo either.
 - Mutators: PIT `DEFAULTS`. PIT's default skipping of logging calls applies; there is no project-specific filter.
 
