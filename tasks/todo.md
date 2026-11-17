@@ -267,7 +267,7 @@ Work that is not scheduled in a phase. Technical debt carries the `[debt]` mark.
   - Depends on: none (all merged tasks T1–T9 are covered)
   - Files: `pom.xml`, `src/test/java/**`, `CLAUDE.md`, `docs/`
 
-- [~] **TD4 [debt]: Rewrite the T8, T9 and TD2 scenarios through the external boundary** (S)
+- [x] **TD4 [debt]: Rewrite the T8, T9 and TD2 scenarios through the external boundary** (S)
   - Why: the owner's rule is that Cucumber scenarios do not call service code. They go through what can be seen from outside: Telegram, HTTP calls, files, the queue. The scenarios of T8 (`When media preparation validates the URL ...`), T9 (`When transcription runs for the job`) and TD2 name internal components. They are excluded from `CucumberIT` for that reason and run nowhere.
   - Acceptance:
     - `src/features/T8-media.feature`, `T9-transcription.feature` and `TD2-job-queue.feature` have no step that names or calls a class, a component or a method. Steps send a Telegram update to the bot, set up a mock of Whisper, Ollama or the process runner, and check Telegram calls, HTTP requests received by a mock and files in the job directory.
@@ -280,7 +280,7 @@ Work that is not scheduled in a phase. Technical debt carries the `[debt]` mark.
   - Depends on: T8, T9, TD2
   - Files: `src/features/T8-media.feature`, `src/features/T9-transcription.feature`, `src/features/TD2-job-queue.feature`, `tasks/TD4/requirements.md`
 
-- [~] **TD5 [debt]: Fall back to the combined format when a source has no separate audio track** (S)
+- [x] **TD5 [debt]: Fall back to the combined format when a source has no separate audio track** (S)
   - Why: `YtDlpClient` asks for `bestaudio[ext=m4a]/bestaudio`. For a source that has only a combined video with sound (a direct mp4, and many sites other than YouTube) the real yt-dlp answers "Requested format is not available", and the job fails. Checked by hand with yt-dlp 2026.10.26 on a local mp4. `ffmpeg` already turns any container into a 16 kHz mono WAV.
   - Acceptance:
     - The format selector is `bestaudio[ext=m4a]/bestaudio/best`. `SPEC.md` says the same where it names the selector (changed by the orchestrator with the owner's approval, given in this task).
