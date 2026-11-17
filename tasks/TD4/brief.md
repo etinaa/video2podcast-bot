@@ -15,3 +15,9 @@ Technical. Roles: Analyst (writes the features and the mapping table), Architect
 
 ## Agreed task
 See TD4 in `tasks/todo.md`. T11 now depends on TD4 and writes the steps for the rewritten scenarios.
+
+## Revision (owner, after the review)
+- Success scenarios use the real `ffmpeg` and `yt-dlp`, not mocks; mocks stay only for failures and argument checks.
+- No external DNS: a thin `ProcessRunner` decorator in the harness adds `--proxy` to the `yt-dlp` call; WireMock holds the fixtures and answers with a `Content-Type`. Checked by hand with the real `yt-dlp` and a made-up host.
+- Fixtures are generated with `ffmpeg` and stored in `src/it/resources`.
+- Two download scenarios: separate audio track (m4a) and combined video with sound (mp4). The second needs the format fallback `/best`, which is a separate task (TD5) and the owner agreed to it ("по сценарию 2 действуй по рекомендации").
