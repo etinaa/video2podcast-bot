@@ -87,7 +87,7 @@ public class YtDlpClient {
                 "1",
                 "--no-warnings",
                 "-f",
-                "bestaudio[ext=m4a]/bestaudio",
+                "bestaudio[ext=m4a]/bestaudio/best",
                 "-o",
                 template,
                 "--",
