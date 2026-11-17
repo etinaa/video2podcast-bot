@@ -153,7 +153,7 @@ Duration: 1h 42m
 While work is running, one status message is edited with the current stage (queued, downloading, transcribing n/N, summarizing). After a button is tapped, it changes to "Preparing audio…" (or "Sending transcript…") and is then replaced by "Audio sent" (or "Transcript sent"), so repeated taps do nothing. The other button stays active. The audio is sent with `sendAudio` (title and performer set from the video so it plays in Telegram's player). The transcript is sent with `sendDocument` as `<title>.txt`.
 
 ## Audio Delivery (compression rule)
-- Download with a preference for `m4a`/AAC (`yt-dlp -f "bestaudio[ext=m4a]/bestaudio"`).
+- Download with a preference for `m4a`/AAC (`yt-dlp -f "bestaudio[ext=m4a]/bestaudio/best"`; `best` is the fallback for a source that has only a combined video with sound, and `ffmpeg` extracts the audio).
 - If the source file is **50 MB or smaller** and already in a format Telegram's audio player accepts (MP3 or M4A), send it **as is, with no re-encoding**.
 - If it is in another format but fits the limit, convert it to M4A at a high bitrate (128 kbps), with no size-driven compression.
 - If it is **over 50 MB**, re-encode to mono AAC in M4A at a bitrate computed from the duration so the result is about 48 MB: `kbps = 48 MiB × 8 / duration`. For the maximum 3-hour video this is about 37 kbps, which is acceptable for speech. The result is verified to be under 50 MB, and if not the bitrate is lowered one step and the encode is retried once.
