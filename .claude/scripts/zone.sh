@@ -54,6 +54,20 @@ patch() {
   echo "$out"
 }
 
+# The Co-Authored-By lines for a zone: the models of the roles that write it (see role.sh for the
+# model ids). The orchestrator and the Claude roles run Sonnet 5.5, the Codex roles run GPT-6.1-Sol.
+claude_author="Claude Sonnet 5.5 <noreply@anthropic.com>"
+codex_author="GPT-6.1-Sol (Codex) <noreply@openai.com>"
+
+coauthors() {
+  case "$1" in
+    dev | tools) printf 'Co-Authored-By: %s' "$claude_author" ;;
+    test) printf 'Co-Authored-By: %s' "$codex_author" ;;
+    design) printf 'Co-Authored-By: %s\nCo-Authored-By: %s' "$claude_author" "$codex_author" ;;
+    *) echo "zone.sh: unknown zone $1" >&2; exit 2 ;;
+  esac
+}
+
 commit() {
   local zone="$1" task="$2" round="$3" message="$4"
   load_paths "$zone" "$task"
@@ -74,7 +88,7 @@ commit() {
     fi
   fi
   git add -A -- "${paths[@]}"
-  git commit -q -m "$message" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+  git commit -q -m "$message" -m "$(coauthors "$zone")"
   git log --oneline -1
 }
 
