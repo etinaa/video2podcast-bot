@@ -100,7 +100,27 @@ start() {
   pane="$(free_pane "$task")"
   # Recorded before the start, so `role.sh stop` can close the pane when the agent fails to start.
   echo "$pane" >"$state/$task.$role.pane"
-  herdr agent start "$role" --kind "$kind" --pane "$pane" --timeout 60000 -- "${args[@]:1}" >/dev/null
+  # A pane that was just split may not be at its shell prompt yet (agent_pane_busy): try again a few
+  # times, and if it still fails close the pane and forget it, so no dead pane stays in the tab.
+  local attempt started=0
+  for attempt in 1 2 3; do
+    if herdr agent start "$role" --kind "$kind" --pane "$pane" --timeout 60000 -- "${args[@]:1}" >/dev/null; then
+      started=1
+      break
+    fi
+    [ "$attempt" -lt 3 ] && sleep 2
+  done
+  if [ "$started" -ne 1 ]; then
+    echo "role.sh: $role did not start in pane $pane after 3 attempts" >&2
+    herdr pane close "$pane" >/dev/null 2>&1 || true
+    rm -f "$state/$task.$role.pane"
+    if [ "$(cat "$state/$task.last-pane" 2>/dev/null)" = "$pane" ]; then
+      local other
+      other="$(ls "$state"/"$task".*.pane 2>/dev/null | head -1 || true)"
+      if [ -n "$other" ]; then cp "$other" "$state/$task.last-pane"; else rm -f "$state/$task".*; fi
+    fi
+    exit 1
+  fi
   herdr agent prompt "$role" "You are the $role of task $task. Read $(role_file "$role") and follow it. \
 The task is $task in tasks/todo.md, its brief is tasks/$task/brief.md, and its working files are in \
 tasks/$task/. ${message}" >/dev/null
