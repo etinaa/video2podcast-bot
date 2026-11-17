@@ -11,6 +11,12 @@
       "Bash(herdr agent get:*)",
       "Bash(ls:*)",
       "Bash(cat:*)",
+      "Bash(diff:*)",
+      "Bash(sed -n:*)",
+      "Bash(grep:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(wc:*)",
       "Bash(echo:*)",
       "Bash(mkdir -p:*)"
     ],

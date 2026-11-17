@@ -19,6 +19,16 @@ mkdir -p "$state"
 sonnet="claude-sonnet-5-5"
 sol="gpt-6.1-sol"
 
+# The Codex workspace-write sandbox blocks the Herdr unix socket, so a Codex role could not run
+# `herdr agent prompt`. This permissions profile is the :workspace profile (same writable roots,
+# still no internet) plus the one socket. `-s workspace-write` cannot be combined with it.
+codex_perms=(
+  -c 'default_permissions="herdr"'
+  -c 'permissions.herdr.extends=":workspace"'
+  -c 'permissions.herdr.network.enabled=true'
+  -c "permissions.herdr.network.unix_sockets={\"${HERDR_SOCKET_PATH:-}\"=\"allow\"}"
+)
+
 # Prints the kind, then the native agent arguments, one per line.
 agent_args() {
   local role="$1" task="$2"
@@ -32,14 +42,14 @@ agent_args() {
       # A profile, like --search, works only in embedded mode: with the shared background server
       # running, Codex falls back to it and stops at a startup warning. --no-daemon asks for
       # embedded mode up front.
-      printf '%s\n' codex --no-daemon -p analyst -m "$sol" -s workspace-write -a on-request \
+      printf '%s\n' codex --no-daemon -p analyst -m "$sol" -a on-request "${codex_perms[@]}" \
         -C "$root/tasks" --add-dir "$root/src/features" --add-dir "$root/docs" ;;
     tester)
-      printf '%s\n' codex -m "$sol" -s workspace-write -a on-request \
+      printf '%s\n' codex -m "$sol" -a on-request "${codex_perms[@]}" \
         -C "$root/src/it" --add-dir "$root/target" --add-dir "$root/tasks/$task/comms" \
         --add-dir "$HOME/.m2" ;;
     reviewer-codex)
-      printf '%s\n' codex -m "$sol" -s workspace-write -a on-request \
+      printf '%s\n' codex -m "$sol" -a on-request "${codex_perms[@]}" \
         -C "$root/tasks/$task/review" --add-dir "$root/tasks/$task/comms" ;;
     *) echo "role.sh: unknown role $role" >&2; exit 2 ;;
   esac
@@ -92,7 +102,8 @@ tasks/$task/. ${message}" >/dev/null
 }
 
 stop() {
-  local role="$1" task="$2" pane_file="$state/$task.$role.pane"
+  local role="$1" task="$2"
+  local pane_file="$state/$task.$role.pane"
   [ -s "$pane_file" ] || { echo "role.sh: $role is not running for $task" >&2; exit 1; }
   local pane
   pane="$(cat "$pane_file")"

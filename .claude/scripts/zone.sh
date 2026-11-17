@@ -8,7 +8,8 @@
 #   zone.sh commit <zone> <task> <round> <message>   commit the zone if it still equals that patch
 #
 # Zones: dev (production code, unit tests, build, deploy), test (src/it), design (task artifacts,
-# the task list, features, architecture docs; committed without a review patch).
+# the task list, features, architecture docs; committed without a review patch), tools (the team's
+# own setup: `.claude/` and SPEC.md; committed without a review patch, by the owner's decision).
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
@@ -17,6 +18,7 @@ zone_paths() {
     dev) printf '%s\n' src/main src/test pom.xml config deploy docs/host-setup.md ;;
     test) printf '%s\n' src/it ;;
     design) printf '%s\n' "tasks/$2" tasks/todo.md src/features docs/decisions.md docs/architecture ;;
+    tools) printf '%s\n' .claude SPEC.md ;;
     *) echo "zone.sh: unknown zone $1" >&2; exit 2 ;;
   esac
 }
@@ -63,7 +65,7 @@ commit() {
     echo "$staged_other" >&2
     exit 1
   fi
-  if [ "$zone" != design ]; then
+  if [ "$zone" != design ] && [ "$zone" != tools ]; then
     [ -s "$approved" ] || { echo "zone.sh: no approved patch $approved" >&2; exit 1; }
     mark_new_files
     if ! git diff HEAD --binary -- "${paths[@]}" | cmp -s - "$approved"; then
