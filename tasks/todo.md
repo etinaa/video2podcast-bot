@@ -279,3 +279,13 @@ Work that is not scheduled in a phase. Technical debt carries the `[debt]` mark.
   - Verify: the Architect and the orchestrator review the features and the mapping table. A text check shows no step with a class or method name. `./mvnw verify` stays green. Technical task: the Analyst writes, the Architect and the orchestrator review; no Developer, no Tester, no code reviewers.
   - Depends on: T8, T9, TD2
   - Files: `src/features/T8-media.feature`, `src/features/T9-transcription.feature`, `src/features/TD2-job-queue.feature`, `tasks/TD4/requirements.md`
+
+- [~] **TD5 [debt]: Fall back to the combined format when a source has no separate audio track** (S)
+  - Why: `YtDlpClient` asks for `bestaudio[ext=m4a]/bestaudio`. For a source that has only a combined video with sound (a direct mp4, and many sites other than YouTube) the real yt-dlp answers "Requested format is not available", and the job fails. Checked by hand with yt-dlp 2026.10.26 on a local mp4. `ffmpeg` already turns any container into a 16 kHz mono WAV.
+  - Acceptance:
+    - The format selector is `bestaudio[ext=m4a]/bestaudio/best`. `SPEC.md` says the same where it names the selector (changed by the orchestrator with the owner's approval, given in this task).
+    - For a combined mp4 source the download gives one `source.*` file and the pipeline continues. The behaviour for sources with a separate audio track is unchanged.
+    - A unit test in `YtDlpClientTest` asserts the selector in the call arguments. The T8 scenario for the combined mp4 (tagged `@TD5`, written in TD4) is the acceptance check once T11 wires the steps.
+  - Verify: `./mvnw verify -Dno-it`, and one by-hand run of the real `yt-dlp` on a local mp4 with the new selector (the command and the result go into `tasks/TD5/evidence.md`). Technical task: the Developer writes, both code reviewers review; no Architect, no Analyst, no Tester.
+  - Depends on: T8
+  - Files: `media/YtDlpClient.java`, `YtDlpClientTest.java`, `SPEC.md`
