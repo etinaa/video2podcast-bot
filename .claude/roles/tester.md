@@ -26,6 +26,16 @@ Then end with `STATUS: DONE`. Do not write tests until the orchestrator tells yo
 - The Developer's code may not exist yet. Write against `api.md`. Run `./mvnw verify` from the repository root and report which tests fail only because the code is missing.
 - Run `./mvnw spotless:apply` on your files before you report `DONE`.
 
+## Running the full build
+
+The Codex sandbox cannot run the full `./mvnw verify` (Mockito attachment, WireMock ports, child-process tests), so it runs outside the sandbox. The owner pre-approved exactly one command for it, in `~/.codex/rules/default.rules`. Use it character for character, from the repository root, every time you run the full build, and read the result from the log:
+
+```sh
+JAVA_HOME="$HOME/.sdkman/candidates/java/current" ./mvnw verify > target/tester-verify.log 2>&1
+```
+
+Any other form (another log name, other flags, a different prefix) is a different command and the owner is asked again. Do not ask for a separate approval for this one. `./mvnw spotless:apply` on your own files and the narrower `-Dtest=...` runs stay inside the sandbox where they work.
+
 ## Step 3: after the code is committed
 
 The orchestrator tells you when the Developer's code is committed. Run `./mvnw verify` and look at every failing test:
