@@ -24,6 +24,7 @@
     <telegrambots.version>10.3.0</telegrambots.version>
     <cucumber.version>8.0.4</cucumber.version>
     <jacoco.unit.argLine/>
+    <pit.mutation.threshold>85</pit.mutation.threshold>
   </properties>
 
   <dependencyManagement>
@@ -323,6 +324,57 @@
                 <goals>
                   <goal>integration-test</goal>
                   <goal>verify</goal>
+                </goals>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+
+    <!-- Opt-in mutation testing: `./mvnw verify -Pmutation`. PIT mutates src/main and runs only the
+         unit tests of src/test; the integration tests in src/it never count toward the score. -->
+    <profile>
+      <id>mutation</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.pitest</groupId>
+            <artifactId>pitest-maven</artifactId>
+            <version>1.30.2</version>
+            <dependencies>
+              <dependency>
+                <groupId>org.pitest</groupId>
+                <artifactId>pitest-junit5-plugin</artifactId>
+                <version>1.2.3</version>
+              </dependency>
+            </dependencies>
+            <configuration>
+              <targetClasses>
+                <param>com.video2podcast.*</param>
+              </targetClasses>
+              <targetTests>
+                <param>com.video2podcast.*</param>
+              </targetTests>
+              <!-- The it profile puts the IT classes on the test classpath; PIT must not run them. -->
+              <excludedTestClasses>
+                <param>com.video2podcast.functional.*</param>
+              </excludedTestClasses>
+              <mutationThreshold>${pit.mutation.threshold}</mutationThreshold>
+              <failWhenNoMutations>true</failWhenNoMutations>
+              <timestampedReports>false</timestampedReports>
+              <outputFormats>
+                <param>HTML</param>
+                <param>XML</param>
+              </outputFormats>
+              <threads>4</threads>
+            </configuration>
+            <executions>
+              <execution>
+                <id>mutation-score</id>
+                <phase>verify</phase>
+                <goals>
+                  <goal>mutationCoverage</goal>
                 </goals>
               </execution>
             </executions>
