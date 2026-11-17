@@ -256,7 +256,7 @@ Work that is not scheduled in a phase. Technical debt carries the `[debt]` mark.
   - Depends on: T7
   - Files: `job/JobQueue.java`, `JobQueueTest.java`
 
-- [~] **TD3: Mutation tests for main code with PIT (min 85%)** (M)
+- [x] **TD3: Mutation tests for main code with PIT (min 85%)** (M)
   - Why: the 90% JaCoCo gate shows which lines run, not whether the tests would notice a wrong result. PIT shows that.
   - Acceptance:
     - `pitest-maven` is configured in a Maven profile `mutation`, for `src/main` code only (`src/test` unit tests; `src/it` is not run by PIT). The profile fails the build when the mutation score is below 85%.
