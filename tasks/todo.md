@@ -231,7 +231,7 @@ Work that is not scheduled in a phase. Technical debt carries the `[debt]` mark.
   - Depends on: T8
   - Files: `config/spotbugs-exclude.xml`, `pom.xml`, `media/DefaultProcessRunner.java`
 
-- [x] **TD2 [debt]: Fix the flaky `JobQueueTest.sizeCountsWaitingAndRunningTasksUntilTheyFinish`** (S)
+- [~] **TD2 [debt]: Fix the flaky `JobQueueTest.sizeCountsWaitingAndRunningTasksUntilTheyFinish`** (S)
   - Why: it failed once in four full `./mvnw verify` runs during T8 (`expected: 0 but was: 1` at `JobQueueTest.java:86`). `JobQueue.run` completes the task's future first and removes the task from `open` only in `finally`, so `size()` still counts a task whose future is already done. The test is right; the race is in the production code, and `size()` is the queue position T11 will show to users.
   - Acceptance:
     - `JobQueue.run` removes the task from `open` before it completes the task's future, on all paths (success, `RuntimeException`, `Error`). `size()` is already updated when a caller waiting on the future, or a `whenComplete` callback, runs. Behaviour is otherwise unchanged (order, error logging, `close()`).
