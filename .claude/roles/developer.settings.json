@@ -25,25 +25,15 @@
       "Bash(git push:*)",
       "Bash(git rm:*)",
       "Edit(./.claude/**)",
-      "Write(./.claude/**)",
       "Edit(./CLAUDE.md)",
-      "Write(./CLAUDE.md)",
       "Edit(./tasks/todo.md)",
-      "Write(./tasks/todo.md)",
       "Edit(./src/it/**)",
-      "Write(./src/it/**)",
       "Edit(./src/features/**)",
-      "Write(./src/features/**)",
       "Edit(./tasks/plan.md)",
-      "Write(./tasks/plan.md)",
       "Edit(./tasks/*/*.md)",
-      "Write(./tasks/*/*.md)",
       "Edit(./tasks/*/review/**)",
-      "Write(./tasks/*/review/**)",
       "Edit(./docs/decisions.md)",
-      "Write(./docs/decisions.md)",
-      "Edit(./docs/architecture/**)",
-      "Write(./docs/architecture/**)"
+      "Edit(./docs/architecture/**)"
     ]
   }
 }
