@@ -14,6 +14,7 @@ import java.util.*;
  */
 public class PipelineSetupSteps {
   final PipelineWorld w;
+  @org.springframework.beans.factory.annotation.Autowired private TranscriptWorld transcript;
 
   public PipelineSetupSteps(PipelineWorld world) {
     w = world;
@@ -143,6 +144,10 @@ public class PipelineSetupSteps {
 
   @Given("^the application clock (?:is|advances to) \"([^\"]+)\"$")
   public void clock(String s) {
+    if (transcript != null && transcript.active) {
+      transcript.clock.now = Instant.parse(s);
+      return;
+    }
     w.clock.now = Instant.parse(s);
   }
 

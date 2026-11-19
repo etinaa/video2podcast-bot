@@ -15,6 +15,7 @@ import java.util.stream.*;
 /** Assertions observe HTTP requests and persisted files, never processing services. */
 public class PipelineAssertionSteps {
   final PipelineWorld w;
+  @org.springframework.beans.factory.annotation.Autowired private TranscriptWorld transcript;
 
   public PipelineAssertionSteps(PipelineWorld world) {
     w = world;
@@ -381,6 +382,10 @@ public class PipelineAssertionSteps {
 
   @Then("the Whisper and Ollama mocks receive no requests")
   public void noModels() {
+    if (transcript != null && transcript.active) {
+      transcript.noModels();
+      return;
+    }
     assertThat(w.service("whisper")).isEmpty();
     assertThat(w.service("ollama")).isEmpty();
   }

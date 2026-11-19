@@ -15,6 +15,7 @@ public class WhoamiSteps {
 
   private long userId;
   private final PipelineWorld pipeline;
+  @Autowired private TranscriptWorld transcript;
 
   public WhoamiSteps(PipelineWorld pipeline) {
     this.pipeline = pipeline;
@@ -54,6 +55,10 @@ public class WhoamiSteps {
 
   @Then("the bot sends nothing")
   public void sendsNothing() {
+    if (transcript.active) {
+      assertThat(transcript.events).isEmpty();
+      return;
+    }
     if (pipeline.active) {
       assertThat(pipeline.calls("sendMessage")).isEmpty();
       return;
