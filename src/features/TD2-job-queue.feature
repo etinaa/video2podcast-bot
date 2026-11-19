@@ -30,5 +30,5 @@ Feature: Report the current queue position in Telegram
 
     Examples:
       | response                    | outcome                          |
-      | status 200 with nonempty text | produced its summary in Telegram |
+      | status 200 with nonempty text | completed with Telegram status "Done." |
       | status 500                    | reported a failure in Telegram   |

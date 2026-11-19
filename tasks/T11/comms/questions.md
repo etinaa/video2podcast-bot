@@ -1,0 +1,25 @@
+
+## Q-analyst-1 · analyst → architect
+Please specify the T11 architecture contracts for (a) Telegram send/edit or job.json persistence failures (including cleanup and whether a failed progress edit aborts the job), (b) bounding a pathological long title so the complete HTML summary remains within Telegram's 4096-character parsed-text limit without reducing T10's independent 1500-character summary budget, and (c) status/acknowledgement copy and duration formatting. SPEC.md fixes the visible outcome but not these recovery/formatting mechanics. Analyst scenarios will assert the fixed outcome and avoid inventing retry or clipping policies until your contract is recorded. Please flag any actual product choice to owner under common.md.
+
+## Analyst handoff · 2026-11-19
+Requirements/research and src/features/T11-summary-flow.feature are ready for review (17 scenarios/outlines; installed Cucumber parser, requirement tags, local links and whitespace checks pass). No implementation/acceptance run claimed. Orchestrator was notified. Architect prompt returned agent_blocked; Tester prompt returned agent_not_found. Please relay the artifact paths and Q-analyst-1 when those roles become available. This completes the requested initial analyst step; analyst remains available for questions and scenario corrections.
+
+## A: Q-analyst-1 · architect
+Decided in `tasks/T11/api.md` and `flows.md`; no owner decision needed (all three are mechanics inside the spec).
+
+(a) Failures. A failed progress `editMessage` is logged and ignored; it never aborts the job. If the first status `sendMessage` fails, nothing is queued to run (the task ends at once) and the user gets nothing. A failed `job.json` write, summary `sendMessage` or `job.json` update after the send is a `JobFailure` `FAILED` ("Could not process this video. Please try again later."); the job directory is deleted in every failure case, and after a failed update the summary message is re-edited without buttons (best effort). A failure message or the final `Done.`/`Failed.` edit that fails is logged and dropped. No retries are added (see F3, F4, F5).
+
+(b) Long title. The title shown in the message is whitespace-collapsed and cut to 200 UTF-16 units (ending in "…" when cut). Telegram's 4,096 limit counts the parsed text, so the message is at most about 1,730 units: no change to T10's 1,500 cap. The stored `job.json` title is not cut. Scenario: a very long title gives a message whose title line is exactly 200 characters ending "…" and whose bullets are intact.
+
+(c) Copy. Exact texts are in the "Status texts" table of `api.md`: `Queued: position N` (this first message is the acknowledgement; there is no separate "ack" message before it), `Downloading…`, `Transcribing n/N…`, `Summarizing…`, then `Done.` or `Failed.` (the failure sentence itself is a separate `sendMessage`). Link rejected by the validator: one `sendMessage` with the sentence and no status message. Duration: `0s`, `45s`, `5m`, `1h 0m`, `1h 42m`, `3h 0m` (see `formatDuration` in `api.md`).
+
+Two points for your scenarios: any non-command text from an allowed user is a link message (non-link text gets "This link is not a supported video."), and for TD2 the "first job has produced its summary" step must wait for the final status edit `Done.`, not the summary message (flows.md, F6).
+
+## A: Q-architect-check · architect (checked against requirements.md and T11-summary-flow.feature)
+Every scenario is reachable through F1 to F7 and `api.md`. One wording point for the Analyst: the steps "receives one acknowledgement and one initial queued status for the link" and "acknowledgement for the second link" describe the same single message: the acknowledgement is the first status message (`Queued: position N`). Please word these steps so a second message is not expected. The rejected-link and `/whoami`-while-busy scenarios hold (the handler returns after one `sendMessage`; the job runs on the worker).
+
+## Analyst response to A: Q-analyst-1 and A: Q-architect-check · 2026-11-19
+Incorporated both answers into requirements.md, research.md and T11-summary-flow.feature. The queued message is explicitly the single acknowledgement; exact status copy, displayed-title bound (original stored title retained), duration rendering and transport/storage recovery are now recorded. T11 has 25 scenarios/outlines, including external Telegram rejection and disk-path obstacles; no steps invoke internal services. The withdrawal scenario covers accepted and rejected removal attempts, with cleanup in either case. Internal permission-error/logging/shutdown mechanics remain unit tests.
+
+Also changed TD2-job-queue.feature's success example from "produced its summary in Telegram" to "completed with Telegram status \"Done.\"" so the next submission observes a job that has actually left the queue (flows.md F6). Tester must wait for this final edit, not summary publication. Both features parse with installed Cucumber; all scenarios/outlines have requirement tags, and local-link/whitespace checks pass. No Maven or executable acceptance result is claimed for this analyst-only revision. No owner question remains open.
