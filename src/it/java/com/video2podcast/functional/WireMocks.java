@@ -23,6 +23,15 @@ final class WireMocks {
     return server;
   }
 
+  /** Caller owns the lifetime of a scenario server; no global hook retains its request bodies. */
+  static WireMockServer scenarioServer(
+      com.github.tomakehurst.wiremock.extension.Extension... extensions) {
+    WireMockServer server =
+        new WireMockServer(wireMockConfig().dynamicPort().extensions(extensions));
+    server.start();
+    return server;
+  }
+
   static void resetAll() {
     TELEGRAM.resetAll();
     WHISPER.resetAll();

@@ -60,13 +60,38 @@ abstract class FunctionalTest {
   @Autowired TelegramBot bot;
   @Autowired AccessService access;
 
+  /** Common settings for cached tests and scenario contexts with construction-time overrides. */
+  static java.util.Map<String, String> applicationSettings(
+      Path directory, String telegram, String whisper, String ollama) {
+    return java.util.Map.of(
+        "app.telegram.enabled",
+        "true",
+        "app.telegram.bot-token",
+        TOKEN,
+        "app.telegram.admin-user-id",
+        Long.toString(OWNER_ID),
+        "app.telegram.api-url",
+        telegram,
+        "app.whisper.base-url",
+        whisper,
+        "app.ollama.base-url",
+        ollama,
+        "app.access.file",
+        directory.resolve("allowed-users.json").toString(),
+        "app.jobs.work-dir",
+        directory.resolve("work").toString(),
+        "spring.autoconfigure.exclude",
+        "org.telegram.telegrambots.longpolling.starter.TelegramBotStarterConfiguration");
+  }
+
   @DynamicPropertySource
   static void endpoints(DynamicPropertyRegistry registry) {
-    registry.add("app.telegram.api-url", () -> WireMocks.url(WireMocks.TELEGRAM));
-    registry.add("app.whisper.base-url", () -> WireMocks.url(WireMocks.WHISPER));
-    registry.add("app.ollama.base-url", () -> WireMocks.url(WireMocks.OLLAMA));
-    registry.add("app.access.file", () -> WORK_ROOT.resolve("allowed-users.json").toString());
-    registry.add("app.jobs.work-dir", () -> WORK_ROOT.resolve("work").toString());
+    applicationSettings(
+            WORK_ROOT,
+            WireMocks.url(WireMocks.TELEGRAM),
+            WireMocks.url(WireMocks.WHISPER),
+            WireMocks.url(WireMocks.OLLAMA))
+        .forEach((key, value) -> registry.add(key, () -> value));
   }
 
   @BeforeEach

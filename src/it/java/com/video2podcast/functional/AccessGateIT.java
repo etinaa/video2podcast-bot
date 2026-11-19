@@ -46,19 +46,18 @@ class AccessGateIT extends FunctionalTest {
   }
 
   @Test
-  void allowedUserGetsHelpOnStartAndNothingForOtherText() {
+  void allowedUserGetsHelpOnStartAndRejectsNonLinkText() {
     long userId = newUserId();
     access.allow(userId, "ann", OWNER_ID);
 
     receive(Updates.privateMessage(userId, "/start"));
     receive(Updates.privateMessage(userId, "hello"));
 
-    assertThat(telegramCalls("sendMessage"))
-        .singleElement()
-        .satisfies(call -> {
-          assertThat(call.get("chat_id").asLong()).isEqualTo(userId);
-          assertThat(call.get("text").asText()).contains("Send me a video link");
-        });
+    assertThat(sentTo(userId))
+        .extracting(call -> call.path("text").asText())
+        .satisfiesExactly(
+            help -> assertThat(help).contains("Send me a video link"),
+            failure -> assertThat(failure).isEqualTo("This link is not a supported video."));
     assertThat(access.pending()).extracting(PendingRequest::id).doesNotContain(userId);
   }
 

@@ -31,13 +31,17 @@ class WhoamiIT extends FunctionalTest {
   }
 
   @Test
-  void otherTextFromAnAllowedUserGetsNoReply() {
+  void nonLinkTextFromAnAllowedUserGetsUnsupportedReply() {
     long userId = newUserId();
     access.allow(userId, "ann", OWNER_ID);
 
     receive(Updates.privateMessage(userId, "hello"));
 
-    assertThat(telegramCalls("sendMessage")).isEmpty();
+    assertThat(sentTo(userId))
+        .singleElement()
+        .satisfies(call ->
+            assertThat(call.path("text").asText())
+                .isEqualTo("This link is not a supported video."));
   }
 
   @Test

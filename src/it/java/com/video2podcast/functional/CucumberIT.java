@@ -2,6 +2,7 @@ package com.video2podcast.functional;
 
 import static io.cucumber.junit.platform.engine.Constants.FILTER_TAGS_PROPERTY_NAME;
 import static io.cucumber.junit.platform.engine.Constants.GLUE_PROPERTY_NAME;
+import static io.cucumber.junit.platform.engine.Constants.JUNIT_PLATFORM_NAMING_STRATEGY_PROPERTY_NAME;
 import static io.cucumber.junit.platform.engine.Constants.PLUGIN_PROPERTY_NAME;
 
 import org.junit.platform.suite.api.ConfigurationParameter;
@@ -15,11 +16,7 @@ import org.junit.platform.suite.api.Suite;
 @SelectClasspathResource("features")
 @ConfigurationParameter(key = GLUE_PROPERTY_NAME, value = "com.video2podcast.functional")
 @ConfigurationParameter(key = PLUGIN_PROPERTY_NAME, value = "summary")
-// T8 scenarios are deferred to the pipeline wiring in T11.
-// TD2 scenarios are covered by the Developer-owned JobQueueTest.
-// T9 component scenarios are deferred until pipeline wiring; no functional steps yet.
-// T10 summary scenarios are deferred to T11's Telegram trigger and step definitions.
-@ConfigurationParameter(
-    key = FILTER_TAGS_PROPERTY_NAME,
-    value = "not @T8 and not @TD2 and not @T9 and not @T10")
+// Keep examples from different outlines distinct in Failsafe XML reports.
+@ConfigurationParameter(key = JUNIT_PLATFORM_NAMING_STRATEGY_PROPERTY_NAME, value = "long")
+@ConfigurationParameter(key = FILTER_TAGS_PROPERTY_NAME, value = "not @manual_media")
 public class CucumberIT {}

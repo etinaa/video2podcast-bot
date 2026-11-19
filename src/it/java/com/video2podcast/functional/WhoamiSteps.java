@@ -14,6 +14,11 @@ public class WhoamiSteps {
   @Autowired private TelegramBot bot;
 
   private long userId;
+  private final PipelineWorld pipeline;
+
+  public WhoamiSteps(PipelineWorld pipeline) {
+    this.pipeline = pipeline;
+  }
 
   @Given("a Telegram user")
   public void aTelegramUser() {
@@ -22,11 +27,19 @@ public class WhoamiSteps {
 
   @When("the user sends {string} in a private chat")
   public void sendsInPrivateChat(String text) {
+    if (pipeline.active) {
+      pipeline.send(text);
+      return;
+    }
     bot.consume(Updates.privateMessage(userId, text));
   }
 
   @When("the user sends {string} in a group chat")
   public void sendsInGroupChat(String text) {
+    if (pipeline.active) {
+      pipeline.send(text, "group", pipeline.user);
+      return;
+    }
     bot.consume(Updates.groupMessage(-100, userId, text));
   }
 
@@ -41,6 +54,10 @@ public class WhoamiSteps {
 
   @Then("the bot sends nothing")
   public void sendsNothing() {
+    if (pipeline.active) {
+      assertThat(pipeline.calls("sendMessage")).isEmpty();
+      return;
+    }
     assertThat(FunctionalTest.telegramCalls("sendMessage")).isEmpty();
   }
 }
