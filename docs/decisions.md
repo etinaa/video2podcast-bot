@@ -123,3 +123,9 @@ chunks again.
 **Decision:** `config/spotbugs-exclude.xml` excludes `EI_EXPOSE_REP2` for `com.video2podcast.job.PipelineService` only. The class keeps a reference to `JobStore`, a shared service; SpotBugs treats it as a mutable value object because it has a `delete` method. The owner approved this exclusion on 2026-11-19 (SPEC.md requires approval for every suppression).
 
 **Consequences:** no other class or pattern is excluded. A new `EI_EXPOSE_REP2` finding elsewhere still fails the build.
+
+## D11: Button taps split into state and Telegram parts (T12, 2026-11-19)
+
+**Decision:** `job/DeliveryService` owns the rule that a file is sent once: `claim` moves `AVAILABLE` → `SENDING` through `JobStore.transition` (one winner per race), `complete` and `release` finish or undo it. `bot/DeliveryCallbackHandler` does the Telegram calls and never touches `job.json`. The buttons on the summary message are changed with a new `TelegramGateway.editButtons` (`editMessageReplyMarkup`), because `job.json` does not keep the summary text and `editMessage` would need it. A tap is answered once ("Sending transcript…" or a refusal); a failed send is reported with a separate message.
+
+**Consequences:** T13 adds the `audio:` branch and calls the same `claim`/`complete`/`release` and `Keyboards.delivery(jobId, audio, transcript)`. If the bot dies between `claim` and `complete` the file stays `SENDING` until T14's startup recovery.
