@@ -118,7 +118,9 @@ chunks again.
 
 **Consequences:** the delivery buttons exist from T11 but do nothing until T12 and T13. A `job.json` is absent while a job runs; T14's startup scan removes directories left that way by a crash. Status texts are fixed strings (`Queued: position N`, `Downloading…`, `Transcribing n/N…`, `Summarizing…`, `Done.`, `Failed.`).
 
-## D10: SpotBugs exclusion for `PipelineService` (T11, 2026-11-19)
+## D10: SpotBugs exclusion for `PipelineService` (T11, 2026-11-19; superseded in T12, 2026-11-19)
+
+**Superseded:** in T12 the owner chose to remove the cause instead of adding a second exclusion. `JobStore.delete` was renamed to `discard` (SpotBugs treats a class as mutable by method-name heuristics such as `delete`), so no class that stores a `JobStore` is flagged, and the `PipelineService` exclusion was deleted from `config/spotbugs-exclude.xml`. The text below is the original decision.
 
 **Decision:** `config/spotbugs-exclude.xml` excludes `EI_EXPOSE_REP2` for `com.video2podcast.job.PipelineService` only. The class keeps a reference to `JobStore`, a shared service; SpotBugs treats it as a mutable value object because it has a `delete` method. The owner approved this exclusion on 2026-11-19 (SPEC.md requires approval for every suppression).
 

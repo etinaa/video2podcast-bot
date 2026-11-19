@@ -1,0 +1,1843 @@
+diff --git a/config/spotbugs-exclude.xml b/config/spotbugs-exclude.xml
+index 239c90b..fe94666 100644
+--- a/config/spotbugs-exclude.xml
++++ b/config/spotbugs-exclude.xml
+@@ -8,11 +8,4 @@
+     <Class name="~com\.video2podcast\.media\.DefaultProcessRunner(\$Child)?"/>
+     <Bug pattern="COMMAND_INJECTION"/>
+   </Match>
+-  <!-- Approved by the owner (D10 in docs/decisions.md; A: Q-developer-1 in
+-       tasks/T11/comms/questions.md). PipelineService keeps a JobStore, a shared service and not a
+-       value object. SpotBugs calls JobStore mutable only because a method is named delete. -->
+-  <Match>
+-    <Class name="com.video2podcast.job.PipelineService"/>
+-    <Bug pattern="EI_EXPOSE_REP2"/>
+-  </Match>
+ </FindBugsFilter>
+diff --git a/src/main/java/com/video2podcast/bot/BotUpdateHandler.java b/src/main/java/com/video2podcast/bot/BotUpdateHandler.java
+index 79c9485..877299c 100644
+--- a/src/main/java/com/video2podcast/bot/BotUpdateHandler.java
++++ b/src/main/java/com/video2podcast/bot/BotUpdateHandler.java
+@@ -29,11 +29,17 @@ public class BotUpdateHandler {
+   private final UrlMessageHandler urls;
+   private final AccessAdmin admin;
+   private final UnknownUserHandler unknownUsers;
++  private final DeliveryCallbackHandler delivery;
+ 
+-  public BotUpdateHandler(TelegramGateway gateway, AccessService access, UrlMessageHandler urls) {
++  public BotUpdateHandler(
++      TelegramGateway gateway,
++      AccessService access,
++      UrlMessageHandler urls,
++      DeliveryCallbackHandler delivery) {
+     this.gateway = gateway;
+     this.access = access;
+     this.urls = urls;
++    this.delivery = delivery;
+     this.admin = new AccessAdmin(gateway, access);
+     this.unknownUsers = new UnknownUserHandler(gateway, access, admin);
+   }
+@@ -82,6 +88,9 @@ public class BotUpdateHandler {
+     } else if (callback.getData() != null
+         && callback.getData().startsWith(Keyboards.ACCESS_PREFIX)) {
+       admin.handleCallback(callback);
++    } else if (callback.getData() != null
++        && callback.getData().startsWith(Keyboards.TRANSCRIPT_PREFIX)) {
++      delivery.handle(callback);
+     }
+   }
+ 
+diff --git a/src/main/java/com/video2podcast/bot/DeliveryCallbackHandler.java b/src/main/java/com/video2podcast/bot/DeliveryCallbackHandler.java
+new file mode 100644
+index 0000000..a9a126a
+--- /dev/null
++++ b/src/main/java/com/video2podcast/bot/DeliveryCallbackHandler.java
+@@ -0,0 +1,121 @@
++package com.video2podcast.bot;
++
++import com.video2podcast.job.DeliveryService;
++import com.video2podcast.job.DeliveryService.Claim;
++import com.video2podcast.job.FileKind;
++import com.video2podcast.job.FileState;
++import com.video2podcast.job.JobFile;
++import com.video2podcast.job.JobRecord;
++import com.video2podcast.job.JobStoreException;
++import java.util.List;
++import java.util.Optional;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++import org.telegram.telegrambots.meta.api.objects.CallbackQuery;
++
++/** Handles a tap on a download button: checks it, sends the file once and updates the buttons. */
++public class DeliveryCallbackHandler {
++
++  private static final Logger LOG = LoggerFactory.getLogger(DeliveryCallbackHandler.class);
++
++  static final String SENDING = "Sending transcript…";
++  static final String EXPIRED = "Expired, please resend the link.";
++  static final String NOT_OWNER = "This button is not for you.";
++  static final String ALREADY_SENT = "Already sent.";
++  static final String IN_PROGRESS = "Already being sent.";
++  static final String ERROR = "Something went wrong, please try again.";
++  static final String SEND_FAILED = "Could not send the transcript. Tap the button to try again.";
++
++  private final TelegramGateway gateway;
++  private final DeliveryService delivery;
++
++  public DeliveryCallbackHandler(TelegramGateway gateway, DeliveryService delivery) {
++    this.gateway = gateway;
++    this.delivery = delivery;
++  }
++
++  /**
++   * Called only by {@link BotUpdateHandler} for data that starts with {@link
++   * Keyboards#TRANSCRIPT_PREFIX}. Answers the tap exactly once and never throws for a failed
++   * Telegram call or a job store error.
++   */
++  void handle(CallbackQuery callback) {
++    String jobId = callback.getData().substring(Keyboards.TRANSCRIPT_PREFIX.length());
++    Claim claim;
++    try {
++      claim = delivery.claim(jobId, callback.getFrom().getId(), FileKind.TRANSCRIPT);
++    } catch (JobStoreException e) {
++      LOG.error("Could not claim the transcript of job {}", jobId, e);
++      answer(callback, ERROR);
++      return;
++    }
++    switch (claim.outcome()) {
++      case EXPIRED -> answer(callback, EXPIRED);
++      case NOT_OWNER -> answer(callback, NOT_OWNER);
++      case ALREADY_SENT -> answer(callback, ALREADY_SENT);
++      case IN_PROGRESS -> answer(callback, IN_PROGRESS);
++      case GRANTED -> send(callback, jobId, claim);
++    }
++  }
++
++  private void send(CallbackQuery callback, String jobId, Claim claim) {
++    JobRecord job = claim.job();
++    answer(callback, SENDING);
++    editButtons(job, jobId, audioState(job), FileState.SENDING);
++    try {
++      gateway.sendDocument(job.chatId(), claim.file(), FileNames.transcriptName(job.title()), null);
++    } catch (RuntimeException e) {
++      LOG.error("Could not send the transcript of job {}", jobId, e);
++      fail(job, jobId);
++      return;
++    }
++    Optional<JobRecord> done;
++    try {
++      done = delivery.complete(jobId, FileKind.TRANSCRIPT);
++    } catch (RuntimeException e) {
++      LOG.error("The transcript of job {} was sent but could not be marked as sent", jobId, e);
++      return;
++    }
++    editButtons(job, jobId, audioState(done.orElse(job)), FileState.SENT);
++  }
++
++  private void fail(JobRecord job, String jobId) {
++    try {
++      delivery.release(jobId, FileKind.TRANSCRIPT);
++    } catch (RuntimeException e) {
++      LOG.error("Could not release the transcript of job {}", jobId, e);
++    }
++    editButtons(job, jobId, audioState(job), FileState.AVAILABLE);
++    try {
++      gateway.sendMessage(job.chatId(), SEND_FAILED, List.of());
++    } catch (RuntimeException e) {
++      LOG.warn("Could not tell the user that the transcript of job {} failed", jobId, e);
++    }
++  }
++
++  private void editButtons(JobRecord job, String jobId, FileState audio, FileState transcript) {
++    if (job.summaryMessageId() == null) {
++      return;
++    }
++    try {
++      gateway.editButtons(
++          job.chatId(), job.summaryMessageId(), Keyboards.delivery(jobId, audio, transcript));
++    } catch (RuntimeException e) {
++      LOG.warn("Could not update the buttons of job {}", jobId, e);
++    }
++  }
++
++  private void answer(CallbackQuery callback, String text) {
++    String callbackId = callback.getId();
++    try {
++      gateway.answerCallback(callbackId, text);
++    } catch (RuntimeException e) {
++      LOG.warn("Could not answer callback {}", callbackId, e);
++    }
++  }
++
++  private static FileState audioState(JobRecord job) {
++    JobFile audio = job.files().get(FileKind.AUDIO);
++    return audio == null ? FileState.AVAILABLE : audio.state();
++  }
++}
+diff --git a/src/main/java/com/video2podcast/bot/FileNames.java b/src/main/java/com/video2podcast/bot/FileNames.java
+new file mode 100644
+index 0000000..8036f7f
+--- /dev/null
++++ b/src/main/java/com/video2podcast/bot/FileNames.java
+@@ -0,0 +1,34 @@
++package com.video2podcast.bot;
++
++/** Names for the files the bot uploads. */
++final class FileNames {
++
++  private static final int MAX_STEM = 100;
++  private static final String FORBIDDEN = "\\/:*?\"<>|";
++  private static final String FALLBACK = "transcript";
++
++  private FileNames() {}
++
++  /** The upload name for a transcript: the title made safe for a file name, plus ".txt". */
++  static String transcriptName(String title) {
++    StringBuilder safe = new StringBuilder();
++    String text = title == null ? "" : title;
++    for (int i = 0; i < text.length(); i++) {
++      char c = text.charAt(i);
++      safe.append(FORBIDDEN.indexOf(c) >= 0 || Character.isISOControl(c) ? '_' : c);
++    }
++    String stem = clip(safe.toString().strip());
++    return (stem.isEmpty() ? FALLBACK : stem) + ".txt";
++  }
++
++  private static String clip(String text) {
++    if (text.length() <= MAX_STEM) {
++      return text;
++    }
++    int end = MAX_STEM;
++    if (Character.isHighSurrogate(text.charAt(end - 1))) {
++      end--;
++    }
++    return text.substring(0, end);
++  }
++}
+diff --git a/src/main/java/com/video2podcast/bot/Keyboards.java b/src/main/java/com/video2podcast/bot/Keyboards.java
+index d06f430..537bc08 100644
+--- a/src/main/java/com/video2podcast/bot/Keyboards.java
++++ b/src/main/java/com/video2podcast/bot/Keyboards.java
+@@ -1,5 +1,6 @@
+ package com.video2podcast.bot;
+ 
++import com.video2podcast.job.FileState;
+ import java.util.List;
+ 
+ /** Inline keyboards and the callback data they carry. */
+@@ -16,9 +17,32 @@ final class Keyboards {
+ 
+   /** One row, in this order. */
+   static List<InlineButton> delivery(String jobId) {
++    return delivery(jobId, FileState.AVAILABLE, FileState.AVAILABLE);
++  }
++
++  /** One row, audio first. Each label follows the state of its file; the callback data does not. */
++  static List<InlineButton> delivery(String jobId, FileState audio, FileState transcript) {
+     return List.of(
+-        new InlineButton("Download audio", AUDIO_PREFIX + jobId),
+-        new InlineButton("Download transcript", TRANSCRIPT_PREFIX + jobId));
++        new InlineButton(audioLabel(audio), AUDIO_PREFIX + jobId),
++        new InlineButton(transcriptLabel(transcript), TRANSCRIPT_PREFIX + jobId));
++  }
++
++  private static String audioLabel(FileState state) {
++    return switch (state) {
++      case AVAILABLE -> "Download audio";
++      case SENDING -> "Preparing audio…";
++      case SENT -> "Audio sent";
++      case EXPIRED -> "Audio expired";
++    };
++  }
++
++  private static String transcriptLabel(FileState state) {
++    return switch (state) {
++      case AVAILABLE -> "Download transcript";
++      case SENDING -> "Sending transcript…";
++      case SENT -> "Transcript sent";
++      case EXPIRED -> "Transcript expired";
++    };
+   }
+ 
+   static List<InlineButton> accessRequest(long userId) {
+diff --git a/src/main/java/com/video2podcast/bot/TelegramClientGateway.java b/src/main/java/com/video2podcast/bot/TelegramClientGateway.java
+index 7dd57d6..f4caffd 100644
+--- a/src/main/java/com/video2podcast/bot/TelegramClientGateway.java
++++ b/src/main/java/com/video2podcast/bot/TelegramClientGateway.java
+@@ -7,6 +7,7 @@ import org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery;
+ import org.telegram.telegrambots.meta.api.methods.send.SendAudio;
+ import org.telegram.telegrambots.meta.api.methods.send.SendDocument;
+ import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
++import org.telegram.telegrambots.meta.api.methods.updatingmessages.EditMessageReplyMarkup;
+ import org.telegram.telegrambots.meta.api.methods.updatingmessages.EditMessageText;
+ import org.telegram.telegrambots.meta.api.objects.InputFile;
+ import org.telegram.telegrambots.meta.api.objects.LinkPreviewOptions;
+@@ -53,6 +54,19 @@ public class TelegramClientGateway implements TelegramGateway {
+     call(() -> client.execute(request));
+   }
+ 
++  @Override
++  public void editButtons(long chatId, int messageId, List<InlineButton> buttons) {
++    InlineKeyboardMarkup markup =
++        buttons.isEmpty() ? new InlineKeyboardMarkup(List.of()) : keyboard(buttons);
++    EditMessageReplyMarkup request =
++        EditMessageReplyMarkup.builder()
++            .chatId(chatId)
++            .messageId(messageId)
++            .replyMarkup(markup)
++            .build();
++    call(() -> client.execute(request));
++  }
++
+   @Override
+   public void sendDocument(long chatId, Path file, String fileName, String caption) {
+     SendDocument request =
+diff --git a/src/main/java/com/video2podcast/bot/TelegramGateway.java b/src/main/java/com/video2podcast/bot/TelegramGateway.java
+index 10ca900..22b690c 100644
+--- a/src/main/java/com/video2podcast/bot/TelegramGateway.java
++++ b/src/main/java/com/video2podcast/bot/TelegramGateway.java
+@@ -12,6 +12,14 @@ public interface TelegramGateway {
+   /** Replaces the text and buttons of a message this bot sent earlier. */
+   void editMessage(long chatId, int messageId, String html, List<InlineButton> buttons);
+ 
++  /**
++   * Replaces only the buttons of a message this bot sent earlier; the text stays. An empty list
++   * removes the keyboard.
++   *
++   * @throws TelegramGatewayException if Telegram refuses or cannot be reached
++   */
++  void editButtons(long chatId, int messageId, List<InlineButton> buttons);
++
+   void sendDocument(long chatId, Path file, String fileName, String caption);
+ 
+   /** Sends an audio file that plays in Telegram's player. */
+diff --git a/src/main/java/com/video2podcast/config/PipelineConfig.java b/src/main/java/com/video2podcast/config/PipelineConfig.java
+index a6bdb06..16f4d12 100644
+--- a/src/main/java/com/video2podcast/config/PipelineConfig.java
++++ b/src/main/java/com/video2podcast/config/PipelineConfig.java
+@@ -1,8 +1,10 @@
+ package com.video2podcast.config;
+ 
++import com.video2podcast.bot.DeliveryCallbackHandler;
+ import com.video2podcast.bot.SummaryMessagePublisher;
+ import com.video2podcast.bot.TelegramGateway;
+ import com.video2podcast.bot.UrlMessageHandler;
++import com.video2podcast.job.DeliveryService;
+ import com.video2podcast.job.JobQueue;
+ import com.video2podcast.job.JobStore;
+ import com.video2podcast.job.PipelineService;
+@@ -54,4 +56,15 @@ public class PipelineConfig {
+       Clock clock) {
+     return new UrlMessageHandler(gateway, validator, queue, pipeline, clock);
+   }
++
++  @Bean
++  DeliveryService deliveryService(JobStore store, Clock clock) {
++    return new DeliveryService(store, clock);
++  }
++
++  @Bean
++  DeliveryCallbackHandler deliveryCallbackHandler(
++      TelegramGateway gateway, DeliveryService delivery) {
++    return new DeliveryCallbackHandler(gateway, delivery);
++  }
+ }
+diff --git a/src/main/java/com/video2podcast/config/TelegramConfig.java b/src/main/java/com/video2podcast/config/TelegramConfig.java
+index 27ee70f..f9d0c05 100644
+--- a/src/main/java/com/video2podcast/config/TelegramConfig.java
++++ b/src/main/java/com/video2podcast/config/TelegramConfig.java
+@@ -2,10 +2,12 @@ package com.video2podcast.config;
+ 
+ import com.video2podcast.access.AccessService;
+ import com.video2podcast.bot.BotUpdateHandler;
++import com.video2podcast.bot.DeliveryCallbackHandler;
+ import com.video2podcast.bot.TelegramBot;
+ import com.video2podcast.bot.TelegramClientGateway;
+ import com.video2podcast.bot.TelegramGateway;
+ import com.video2podcast.bot.UrlMessageHandler;
++import okhttp3.OkHttpClient;
+ import org.springframework.boot.ApplicationRunner;
+ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+ import org.springframework.context.annotation.Bean;
+@@ -24,8 +26,11 @@ public class TelegramConfig {
+   @Bean
+   TelegramClient telegramClient(AppProperties props) {
+     requireAdmin(props);
++    // OkHttp resends a request whose connection dropped before a response. For an upload that
++    // could deliver a file twice behind the one-send guard, so the retry is switched off.
++    OkHttpClient http = new OkHttpClient.Builder().retryOnConnectionFailure(false).build();
+     return new OkHttpTelegramClient(
+-        requireToken(props), TelegramApiUrl.parse(props.telegram().apiUrl()));
++        http, requireToken(props), TelegramApiUrl.parse(props.telegram().apiUrl()));
+   }
+ 
+   @Bean
+@@ -35,8 +40,11 @@ public class TelegramConfig {
+ 
+   @Bean
+   BotUpdateHandler botUpdateHandler(
+-      TelegramGateway gateway, AccessService access, UrlMessageHandler urls) {
+-    return new BotUpdateHandler(gateway, access, urls);
++      TelegramGateway gateway,
++      AccessService access,
++      UrlMessageHandler urls,
++      DeliveryCallbackHandler delivery) {
++    return new BotUpdateHandler(gateway, access, urls, delivery);
+   }
+ 
+   /** At startup, tell the owner about requests that could not be delivered earlier. */
+diff --git a/src/main/java/com/video2podcast/job/DeliveryService.java b/src/main/java/com/video2podcast/job/DeliveryService.java
+new file mode 100644
+index 0000000..3f5cb09
+--- /dev/null
++++ b/src/main/java/com/video2podcast/job/DeliveryService.java
+@@ -0,0 +1,127 @@
++package com.video2podcast.job;
++
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.time.Clock;
++import java.time.Instant;
++import java.util.Optional;
++
++/**
++ * The state side of a download button tap. It decides whether a tap may send a file and moves the
++ * file along {@code AVAILABLE -> SENDING -> SENT}, so a file is sent once even when taps race.
++ * Knows nothing about Telegram.
++ */
++public class DeliveryService {
++
++  /** What a tap is allowed to do. */
++  public enum Outcome {
++    GRANTED,
++    EXPIRED,
++    NOT_OWNER,
++    ALREADY_SENT,
++    IN_PROGRESS
++  }
++
++  /**
++   * @param job the stored job after the claim (the file is SENDING when GRANTED); null when the job
++   *     does not exist
++   * @param file the file to send; set only when GRANTED
++   */
++  public record Claim(Outcome outcome, JobRecord job, Path file) {}
++
++  private final JobStore store;
++  private final Clock clock;
++
++  public DeliveryService(JobStore store, Clock clock) {
++    this.store = store;
++    this.clock = clock;
++  }
++
++  /**
++   * Checks a tap and, when it is allowed, moves the file AVAILABLE to SENDING. Exactly one of
++   * several concurrent callers gets GRANTED.
++   *
++   * @throws JobStoreException on an I/O error
++   */
++  public Claim claim(String jobId, long userId, FileKind kind) {
++    Optional<JobRecord> loaded = load(jobId);
++    if (loaded.isEmpty()) {
++      return refused(Outcome.EXPIRED, null);
++    }
++    JobRecord job = loaded.get();
++    if (job.ownerUserId() != userId) {
++      return refused(Outcome.NOT_OWNER, job);
++    }
++    JobFile file = job.files().get(kind);
++    if (file == null) {
++      return refused(Outcome.EXPIRED, job);
++    }
++    return switch (file.state()) {
++      case SENT -> refused(Outcome.ALREADY_SENT, job);
++      case EXPIRED -> refused(Outcome.EXPIRED, job);
++      case SENDING -> refused(Outcome.IN_PROGRESS, job);
++      case AVAILABLE -> claimAvailable(job, kind, file);
++    };
++  }
++
++  /**
++   * SENDING to SENT. Returns the stored job, or empty if it is gone or the file was not SENDING.
++   */
++  public Optional<JobRecord> complete(String jobId, FileKind kind) {
++    return move(jobId, kind, FileState.SENDING, FileState.SENT);
++  }
++
++  /** SENDING to AVAILABLE after a failed send. Returns the stored job, or empty as above. */
++  public Optional<JobRecord> release(String jobId, FileKind kind) {
++    return move(jobId, kind, FileState.SENDING, FileState.AVAILABLE);
++  }
++
++  private Claim claimAvailable(JobRecord job, FileKind kind, JobFile file) {
++    Instant expiresAt = file.expiresAt();
++    if (expiresAt != null && !clock.instant().isBefore(expiresAt)) {
++      return refused(Outcome.EXPIRED, job);
++    }
++    Path path = store.resolve(job.jobId(), file);
++    if (!Files.isRegularFile(path)) {
++      store.transition(job.jobId(), kind, FileState.AVAILABLE, FileState.EXPIRED);
++      return refused(Outcome.EXPIRED, job);
++    }
++    JobStore.Transition result =
++        store.transition(job.jobId(), kind, FileState.AVAILABLE, FileState.SENDING);
++    if (result == JobStore.Transition.APPLIED) {
++      return new Claim(Outcome.GRANTED, store.load(job.jobId()).orElse(job), path);
++    }
++    return lostRace(job.jobId(), kind);
++  }
++
++  private Claim lostRace(String jobId, FileKind kind) {
++    Optional<JobRecord> job = store.load(jobId);
++    FileState state = job.map(j -> j.files().get(kind)).map(JobFile::state).orElse(null);
++    if (state == FileState.SENT) {
++      return refused(Outcome.ALREADY_SENT, job.get());
++    }
++    if (state == FileState.SENDING) {
++      return refused(Outcome.IN_PROGRESS, job.get());
++    }
++    return refused(Outcome.EXPIRED, job.orElse(null));
++  }
++
++  private Optional<JobRecord> move(String jobId, FileKind kind, FileState from, FileState to) {
++    if (store.transition(jobId, kind, from, to) != JobStore.Transition.APPLIED) {
++      return Optional.empty();
++    }
++    return store.load(jobId);
++  }
++
++  private Optional<JobRecord> load(String jobId) {
++    try {
++      return store.load(jobId);
++    } catch (IllegalArgumentException e) {
++      return Optional.empty();
++    }
++  }
++
++  private static Claim refused(Outcome outcome, JobRecord job) {
++    return new Claim(outcome, job, null);
++  }
++}
+diff --git a/src/main/java/com/video2podcast/job/JobStore.java b/src/main/java/com/video2podcast/job/JobStore.java
+index 8b2b5d8..661f452 100644
+--- a/src/main/java/com/video2podcast/job/JobStore.java
++++ b/src/main/java/com/video2podcast/job/JobStore.java
+@@ -187,7 +187,7 @@ public class JobStore {
+   }
+ 
+   /** Deletes the job directory with everything in it. Deleting a missing job does nothing. */
+-  public void delete(String jobId) {
++  public void discard(String jobId) {
+     Path dir = directory(jobId);
+     withLock(jobId, () -> deleteRecursively(dir));
+   }
+diff --git a/src/main/java/com/video2podcast/job/PipelineService.java b/src/main/java/com/video2podcast/job/PipelineService.java
+index 995ba8d..4006ebd 100644
+--- a/src/main/java/com/video2podcast/job/PipelineService.java
++++ b/src/main/java/com/video2podcast/job/PipelineService.java
+@@ -130,7 +130,7 @@ public class PipelineService {
+ 
+   private void deleteDirectory(String jobId) {
+     try {
+-      store.delete(jobId);
++      store.discard(jobId);
+     } catch (RuntimeException e) {
+       if (LOG.isWarnEnabled()) {
+         LOG.warn("Could not delete the directory of job {}", jobId, e);
+diff --git a/src/test/java/com/video2podcast/bot/AdminCommandsTest.java b/src/test/java/com/video2podcast/bot/AdminCommandsTest.java
+index 2c91fed..fe0f860 100644
+--- a/src/test/java/com/video2podcast/bot/AdminCommandsTest.java
++++ b/src/test/java/com/video2podcast/bot/AdminCommandsTest.java
+@@ -31,6 +31,8 @@ class AdminCommandsTest {
+   private final RecordingGateway gateway = new RecordingGateway();
+   private final MutableClock clock = new MutableClock(Instant.parse("2026-11-15T10:00:00Z"));
+   private final UrlMessageHandler urls = org.mockito.Mockito.mock(UrlMessageHandler.class);
++  private final DeliveryCallbackHandler deliveries =
++      org.mockito.Mockito.mock(DeliveryCallbackHandler.class);
+   private Path file;
+   private AccessService access;
+   private BotUpdateHandler handler;
+@@ -39,7 +41,7 @@ class AdminCommandsTest {
+   void setUp() {
+     file = dir.resolve("allowed-users.json");
+     access = newAccess();
+-    handler = new BotUpdateHandler(gateway, access, urls);
++    handler = new BotUpdateHandler(gateway, access, urls, deliveries);
+   }
+ 
+   private AccessService newAccess() {
+@@ -202,7 +204,7 @@ class AdminCommandsTest {
+     gateway.messages.clear();
+ 
+     AccessService restarted = newAccess();
+-    BotUpdateHandler afterRestart = new BotUpdateHandler(gateway, restarted, urls);
++    BotUpdateHandler afterRestart = new BotUpdateHandler(gateway, restarted, urls, deliveries);
+     afterRestart.handle(tap(OWNER, "cb1", "access:approve:60", 2));
+ 
+     assertThat(restarted.isAllowed(BOB)).isTrue();
+diff --git a/src/test/java/com/video2podcast/bot/BotUpdateHandlerTest.java b/src/test/java/com/video2podcast/bot/BotUpdateHandlerTest.java
+index 80d8821..0e92401 100644
+--- a/src/test/java/com/video2podcast/bot/BotUpdateHandlerTest.java
++++ b/src/test/java/com/video2podcast/bot/BotUpdateHandlerTest.java
+@@ -37,6 +37,7 @@ class BotUpdateHandlerTest {
+   private final RecordingGateway gateway = new RecordingGateway();
+   private final MutableClock clock = new MutableClock(Instant.parse("2026-11-15T10:00:00Z"));
+   private final UrlMessageHandler urls = mock(UrlMessageHandler.class);
++  private final DeliveryCallbackHandler deliveries = mock(DeliveryCallbackHandler.class);
+   private AccessService access;
+   private BotUpdateHandler handler;
+ 
+@@ -46,7 +47,7 @@ class BotUpdateHandlerTest {
+         new AccessService(
+             new AccessStore(dir.resolve("allowed-users.json")), OWNER, Duration.ofHours(24), clock);
+     access.allow(ALLOWED, "ann", OWNER);
+-    handler = new BotUpdateHandler(gateway, access, urls);
++    handler = new BotUpdateHandler(gateway, access, urls, deliveries);
+   }
+ 
+   @ParameterizedTest
+@@ -209,7 +210,7 @@ class BotUpdateHandlerTest {
+     AccessService racing = mock(AccessService.class);
+     when(racing.requestAccess(eq(STRANGER), any(), any()))
+         .thenReturn(new AccessService.RequestOutcome.AlreadyAllowed());
+-    new BotUpdateHandler(gateway, racing, urls)
++    new BotUpdateHandler(gateway, racing, urls, deliveries)
+         .handle(update(message("private", 9L, STRANGER, "/start")));
+ 
+     assertThat(gateway.messages)
+@@ -255,6 +256,38 @@ class BotUpdateHandlerTest {
+     assertThat(gateway.answers).isEmpty();
+   }
+ 
++  @Test
++  void transcriptCallbackFromAnAllowedUserGoesToTheDeliveryHandler() {
++    Update update = callbackUpdate("cb4", ALLOWED, "private");
++    update.getCallbackQuery().setData("transcript:job-1");
++
++    handler.handle(update);
++
++    verify(deliveries).handle(update.getCallbackQuery());
++  }
++
++  @Test
++  void transcriptCallbackFromAnUnknownUserNeverReachesTheDeliveryHandler() {
++    Update update = callbackUpdate("cb5", STRANGER, "private");
++    update.getCallbackQuery().setData("transcript:job-1");
++
++    handler.handle(update);
++
++    verify(deliveries, never()).handle(any());
++    assertThat(gateway.answers).containsExactly(new RecordingGateway.Answer("cb5", "No access."));
++  }
++
++  @Test
++  void audioCallbackIsStillIgnored() {
++    Update update = callbackUpdate("cb6", ALLOWED, "private");
++    update.getCallbackQuery().setData("audio:job-1");
++
++    handler.handle(update);
++
++    verify(deliveries, never()).handle(any());
++    assertThat(gateway.answers).isEmpty();
++  }
++
+   @Test
+   void callbacksOutsidePrivateChatsAreIgnored() {
+     handler.handle(callbackUpdate("cb3", STRANGER, "group"));
+diff --git a/src/test/java/com/video2podcast/bot/DeliveryCallbackHandlerTest.java b/src/test/java/com/video2podcast/bot/DeliveryCallbackHandlerTest.java
+new file mode 100644
+index 0000000..0bad237
+--- /dev/null
++++ b/src/test/java/com/video2podcast/bot/DeliveryCallbackHandlerTest.java
+@@ -0,0 +1,334 @@
++package com.video2podcast.bot;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++import com.video2podcast.job.DeliveryService;
++import com.video2podcast.job.FileKind;
++import com.video2podcast.job.FileState;
++import com.video2podcast.job.JobFile;
++import com.video2podcast.job.JobRecord;
++import com.video2podcast.job.JobStore;
++import com.video2podcast.job.JobStoreException;
++import com.video2podcast.support.MutableClock;
++import java.io.IOException;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.time.Duration;
++import java.time.Instant;
++import java.util.List;
++import java.util.Map;
++import java.util.Optional;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.io.TempDir;
++import org.telegram.telegrambots.meta.api.objects.CallbackQuery;
++import org.telegram.telegrambots.meta.api.objects.User;
++
++class DeliveryCallbackHandlerTest {
++
++  private static final Instant T0 = Instant.parse("2026-11-19T12:30:00Z");
++  private static final String ID = "job-1";
++  private static final long OWNER = 101L;
++  private static final long CHAT = 101L;
++  private static final int SUMMARY = 701;
++
++  @TempDir Path dir;
++
++  private final MutableClock clock = new MutableClock(T0);
++  private final RecordingGateway gateway = new RecordingGateway();
++  private JobStore store;
++  private DeliveryCallbackHandler handler;
++
++  @BeforeEach
++  void setUp() throws IOException {
++    store = new JobStore(dir.resolve("work"), clock);
++    handler = new DeliveryCallbackHandler(gateway, new DeliveryService(store, clock));
++    create(SUMMARY);
++  }
++
++  private void create(Integer summaryMessageId) throws IOException {
++    Instant expires = T0.plus(Duration.ofMinutes(30));
++    store.create(
++        new JobRecord(
++            ID,
++            OWNER,
++            CHAT,
++            summaryMessageId,
++            "Budget meeting",
++            60,
++            T0.minusSeconds(60),
++            Map.of(
++                FileKind.AUDIO, new JobFile("source.m4a", FileState.AVAILABLE, expires, null),
++                FileKind.TRANSCRIPT,
++                    new JobFile("transcript.txt", FileState.AVAILABLE, expires, null))));
++    Files.writeString(store.directory(ID).resolve("transcript.txt"), "text");
++  }
++
++  private static CallbackQuery tap(long userId, String jobId) {
++    CallbackQuery callback = new CallbackQuery();
++    callback.setId("cb");
++    callback.setFrom(User.builder().id(userId).firstName("T").isBot(false).build());
++    callback.setData(Keyboards.TRANSCRIPT_PREFIX + jobId);
++    return callback;
++  }
++
++  private FileState transcriptState() {
++    return store.load(ID).orElseThrow().files().get(FileKind.TRANSCRIPT).state();
++  }
++
++  private List<String> answerTexts() {
++    return gateway.answers.stream().map(RecordingGateway.Answer::text).toList();
++  }
++
++  private List<String> labels() {
++    return gateway.buttonEdits.stream()
++        .map(edit -> edit.buttons().get(0).text() + "|" + edit.buttons().get(1).text())
++        .toList();
++  }
++
++  @Test
++  void aTapFromTheOwnerSendsTheTranscriptOnceAndMarksItSent() {
++    handler.handle(tap(OWNER, ID));
++
++    assertThat(answerTexts()).containsExactly("Sending transcript…");
++    assertThat(gateway.documents)
++        .singleElement()
++        .satisfies(doc -> {
++          assertThat(doc.chatId()).isEqualTo(CHAT);
++          assertThat(doc.file()).isEqualTo(store.directory(ID).resolve("transcript.txt"));
++          assertThat(doc.fileName()).isEqualTo("Budget meeting.txt");
++          assertThat(doc.caption()).isNull();
++        });
++    assertThat(labels())
++        .containsExactly("Download audio|Sending transcript…", "Download audio|Transcript sent");
++    assertThat(gateway.buttonEdits)
++        .allSatisfy(edit -> {
++          assertThat(edit.chatId()).isEqualTo(CHAT);
++          assertThat(edit.messageId()).isEqualTo(SUMMARY);
++        });
++    assertThat(transcriptState()).isEqualTo(FileState.SENT);
++    assertThat(gateway.messages).isEmpty();
++  }
++
++  @Test
++  void aSecondTapDoesNotSendAgain() {
++    handler.handle(tap(OWNER, ID));
++    gateway.answers.clear();
++
++    handler.handle(tap(OWNER, ID));
++
++    assertThat(answerTexts()).containsExactly("Already sent.");
++    assertThat(gateway.documents).hasSize(1);
++  }
++
++  @Test
++  void aTapWhileSendingIsToldItIsInProgress() {
++    store.transition(ID, FileKind.TRANSCRIPT, FileState.AVAILABLE, FileState.SENDING);
++
++    handler.handle(tap(OWNER, ID));
++
++    assertThat(answerTexts()).containsExactly("Already being sent.");
++    assertThat(gateway.documents).isEmpty();
++  }
++
++  @Test
++  void anotherUserIsRefusedWithOnlyAnAnswer() {
++    handler.handle(tap(202L, ID));
++
++    assertThat(answerTexts()).containsExactly("This button is not for you.");
++    assertThat(gateway.documents).isEmpty();
++    assertThat(gateway.buttonEdits).isEmpty();
++    assertThat(transcriptState()).isEqualTo(FileState.AVAILABLE);
++  }
++
++  @Test
++  void anExpiredTapIsRefused() {
++    clock.advance(Duration.ofMinutes(30));
++
++    handler.handle(tap(OWNER, ID));
++
++    assertThat(answerTexts()).containsExactly("Expired, please resend the link.");
++    assertThat(gateway.documents).isEmpty();
++    assertThat(gateway.buttonEdits).isEmpty();
++  }
++
++  @Test
++  void anInvalidOrUnknownJobIdIsExpired() {
++    handler.handle(tap(OWNER, "../x"));
++    handler.handle(tap(OWNER, ""));
++    handler.handle(tap(OWNER, "other"));
++
++    assertThat(answerTexts())
++        .containsExactly(
++            "Expired, please resend the link.",
++            "Expired, please resend the link.",
++            "Expired, please resend the link.");
++  }
++
++  @Test
++  void theDocumentGoesToTheStoredChatNotTheCallbacksChat() {
++    CallbackQuery callback = tap(OWNER, ID);
++
++    handler.handle(callback);
++
++    assertThat(gateway.documents)
++        .singleElement()
++        .satisfies(d -> assertThat(d.chatId()).isEqualTo(CHAT));
++  }
++
++  @Test
++  void withoutASummaryMessageNoButtonsAreEditedButTheFileIsSent() throws IOException {
++    store.discard(ID);
++    create(null);
++
++    handler.handle(tap(OWNER, ID));
++
++    assertThat(gateway.documents).hasSize(1);
++    assertThat(gateway.buttonEdits).isEmpty();
++    assertThat(transcriptState()).isEqualTo(FileState.SENT);
++  }
++
++  @Test
++  void theAudioLabelFollowsTheAudioState() {
++    store.transition(ID, FileKind.AUDIO, FileState.AVAILABLE, FileState.SENDING);
++
++    handler.handle(tap(OWNER, ID));
++
++    assertThat(labels())
++        .containsExactly(
++            "Preparing audio…|Sending transcript…", "Preparing audio…|Transcript sent");
++  }
++
++  @Test
++  void aFailedSendReleasesTheFileRestoresTheButtonAndTellsTheUser() {
++    gateway.failDocuments = true;
++
++    handler.handle(tap(OWNER, ID));
++
++    assertThat(transcriptState()).isEqualTo(FileState.AVAILABLE);
++    assertThat(labels())
++        .containsExactly(
++            "Download audio|Sending transcript…", "Download audio|Download transcript");
++    assertThat(gateway.messages)
++        .singleElement()
++        .satisfies(m -> {
++          assertThat(m.chatId()).isEqualTo(CHAT);
++          assertThat(m.html())
++              .isEqualTo("Could not send the transcript. Tap the button to try again.");
++        });
++    assertThat(store.load(ID).orElseThrow().files().get(FileKind.TRANSCRIPT).sentAt()).isNull();
++  }
++
++  @Test
++  void afterAFailedSendTheOwnerCanTryAgain() {
++    gateway.failDocuments = true;
++    handler.handle(tap(OWNER, ID));
++    gateway.failDocuments = false;
++
++    handler.handle(tap(OWNER, ID));
++
++    assertThat(gateway.documents).hasSize(1);
++    assertThat(transcriptState()).isEqualTo(FileState.SENT);
++  }
++
++  @Test
++  void aFailedNotificationAfterAFailedSendDoesNotEscape() {
++    gateway.failDocuments = true;
++    gateway.failMessages = true;
++    gateway.failButtons = true;
++
++    handler.handle(tap(OWNER, ID));
++
++    assertThat(transcriptState()).isEqualTo(FileState.AVAILABLE);
++  }
++
++  @Test
++  void aFailedAnswerAndFailedButtonEditsDoNotStopTheUpload() {
++    gateway.failAnswers = true;
++    gateway.failButtons = true;
++
++    handler.handle(tap(OWNER, ID));
++
++    assertThat(gateway.documents).hasSize(1);
++    assertThat(transcriptState()).isEqualTo(FileState.SENT);
++  }
++
++  @Test
++  void aFailedAnswerToARefusalDoesNotEscape() {
++    gateway.failAnswers = true;
++
++    handler.handle(tap(202L, ID));
++
++    assertThat(gateway.documents).isEmpty();
++  }
++
++  @Test
++  void aStoreFailureBeforeTheClaimGivesAGenericAnswerAndNoUpload() {
++    DeliveryService broken =
++        new DeliveryService(store, clock) {
++          @Override
++          public Claim claim(String jobId, long userId, FileKind kind) {
++            throw new JobStoreException("disk", new IOException("disk"));
++          }
++        };
++
++    new DeliveryCallbackHandler(gateway, broken).handle(tap(OWNER, ID));
++
++    assertThat(answerTexts()).containsExactly("Something went wrong, please try again.");
++    assertThat(gateway.documents).isEmpty();
++  }
++
++  @Test
++  void ifMarkingSentFailsTheFileStaysSendingAndNoErrorIsShown() {
++    DeliveryService failing =
++        new DeliveryService(store, clock) {
++          @Override
++          public Optional<JobRecord> complete(String jobId, FileKind kind) {
++            throw new JobStoreException("disk", new IOException("disk"));
++          }
++        };
++
++    new DeliveryCallbackHandler(gateway, failing).handle(tap(OWNER, ID));
++
++    assertThat(gateway.documents).hasSize(1);
++    assertThat(transcriptState()).isEqualTo(FileState.SENDING);
++    assertThat(gateway.messages).isEmpty();
++    assertThat(labels()).containsExactly("Download audio|Sending transcript…");
++  }
++
++  @Test
++  void ifReleasingFailsAfterAFailedSendTheUserIsStillTold() {
++    gateway.failDocuments = true;
++    DeliveryService failing =
++        new DeliveryService(store, clock) {
++          @Override
++          public Optional<JobRecord> release(String jobId, FileKind kind) {
++            throw new JobStoreException("disk", new IOException("disk"));
++          }
++        };
++
++    new DeliveryCallbackHandler(gateway, failing).handle(tap(OWNER, ID));
++
++    assertThat(gateway.messages).hasSize(1);
++  }
++
++  @Test
++  void aJobWithoutAnAudioEntryShowsAnAvailableAudioButton() throws IOException {
++    store.discard(ID);
++    store.create(
++        new JobRecord(
++            ID,
++            OWNER,
++            CHAT,
++            SUMMARY,
++            "T",
++            1,
++            T0,
++            Map.of(FileKind.TRANSCRIPT, JobFile.available("transcript.txt"))));
++    Files.writeString(store.directory(ID).resolve("transcript.txt"), "x");
++
++    handler.handle(tap(OWNER, ID));
++
++    assertThat(labels()).last().isEqualTo("Download audio|Transcript sent");
++  }
++}
+diff --git a/src/test/java/com/video2podcast/bot/FileNamesTest.java b/src/test/java/com/video2podcast/bot/FileNamesTest.java
+new file mode 100644
+index 0000000..2ac1e75
+--- /dev/null
++++ b/src/test/java/com/video2podcast/bot/FileNamesTest.java
+@@ -0,0 +1,59 @@
++package com.video2podcast.bot;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.params.ParameterizedTest;
++import org.junit.jupiter.params.provider.CsvSource;
++
++class FileNamesTest {
++
++  @ParameterizedTest
++  @CsvSource(
++      delimiter = '|',
++      value = {
++        "Budget meeting|Budget meeting.txt",
++        "  Budget meeting  |Budget meeting.txt",
++        "Q4/Plan: v1?|Q4_Plan_ v1_.txt",
++        "R&D <notes>|R&D _notes_.txt",
++        "   |transcript.txt"
++      })
++  void makesTheTitleSafe(String title, String expected) {
++    assertThat(FileNames.transcriptName(title)).isEqualTo(expected);
++  }
++
++  @Test
++  void replacesEveryForbiddenCharacter() {
++    assertThat(FileNames.transcriptName("a\\b/c:d*e?f\"g<h>i|j"))
++        .isEqualTo("a_b_c_d_e_f_g_h_i_j.txt");
++  }
++
++  @Test
++  void replacesControlCharacters() {
++    assertThat(FileNames.transcriptName("a\tb\nc\u0000d")).isEqualTo("a_b_c_d.txt");
++  }
++
++  @Test
++  void aNullOrEmptyTitleBecomesTranscript() {
++    assertThat(FileNames.transcriptName(null)).isEqualTo("transcript.txt");
++    assertThat(FileNames.transcriptName("")).isEqualTo("transcript.txt");
++  }
++
++  @Test
++  void cutsALongTitleToOneHundredUnits() {
++    assertThat(FileNames.transcriptName("A".repeat(120))).isEqualTo("A".repeat(100) + ".txt");
++    assertThat(FileNames.transcriptName("A".repeat(100))).isEqualTo("A".repeat(100) + ".txt");
++  }
++
++  @Test
++  void doesNotSplitASurrogatePair() {
++    String emoji = "😀";
++    String title = "A".repeat(99) + emoji + "B";
++
++    assertThat(FileNames.transcriptName(title)).isEqualTo("A".repeat(99) + ".txt");
++    assertThat(FileNames.transcriptName("A".repeat(98) + emoji + "B"))
++        .isEqualTo("A".repeat(98) + emoji + ".txt");
++    assertThat(FileNames.transcriptName("A".repeat(97) + emoji + "B"))
++        .isEqualTo("A".repeat(97) + emoji + "B.txt");
++  }
++}
+diff --git a/src/test/java/com/video2podcast/bot/KeyboardsTest.java b/src/test/java/com/video2podcast/bot/KeyboardsTest.java
+index 052fb9b..2b06b9c 100644
+--- a/src/test/java/com/video2podcast/bot/KeyboardsTest.java
++++ b/src/test/java/com/video2podcast/bot/KeyboardsTest.java
+@@ -2,6 +2,7 @@ package com.video2podcast.bot;
+ 
+ import static org.assertj.core.api.Assertions.assertThat;
+ 
++import com.video2podcast.job.FileState;
+ import java.nio.charset.StandardCharsets;
+ import org.junit.jupiter.api.Test;
+ 
+@@ -24,4 +25,20 @@ class KeyboardsTest {
+             assertThat(button.callbackData().getBytes(StandardCharsets.UTF_8).length)
+                 .isLessThanOrEqualTo(64));
+   }
++
++  @Test
++  void labelsFollowTheStateOfEachFile() {
++    assertThat(Keyboards.delivery(JOB_ID, FileState.SENDING, FileState.SENT))
++        .containsExactly(
++            new InlineButton("Preparing audio…", "audio:" + JOB_ID),
++            new InlineButton("Transcript sent", "transcript:" + JOB_ID));
++    assertThat(Keyboards.delivery(JOB_ID, FileState.SENT, FileState.SENDING))
++        .containsExactly(
++            new InlineButton("Audio sent", "audio:" + JOB_ID),
++            new InlineButton("Sending transcript…", "transcript:" + JOB_ID));
++    assertThat(Keyboards.delivery(JOB_ID, FileState.EXPIRED, FileState.EXPIRED))
++        .containsExactly(
++            new InlineButton("Audio expired", "audio:" + JOB_ID),
++            new InlineButton("Transcript expired", "transcript:" + JOB_ID));
++  }
+ }
+diff --git a/src/test/java/com/video2podcast/bot/RecordingGateway.java b/src/test/java/com/video2podcast/bot/RecordingGateway.java
+index af34918..dd7f292 100644
+--- a/src/test/java/com/video2podcast/bot/RecordingGateway.java
++++ b/src/test/java/com/video2podcast/bot/RecordingGateway.java
+@@ -25,7 +25,7 @@ class RecordingGateway implements TelegramGateway {
+ 
+   @Override
+   public int sendMessage(long chatId, String html, List<InlineButton> buttons) {
+-    if (failingChats.contains(chatId)) {
++    if (failMessages || failingChats.contains(chatId)) {
+       throw new TelegramGatewayException("chat " + chatId + " is unreachable", null);
+     }
+     messages.add(new Sent(chatId, html, buttons));
+@@ -40,9 +40,34 @@ class RecordingGateway implements TelegramGateway {
+     edits.add(new Edit(chatId, messageId, html, buttons));
+   }
+ 
++  record Buttons(long chatId, int messageId, List<InlineButton> buttons) {}
++
++  record Document(long chatId, Path file, String fileName, String caption) {}
++
++  final List<Buttons> buttonEdits = new ArrayList<>();
++  final List<Document> documents = new ArrayList<>();
++
++  /** Fails the next document sends, to simulate a Telegram error. */
++  boolean failDocuments;
++
++  boolean failAnswers;
++  boolean failButtons;
++  boolean failMessages;
++
++  @Override
++  public void editButtons(long chatId, int messageId, List<InlineButton> buttons) {
++    if (failButtons) {
++      throw new TelegramGatewayException("cannot edit buttons", null);
++    }
++    buttonEdits.add(new Buttons(chatId, messageId, buttons));
++  }
++
+   @Override
+   public void sendDocument(long chatId, Path file, String fileName, String caption) {
+-    throw new UnsupportedOperationException();
++    if (failDocuments) {
++      throw new TelegramGatewayException("cannot send document", null);
++    }
++    documents.add(new Document(chatId, file, fileName, caption));
+   }
+ 
+   @Override
+@@ -52,6 +77,9 @@ class RecordingGateway implements TelegramGateway {
+ 
+   @Override
+   public void answerCallback(String callbackQueryId, String text) {
++    if (failAnswers) {
++      throw new TelegramGatewayException("cannot answer", null);
++    }
+     answers.add(new Answer(callbackQueryId, text));
+   }
+ }
+diff --git a/src/test/java/com/video2podcast/bot/TelegramClientGatewayTest.java b/src/test/java/com/video2podcast/bot/TelegramClientGatewayTest.java
+index 7d5f913..c019c2e 100644
+--- a/src/test/java/com/video2podcast/bot/TelegramClientGatewayTest.java
++++ b/src/test/java/com/video2podcast/bot/TelegramClientGatewayTest.java
+@@ -116,6 +116,52 @@ class TelegramClientGatewayTest {
+                 matchingJsonPath("$.reply_markup.inline_keyboard[0][0].text", equalTo("Sent"))));
+   }
+ 
++  @Test
++  void editButtonsReplacesOnlyTheKeyboard() {
++    telegram.stubFor(
++        post(urlPathEqualTo(path("editMessageReplyMarkup")))
++            .willReturn(
++                aResponse().withBody(MESSAGE_OK).withHeader("Content-Type", "application/json")));
++
++    gateway.editButtons(5L, 9, List.of(new InlineButton("Sent", "noop")));
++
++    telegram.verify(
++        postRequestedFor(urlPathEqualTo(path("editMessageReplyMarkup")))
++            .withRequestBody(matchingJsonPath("$.chat_id", equalTo("5")))
++            .withRequestBody(matchingJsonPath("$.message_id", equalTo("9")))
++            .withRequestBody(
++                matchingJsonPath("$.reply_markup.inline_keyboard[0][0].text", equalTo("Sent"))));
++  }
++
++  @Test
++  void editButtonsWithAnEmptyListRemovesTheKeyboard() {
++    telegram.stubFor(
++        post(urlPathEqualTo(path("editMessageReplyMarkup")))
++            .willReturn(
++                aResponse().withBody(MESSAGE_OK).withHeader("Content-Type", "application/json")));
++
++    gateway.editButtons(5L, 9, List.of());
++
++    telegram.verify(
++        postRequestedFor(urlPathEqualTo(path("editMessageReplyMarkup")))
++            .withRequestBody(
++                matchingJsonPath("$.reply_markup.inline_keyboard", equalToJson("[]"))));
++  }
++
++  @Test
++  void editButtonsReportsATelegramRefusal() {
++    telegram.stubFor(
++        post(urlPathEqualTo(path("editMessageReplyMarkup")))
++            .willReturn(
++                aResponse()
++                    .withStatus(400)
++                    .withBody("{\"ok\":false,\"error_code\":400,\"description\":\"bad\"}")
++                    .withHeader("Content-Type", "application/json")));
++
++    assertThatThrownBy(() -> gateway.editButtons(5L, 9, List.of()))
++        .isInstanceOf(TelegramGatewayException.class);
++  }
++
+   @Test
+   void sendDocumentUploadsTheFileUnderTheGivenName() throws Exception {
+     Path file = Files.writeString(tempDir.resolve("source.tmp"), "transcript text");
+diff --git a/src/test/java/com/video2podcast/bot/TranscriptButtonTest.java b/src/test/java/com/video2podcast/bot/TranscriptButtonTest.java
+new file mode 100644
+index 0000000..1807e4c
+--- /dev/null
++++ b/src/test/java/com/video2podcast/bot/TranscriptButtonTest.java
+@@ -0,0 +1,176 @@
++package com.video2podcast.bot;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.mockito.Mockito.mock;
++
++import com.video2podcast.access.AccessService;
++import com.video2podcast.access.AccessStore;
++import com.video2podcast.job.DeliveryService;
++import com.video2podcast.job.FileKind;
++import com.video2podcast.job.FileState;
++import com.video2podcast.job.JobFile;
++import com.video2podcast.job.JobRecord;
++import com.video2podcast.job.JobStore;
++import com.video2podcast.support.MutableClock;
++import java.io.IOException;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.time.Duration;
++import java.time.Instant;
++import java.util.List;
++import java.util.Map;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.TimeUnit;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.io.TempDir;
++import org.telegram.telegrambots.meta.api.objects.CallbackQuery;
++import org.telegram.telegrambots.meta.api.objects.Update;
++import org.telegram.telegrambots.meta.api.objects.User;
++import org.telegram.telegrambots.meta.api.objects.chat.Chat;
++import org.telegram.telegrambots.meta.api.objects.message.Message;
++
++/** The transcript button from a Telegram update to the stored job state. */
++class TranscriptButtonTest {
++
++  private static final Instant T0 = Instant.parse("2026-11-19T12:30:00Z");
++  private static final String ID = "11111111-1111-4111-8111-111111111111";
++  private static final long OWNER = 1;
++  private static final long USER = 101;
++
++  @TempDir Path dir;
++
++  private final MutableClock clock = new MutableClock(T0);
++  private final CountDownLatch release = new CountDownLatch(1);
++  private final CountDownLatch uploading = new CountDownLatch(1);
++  private boolean hold;
++  private final RecordingGateway gateway =
++      new RecordingGateway() {
++        @Override
++        public void sendDocument(long chatId, Path file, String fileName, String caption) {
++          super.sendDocument(chatId, file, fileName, caption);
++          if (hold) {
++            uploading.countDown();
++            try {
++              release.await(10, TimeUnit.SECONDS);
++            } catch (InterruptedException e) {
++              Thread.currentThread().interrupt();
++            }
++          }
++        }
++      };
++  private JobStore store;
++  private BotUpdateHandler handler;
++
++  @BeforeEach
++  void setUp() throws IOException {
++    AccessService access =
++        new AccessService(
++            new AccessStore(dir.resolve("allowed-users.json")), OWNER, Duration.ofHours(24), clock);
++    access.allow(USER, "ann", OWNER);
++    access.allow(202, "bob", OWNER);
++    store = new JobStore(dir.resolve("work"), clock);
++    handler =
++        new BotUpdateHandler(
++            gateway,
++            access,
++            mock(UrlMessageHandler.class),
++            new DeliveryCallbackHandler(gateway, new DeliveryService(store, clock)));
++    Instant expires = T0.plus(Duration.ofMinutes(30));
++    store.create(
++        new JobRecord(
++            ID,
++            USER,
++            USER,
++            701,
++            "Budget meeting",
++            60,
++            T0,
++            Map.of(
++                FileKind.AUDIO, new JobFile("source.m4a", FileState.AVAILABLE, expires, null),
++                FileKind.TRANSCRIPT,
++                    new JobFile("transcript.txt", FileState.AVAILABLE, expires, null))));
++    Files.writeString(store.directory(ID).resolve("transcript.txt"), "The budget meeting.\n");
++  }
++
++  private static Update tap(long userId) {
++    CallbackQuery callback = new CallbackQuery();
++    callback.setId("cb");
++    callback.setFrom(User.builder().id(userId).firstName("T").isBot(false).build());
++    Message message = new Message();
++    message.setChat(Chat.builder().id(userId).type("private").build());
++    message.setMessageId(701);
++    callback.setMessage(message);
++    callback.setData("transcript:" + ID);
++    Update update = new Update();
++    update.setCallbackQuery(callback);
++    return update;
++  }
++
++  private FileState state() {
++    return store.load(ID).orElseThrow().files().get(FileKind.TRANSCRIPT).state();
++  }
++
++  private List<String> answers() {
++    return gateway.answers.stream().map(RecordingGateway.Answer::text).toList();
++  }
++
++  @Test
++  void theOwnersTapSendsTheTranscriptAndMarksItSent() {
++    handler.handle(tap(USER));
++
++    assertThat(gateway.documents)
++        .singleElement()
++        .satisfies(doc -> assertThat(doc.fileName()).isEqualTo("Budget meeting.txt"));
++    assertThat(state()).isEqualTo(FileState.SENT);
++    assertThat(gateway.buttonEdits)
++        .last()
++        .satisfies(edit -> assertThat(edit.buttons().get(1).text()).isEqualTo("Transcript sent"));
++    assertThat(gateway.buttonEdits.get(0).buttons().get(0).text()).isEqualTo("Download audio");
++  }
++
++  @Test
++  void aSecondTapSendsNothingMore() {
++    handler.handle(tap(USER));
++    handler.handle(tap(USER));
++
++    assertThat(gateway.documents).hasSize(1);
++    assertThat(answers()).containsExactly("Sending transcript…", "Already sent.");
++  }
++
++  @Test
++  void aTapAtTheSameMomentSendsOnce() throws Exception {
++    hold = true;
++    CompletableFuture<Void> first = CompletableFuture.runAsync(() -> handler.handle(tap(USER)));
++    assertThat(uploading.await(10, TimeUnit.SECONDS)).isTrue();
++
++    handler.handle(tap(USER));
++
++    assertThat(answers()).contains("Already being sent.");
++    assertThat(state()).isEqualTo(FileState.SENDING);
++    release.countDown();
++    first.get(10, TimeUnit.SECONDS);
++    assertThat(gateway.documents).hasSize(1);
++    assertThat(state()).isEqualTo(FileState.SENT);
++  }
++
++  @Test
++  void anotherUsersTapIsRejected() {
++    handler.handle(tap(202));
++
++    assertThat(answers()).containsExactly("This button is not for you.");
++    assertThat(gateway.documents).isEmpty();
++    assertThat(state()).isEqualTo(FileState.AVAILABLE);
++  }
++
++  @Test
++  void anExpiredJobGivesTheResendNotice() {
++    clock.advance(Duration.ofMinutes(31));
++
++    handler.handle(tap(USER));
++
++    assertThat(answers()).containsExactly("Expired, please resend the link.");
++    assertThat(gateway.documents).isEmpty();
++  }
++}
+diff --git a/src/test/java/com/video2podcast/bot/UrlMessageHandlerTest.java b/src/test/java/com/video2podcast/bot/UrlMessageHandlerTest.java
+index 637fa5f..1d3d648 100644
+--- a/src/test/java/com/video2podcast/bot/UrlMessageHandlerTest.java
++++ b/src/test/java/com/video2podcast/bot/UrlMessageHandlerTest.java
+@@ -83,6 +83,11 @@ class UrlMessageHandlerTest {
+       }
+     }
+ 
++    @Override
++    public void editButtons(long chatId, int messageId, List<InlineButton> buttons) {
++      throw new UnsupportedOperationException();
++    }
++
+     @Override
+     public void sendDocument(long chatId, Path file, String fileName, String caption) {
+       throw new UnsupportedOperationException();
+diff --git a/src/test/java/com/video2podcast/config/PipelineConfigTest.java b/src/test/java/com/video2podcast/config/PipelineConfigTest.java
+index 4ef61ee..d03db91 100644
+--- a/src/test/java/com/video2podcast/config/PipelineConfigTest.java
++++ b/src/test/java/com/video2podcast/config/PipelineConfigTest.java
+@@ -3,8 +3,10 @@ package com.video2podcast.config;
+ import static org.assertj.core.api.Assertions.assertThat;
+ import static org.mockito.Mockito.mock;
+ 
++import com.video2podcast.bot.DeliveryCallbackHandler;
+ import com.video2podcast.bot.TelegramGateway;
+ import com.video2podcast.bot.UrlMessageHandler;
++import com.video2podcast.job.DeliveryService;
+ import com.video2podcast.job.JobQueue;
+ import com.video2podcast.job.JobStore;
+ import com.video2podcast.job.PipelineService;
+@@ -60,6 +62,8 @@ class PipelineConfigTest {
+           assertThat(context).hasSingleBean(SummaryPublisher.class);
+           assertThat(context).hasSingleBean(PipelineService.class);
+           assertThat(context).hasSingleBean(UrlMessageHandler.class);
++          assertThat(context).hasSingleBean(DeliveryService.class);
++          assertThat(context).hasSingleBean(DeliveryCallbackHandler.class);
+           assertThat(context.getBean(SummaryPublisher.class)).isNotNull();
+           assertThat(context.getBean(PipelineService.class)).isNotNull();
+           assertThat(context.getBean(UrlMessageHandler.class)).isNotNull();
+@@ -73,6 +77,8 @@ class PipelineConfigTest {
+           assertThat(context).doesNotHaveBean(SummaryPublisher.class);
+           assertThat(context).doesNotHaveBean(PipelineService.class);
+           assertThat(context).doesNotHaveBean(UrlMessageHandler.class);
++          assertThat(context).doesNotHaveBean(DeliveryService.class);
++          assertThat(context).doesNotHaveBean(DeliveryCallbackHandler.class);
+         });
+   }
+ }
+diff --git a/src/test/java/com/video2podcast/config/TelegramConfigTest.java b/src/test/java/com/video2podcast/config/TelegramConfigTest.java
+index f81607c..a40e42d 100644
+--- a/src/test/java/com/video2podcast/config/TelegramConfigTest.java
++++ b/src/test/java/com/video2podcast/config/TelegramConfigTest.java
+@@ -6,6 +6,7 @@ import static org.mockito.Mockito.mock;
+ 
+ import com.video2podcast.access.AccessService;
+ import com.video2podcast.bot.BotUpdateHandler;
++import com.video2podcast.bot.DeliveryCallbackHandler;
+ import com.video2podcast.bot.TelegramBot;
+ import com.video2podcast.bot.TelegramGateway;
+ import com.video2podcast.bot.UrlMessageHandler;
+@@ -38,6 +39,7 @@ class TelegramConfigTest {
+         .withBean(AppProperties.class, () -> props(token, admin, enabled))
+         .withBean(AccessService.class, () -> mock(AccessService.class))
+         .withBean(UrlMessageHandler.class, () -> mock(UrlMessageHandler.class))
++        .withBean(DeliveryCallbackHandler.class, () -> mock(DeliveryCallbackHandler.class))
+         .withPropertyValues("app.telegram.enabled=" + enabled);
+   }
+ 
+@@ -88,4 +90,42 @@ class TelegramConfigTest {
+                 .hasMessageContaining("app.telegram.admin-user-id (ADMIN_USER_ID) is required")
+                 .hasMessageContaining("/whoami"));
+   }
++
++  @org.junit.jupiter.api.Test
++  void theClientDoesNotResendARequestWhoseConnectionDropped() {
++    com.github.tomakehurst.wiremock.WireMockServer server =
++        new com.github.tomakehurst.wiremock.WireMockServer(
++            com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig()
++                .dynamicPort());
++    server.start();
++    try {
++      server.stubFor(
++          com.github.tomakehurst.wiremock.client.WireMock.post(
++                  com.github.tomakehurst.wiremock.client.WireMock.anyUrl())
++              .willReturn(
++                  com.github.tomakehurst.wiremock.client.WireMock.aResponse()
++                      .withFault(com.github.tomakehurst.wiremock.http.Fault.EMPTY_RESPONSE)));
++      AppProperties props =
++          new AppProperties(
++              new AppProperties.Telegram("123:abc", 1L, true, "http://localhost:" + server.port()),
++              props("123:abc", 1L, true).access(),
++              props("123:abc", 1L, true).ollama(),
++              props("123:abc", 1L, true).whisper(),
++              props("123:abc", 1L, true).jobs());
++
++      org.telegram.telegrambots.meta.generics.TelegramClient client =
++          new TelegramConfig().telegramClient(props);
++      org.assertj.core.api.Assertions.assertThatThrownBy(() ->
++              client.execute(
++                  org.telegram.telegrambots.meta.api.methods.send.SendMessage.builder()
++                      .chatId(1L)
++                      .text("x")
++                      .build()))
++          .isInstanceOf(org.telegram.telegrambots.meta.exceptions.TelegramApiException.class);
++
++      assertThat(server.getAllServeEvents()).hasSize(1);
++    } finally {
++      server.stop();
++    }
++  }
+ }
+diff --git a/src/test/java/com/video2podcast/job/DeliveryServiceTest.java b/src/test/java/com/video2podcast/job/DeliveryServiceTest.java
+new file mode 100644
+index 0000000..c1e5bed
+--- /dev/null
++++ b/src/test/java/com/video2podcast/job/DeliveryServiceTest.java
+@@ -0,0 +1,280 @@
++package com.video2podcast.job;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++import com.video2podcast.job.DeliveryService.Claim;
++import com.video2podcast.job.DeliveryService.Outcome;
++import com.video2podcast.support.MutableClock;
++import java.io.IOException;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.time.Duration;
++import java.time.Instant;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Map;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.ExecutorService;
++import java.util.concurrent.Executors;
++import java.util.concurrent.Future;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.io.TempDir;
++
++class DeliveryServiceTest {
++
++  private static final Instant T0 = Instant.parse("2026-11-19T12:30:00Z");
++  private static final String ID = "job-1";
++  private static final long OWNER = 42L;
++
++  @TempDir Path dir;
++
++  private final MutableClock clock = new MutableClock(T0);
++  private JobStore store;
++  private DeliveryService service;
++
++  @BeforeEach
++  void setUp() throws IOException {
++    store = new JobStore(dir.resolve("work"), clock);
++    service = new DeliveryService(store, clock);
++    create(FileState.AVAILABLE, T0.plus(Duration.ofMinutes(30)));
++  }
++
++  private void create(FileState transcript, Instant expiresAt) throws IOException {
++    JobRecord job =
++        new JobRecord(
++            ID,
++            OWNER,
++            4242L,
++            7,
++            "Title",
++            60,
++            T0.minusSeconds(600),
++            Map.of(
++                FileKind.AUDIO, new JobFile("audio.m4a", FileState.AVAILABLE, expiresAt, null),
++                FileKind.TRANSCRIPT, new JobFile("transcript.txt", transcript, expiresAt, null)));
++    store.create(job);
++    Files.writeString(store.directory(ID).resolve("transcript.txt"), "text");
++  }
++
++  private FileState state(FileKind kind) {
++    return store.load(ID).orElseThrow().files().get(kind).state();
++  }
++
++  @Test
++  void anOwnerTapGrantsAndMovesTheFileToSending() {
++    Claim claim = service.claim(ID, OWNER, FileKind.TRANSCRIPT);
++
++    assertThat(claim.outcome()).isEqualTo(Outcome.GRANTED);
++    assertThat(claim.file()).isEqualTo(store.directory(ID).resolve("transcript.txt"));
++    assertThat(claim.job().files().get(FileKind.TRANSCRIPT).state()).isEqualTo(FileState.SENDING);
++    assertThat(state(FileKind.TRANSCRIPT)).isEqualTo(FileState.SENDING);
++    assertThat(state(FileKind.AUDIO)).isEqualTo(FileState.AVAILABLE);
++  }
++
++  @Test
++  void aTapJustBeforeExpiryIsGranted() {
++    clock.advance(Duration.ofMinutes(30).minusNanos(1));
++
++    assertThat(service.claim(ID, OWNER, FileKind.TRANSCRIPT).outcome()).isEqualTo(Outcome.GRANTED);
++  }
++
++  @Test
++  void aTapAtOrAfterExpiryIsExpiredAndChangesNothing() {
++    clock.advance(Duration.ofMinutes(30));
++
++    Claim claim = service.claim(ID, OWNER, FileKind.TRANSCRIPT);
++
++    assertThat(claim.outcome()).isEqualTo(Outcome.EXPIRED);
++    assertThat(claim.file()).isNull();
++    assertThat(state(FileKind.TRANSCRIPT)).isEqualTo(FileState.AVAILABLE);
++  }
++
++  @Test
++  void aFileWithoutExpiryTimeNeverExpiresAtTapTime() throws IOException {
++    store.discard(ID);
++    create(FileState.AVAILABLE, null);
++
++    assertThat(service.claim(ID, OWNER, FileKind.TRANSCRIPT).outcome()).isEqualTo(Outcome.GRANTED);
++  }
++
++  @Test
++  void anotherUserIsRefusedAndChangesNothing() {
++    Claim claim = service.claim(ID, OWNER + 1, FileKind.TRANSCRIPT);
++
++    assertThat(claim.outcome()).isEqualTo(Outcome.NOT_OWNER);
++    assertThat(claim.job()).isNotNull();
++    assertThat(state(FileKind.TRANSCRIPT)).isEqualTo(FileState.AVAILABLE);
++  }
++
++  @Test
++  void aSecondTapAfterTheSendIsAlreadySentEvenWhenRetentionHasPassed() {
++    service.claim(ID, OWNER, FileKind.TRANSCRIPT);
++    service.complete(ID, FileKind.TRANSCRIPT);
++    clock.advance(Duration.ofHours(2));
++
++    assertThat(service.claim(ID, OWNER, FileKind.TRANSCRIPT).outcome())
++        .isEqualTo(Outcome.ALREADY_SENT);
++  }
++
++  @Test
++  void aTapWhileSendingIsInProgress() {
++    service.claim(ID, OWNER, FileKind.TRANSCRIPT);
++    clock.advance(Duration.ofHours(2));
++
++    assertThat(service.claim(ID, OWNER, FileKind.TRANSCRIPT).outcome())
++        .isEqualTo(Outcome.IN_PROGRESS);
++  }
++
++  @Test
++  void anExpiredFileStaysExpired() throws IOException {
++    store.discard(ID);
++    create(FileState.EXPIRED, T0.plusSeconds(100));
++
++    assertThat(service.claim(ID, OWNER, FileKind.TRANSCRIPT).outcome()).isEqualTo(Outcome.EXPIRED);
++  }
++
++  @Test
++  void anUnknownOrInvalidJobIsExpired() {
++    for (String id : new String[] {"nope", "", "../x", null}) {
++      Claim claim = service.claim(id, OWNER, FileKind.TRANSCRIPT);
++      assertThat(claim.outcome()).isEqualTo(Outcome.EXPIRED);
++      assertThat(claim.job()).isNull();
++    }
++  }
++
++  @Test
++  void aMissingFileEntryIsExpired() throws IOException {
++    store.discard(ID);
++    store.create(
++        new JobRecord(
++            ID, OWNER, 1L, null, "T", 1, T0, Map.of(FileKind.AUDIO, JobFile.available("a"))));
++
++    assertThat(service.claim(ID, OWNER, FileKind.TRANSCRIPT).outcome()).isEqualTo(Outcome.EXPIRED);
++  }
++
++  @Test
++  void aMissingFileOnDiskExpiresTheEntryWithoutAGrant() throws IOException {
++    Files.delete(store.directory(ID).resolve("transcript.txt"));
++
++    Claim claim = service.claim(ID, OWNER, FileKind.TRANSCRIPT);
++
++    assertThat(claim.outcome()).isEqualTo(Outcome.EXPIRED);
++    assertThat(state(FileKind.TRANSCRIPT)).isEqualTo(FileState.EXPIRED);
++    assertThat(state(FileKind.AUDIO)).isEqualTo(FileState.AVAILABLE);
++  }
++
++  @Test
++  void completeMovesSendingToSentAndSetsSentAt() {
++    service.claim(ID, OWNER, FileKind.TRANSCRIPT);
++    clock.advance(Duration.ofSeconds(5));
++
++    JobRecord done = service.complete(ID, FileKind.TRANSCRIPT).orElseThrow();
++
++    assertThat(done.files().get(FileKind.TRANSCRIPT).state()).isEqualTo(FileState.SENT);
++    assertThat(done.files().get(FileKind.TRANSCRIPT).sentAt()).isEqualTo(T0.plusSeconds(5));
++  }
++
++  @Test
++  void completeAndReleaseAreEmptyWhenTheFileIsNotSending() {
++    assertThat(service.complete(ID, FileKind.TRANSCRIPT)).isEmpty();
++    assertThat(service.release(ID, FileKind.TRANSCRIPT)).isEmpty();
++    assertThat(service.complete("nope", FileKind.TRANSCRIPT)).isEmpty();
++  }
++
++  @Test
++  void releaseMovesSendingBackToAvailableAndAllowsANewClaim() {
++    service.claim(ID, OWNER, FileKind.TRANSCRIPT);
++
++    JobRecord released = service.release(ID, FileKind.TRANSCRIPT).orElseThrow();
++
++    assertThat(released.files().get(FileKind.TRANSCRIPT).state()).isEqualTo(FileState.AVAILABLE);
++    assertThat(released.files().get(FileKind.TRANSCRIPT).sentAt()).isNull();
++    assertThat(service.claim(ID, OWNER, FileKind.TRANSCRIPT).outcome()).isEqualTo(Outcome.GRANTED);
++  }
++
++  @Test
++  void ofManyConcurrentTapsExactlyOneIsGranted() throws Exception {
++    int taps = 8;
++    CountDownLatch start = new CountDownLatch(1);
++    try (ExecutorService pool = Executors.newFixedThreadPool(taps)) {
++      List<Future<Outcome>> results = new ArrayList<>();
++      for (int i = 0; i < taps; i++) {
++        results.add(
++            pool.submit(() -> {
++              start.await();
++              return service.claim(ID, OWNER, FileKind.TRANSCRIPT).outcome();
++            }));
++      }
++      start.countDown();
++      List<Outcome> outcomes = new ArrayList<>();
++      for (Future<Outcome> result : results) {
++        outcomes.add(result.get());
++      }
++      assertThat(outcomes).filteredOn(o -> o == Outcome.GRANTED).hasSize(1);
++      assertThat(outcomes).filteredOn(o -> o != Outcome.GRANTED).containsOnly(Outcome.IN_PROGRESS);
++    }
++  }
++
++  @Test
++  void aLostRaceReportsWhatTheWinnerDid() {
++    // The state a loser sees after its transition missed: reload and classify.
++    JobStore racing =
++        new JobStore(dir.resolve("work"), clock) {
++          @Override
++          public Transition transition(String id, FileKind kind, FileState from, FileState to) {
++            super.transition(id, kind, FileState.AVAILABLE, FileState.SENDING);
++            super.transition(id, kind, FileState.SENDING, FileState.SENT);
++            return Transition.STATE_MISMATCH;
++          }
++        };
++
++    assertThat(new DeliveryService(racing, clock).claim(ID, OWNER, FileKind.TRANSCRIPT).outcome())
++        .isEqualTo(Outcome.ALREADY_SENT);
++  }
++
++  @Test
++  void aLostRaceAgainstAnExpiryIsExpired() {
++    JobStore racing =
++        new JobStore(dir.resolve("work"), clock) {
++          @Override
++          public Transition transition(String id, FileKind kind, FileState from, FileState to) {
++            super.transition(id, kind, FileState.AVAILABLE, FileState.EXPIRED);
++            return Transition.STATE_MISMATCH;
++          }
++        };
++
++    assertThat(new DeliveryService(racing, clock).claim(ID, OWNER, FileKind.TRANSCRIPT).outcome())
++        .isEqualTo(Outcome.EXPIRED);
++  }
++
++  @Test
++  void aLostRaceAgainstADeletionIsExpiredWithoutAJob() {
++    JobStore gone =
++        new JobStore(dir.resolve("work"), clock) {
++          @Override
++          public Transition transition(String id, FileKind kind, FileState from, FileState to) {
++            discard(id);
++            return Transition.NOT_FOUND;
++          }
++        };
++    Claim claim = new DeliveryService(gone, clock).claim(ID, OWNER, FileKind.TRANSCRIPT);
++    assertThat(claim.outcome()).isEqualTo(Outcome.EXPIRED);
++    assertThat(claim.job()).isNull();
++  }
++
++  @Test
++  void aLostRaceWhileSendingIsInProgress() {
++    JobStore racing =
++        new JobStore(dir.resolve("work"), clock) {
++          @Override
++          public Transition transition(String id, FileKind kind, FileState from, FileState to) {
++            super.transition(id, kind, FileState.AVAILABLE, FileState.SENDING);
++            return Transition.STATE_MISMATCH;
++          }
++        };
++
++    assertThat(new DeliveryService(racing, clock).claim(ID, OWNER, FileKind.TRANSCRIPT).outcome())
++        .isEqualTo(Outcome.IN_PROGRESS);
++  }
++}
+diff --git a/src/test/java/com/video2podcast/job/JobStoreTest.java b/src/test/java/com/video2podcast/job/JobStoreTest.java
+index d03e6f8..7ad211b 100644
+--- a/src/test/java/com/video2podcast/job/JobStoreTest.java
++++ b/src/test/java/com/video2podcast/job/JobStoreTest.java
+@@ -156,7 +156,7 @@ class JobStoreTest {
+   void jobIdsThatCouldEscapeTheWorkDirectoryAreRefused(String id) {
+     assertThatThrownBy(() -> store.directory(id)).isInstanceOf(IllegalArgumentException.class);
+     assertThatThrownBy(() -> store.load(id)).isInstanceOf(IllegalArgumentException.class);
+-    assertThatThrownBy(() -> store.delete(id)).isInstanceOf(IllegalArgumentException.class);
++    assertThatThrownBy(() -> store.discard(id)).isInstanceOf(IllegalArgumentException.class);
+   }
+ 
+   @Test
+@@ -240,7 +240,7 @@ class JobStoreTest {
+         runs.add(
+             pool.submit(() -> {
+               for (int n = 0; n < 200; n++) {
+-                store.delete(ID);
++                store.discard(ID);
+                 try {
+                   store.create(job(ID));
+                 } catch (IllegalStateException alreadyRecreated) {
+@@ -389,7 +389,7 @@ class JobStoreTest {
+       Assumptions.assumeFalse(
+           jobDir.toFile().canWrite(), "running as a user that ignores permissions");
+ 
+-      assertThatThrownBy(() -> store.delete(ID)).isInstanceOf(JobStoreException.class);
++      assertThatThrownBy(() -> store.discard(ID)).isInstanceOf(JobStoreException.class);
+     } finally {
+       Files.setPosixFilePermissions(jobDir, PosixFilePermissions.fromString("rwxr-xr-x"));
+     }
+@@ -415,8 +415,8 @@ class JobStoreTest {
+     Files.createDirectories(store.directory(ID).resolve("chunks"));
+     Files.writeString(store.directory(ID).resolve("chunks/1.wav"), "wav");
+ 
+-    store.delete(ID);
+-    store.delete(ID);
++    store.discard(ID);
++    store.discard(ID);
+ 
+     assertThat(store.directory(ID)).doesNotExist();
+     assertThat(store.load(ID)).isEmpty();
+diff --git a/src/test/java/com/video2podcast/job/PipelineServiceTest.java b/src/test/java/com/video2podcast/job/PipelineServiceTest.java
+index ea45bba..8069555 100644
+--- a/src/test/java/com/video2podcast/job/PipelineServiceTest.java
++++ b/src/test/java/com/video2podcast/job/PipelineServiceTest.java
+@@ -377,13 +377,13 @@ class PipelineServiceTest {
+               throw new JobStoreException("cannot delete", null);
+             })
+         .when(stubborn)
+-        .delete(JOB_ID);
++        .discard(JOB_ID);
+     pipeline =
+         new PipelineService(
+             ytDlp, ffmpeg, transcription, summary, stubborn, publisher, clock, JOBS);
+ 
+     assertThatThrownBy(() -> pipeline.run(REQUEST, progress)).isSameAs(failure);
+ 
+-    verify(stubborn).delete(JOB_ID);
++    verify(stubborn).discard(JOB_ID);
+   }
+ }

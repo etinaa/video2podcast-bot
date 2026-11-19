@@ -1,0 +1,1091 @@
+diff --git a/src/it/java/com/video2podcast/functional/PipelineAssertionSteps.java b/src/it/java/com/video2podcast/functional/PipelineAssertionSteps.java
+index 3df2dad..fc39cf1 100644
+--- a/src/it/java/com/video2podcast/functional/PipelineAssertionSteps.java
++++ b/src/it/java/com/video2podcast/functional/PipelineAssertionSteps.java
+@@ -15,6 +15,7 @@ import java.util.stream.*;
+ /** Assertions observe HTTP requests and persisted files, never processing services. */
+ public class PipelineAssertionSteps {
+   final PipelineWorld w;
++  @org.springframework.beans.factory.annotation.Autowired private TranscriptWorld transcript;
+ 
+   public PipelineAssertionSteps(PipelineWorld world) {
+     w = world;
+@@ -381,6 +382,10 @@ public class PipelineAssertionSteps {
+ 
+   @Then("the Whisper and Ollama mocks receive no requests")
+   public void noModels() {
++    if (transcript != null && transcript.active) {
++      transcript.noModels();
++      return;
++    }
+     assertThat(w.service("whisper")).isEmpty();
+     assertThat(w.service("ollama")).isEmpty();
+   }
+diff --git a/src/it/java/com/video2podcast/functional/PipelineSetupSteps.java b/src/it/java/com/video2podcast/functional/PipelineSetupSteps.java
+index b27c44b..573c8f9 100644
+--- a/src/it/java/com/video2podcast/functional/PipelineSetupSteps.java
++++ b/src/it/java/com/video2podcast/functional/PipelineSetupSteps.java
+@@ -14,6 +14,7 @@ import java.util.*;
+  */
+ public class PipelineSetupSteps {
+   final PipelineWorld w;
++  @org.springframework.beans.factory.annotation.Autowired private TranscriptWorld transcript;
+ 
+   public PipelineSetupSteps(PipelineWorld world) {
+     w = world;
+@@ -143,6 +144,10 @@ public class PipelineSetupSteps {
+ 
+   @Given("^the application clock (?:is|advances to) \"([^\"]+)\"$")
+   public void clock(String s) {
++    if (transcript != null && transcript.active) {
++      transcript.clock.now = Instant.parse(s);
++      return;
++    }
+     w.clock.now = Instant.parse(s);
+   }
+ 
+diff --git a/src/it/java/com/video2podcast/functional/TranscriptAssertionSteps.java b/src/it/java/com/video2podcast/functional/TranscriptAssertionSteps.java
+new file mode 100644
+index 0000000..9eba51e
+--- /dev/null
++++ b/src/it/java/com/video2podcast/functional/TranscriptAssertionSteps.java
+@@ -0,0 +1,330 @@
++package com.video2podcast.functional;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++import com.fasterxml.jackson.databind.JsonNode;
++import com.fasterxml.jackson.databind.node.ObjectNode;
++import com.video2podcast.functional.TranscriptWorld.Call;
++import io.cucumber.java.en.Then;
++import java.nio.file.Files;
++import java.time.Instant;
++import java.util.*;
++
++/** Assertions inspect HTTP multipart/JSON and durable job files, including in-flight snapshots. */
++public class TranscriptAssertionSteps {
++  final TranscriptWorld w;
++
++  public TranscriptAssertionSteps(TranscriptWorld world) {
++    w = world;
++  }
++
++  @Then(
++      "the Telegram mock receives in order an answerCallbackQuery with {string}, a reply-markup edit with {string}, one sendDocument and a reply-markup edit with {string}")
++  public void order(String answer, String progress, String sent) {
++    assertThat(w.tapCalls().stream().map(Call::method).toList())
++        .containsExactly(
++            "answercallbackquery",
++            "editmessagereplymarkup",
++            "senddocument",
++            "editmessagereplymarkup");
++    assertThat(w.calls("answerCallbackQuery").getFirst().json().path("text").asText())
++        .isEqualTo(answer);
++    assertThat(w.calls("editMessageReplyMarkup").getFirst().json().toString()).contains(progress);
++    Call finalEdit = w.calls("editMessageReplyMarkup").getLast();
++    assertThat(finalEdit.json().toString()).contains(sent);
++    assertThat(finalEdit.persisted().path("files").path("TRANSCRIPT").path("state").asText())
++        .isEqualTo("SENT");
++    assertThat(
++            w.calls("sendDocument")
++                .getFirst()
++                .persisted()
++                .path("files")
++                .path("TRANSCRIPT")
++                .path("state")
++                .asText())
++        .isEqualTo("SENDING");
++  }
++
++  @Then(
++      "the sendDocument multipart request targets chat {long} with filename {string}, the unchanged transcript bytes and no caption")
++  public void multipart(long chat, String filename) {
++    w.multipart(filename, chat);
++  }
++
++  @Then(
++      "both keyboard edits target chat {long} and message {int} with audio first and transcript second")
++  public void targets(long chat, int message) {
++    assertThat(w.calls("editMessageReplyMarkup")).hasSize(2);
++    for (Call c : w.calls("editMessageReplyMarkup")) {
++      assertThat(c.json().path("chat_id").asLong()).isEqualTo(chat);
++      assertThat(c.json().path("message_id").asInt()).isEqualTo(message);
++      w.labels(
++          c,
++          "Download audio",
++          c == w.calls("editMessageReplyMarkup").getFirst()
++              ? "Sending transcript…"
++              : "Transcript sent");
++    }
++  }
++
++  @Then("both keyboard edits keep {string} with callback data {string}")
++  public void keepAudio(String label, String data) {
++    assertThat(w.calls("editMessageReplyMarkup")).hasSize(2);
++    for (Call c : w.calls("editMessageReplyMarkup")) {
++      JsonNode b = w.keyboard(c).path(0).path(0);
++      assertThat(b.path("text").asText()).isEqualTo(label);
++      assertThat(b.path("callback_data").asText()).isEqualTo(data);
++    }
++  }
++
++  @Then("both keyboard edits keep transcript callback data {string}")
++  public void keepTranscript(String data) {
++    assertThat(w.calls("editMessageReplyMarkup")).hasSize(2);
++    for (Call c : w.calls("editMessageReplyMarkup"))
++      assertThat(w.keyboard(c).path(0).path(1).path("callback_data").asText()).isEqualTo(data);
++  }
++
++  @Then("the Telegram mock receives no editMessageText or sendAudio request")
++  public void noOtherCalls() {
++    assertThat(w.calls("editMessageText")).isEmpty();
++    assertThat(w.calls("sendAudio")).isEmpty();
++  }
++
++  @Then(
++      "job.json records TRANSCRIPT state {string} and sentAt no earlier than the successful upload response")
++  public void successfulTime(String state) throws Exception {
++    assertThat(w.uploadSuccess).isNotNull();
++    w.state(state, true);
++    assertThat(Instant.parse(w.file("TRANSCRIPT").path("sentAt").asText()))
++        .isAfterOrEqualTo(w.uploadSuccess);
++  }
++
++  @Then("job.json records TRANSCRIPT state {string} and null sentAt")
++  @Then(
++      "before the upload response is released job.json records TRANSCRIPT state {string} and null sentAt")
++  public void nullTime(String state) throws Exception {
++    w.state(state, false);
++  }
++
++  @Then("job.json records TRANSCRIPT state {string} and nonnull sentAt")
++  public void sentTime(String state) throws Exception {
++    w.state(state, true);
++  }
++
++  JsonNode beforeJob() throws Exception {
++    return PipelineWorld.JSON.readTree(w.before.get("job.json"));
++  }
++
++  @Then("the AUDIO entry and both expiresAt values are unchanged")
++  public void metadataUnchanged() throws Exception {
++    ObjectNode expected = (ObjectNode) beforeJob();
++    ObjectNode actual = w.job();
++    for (ObjectNode j : List.of(expected, actual)) {
++      ObjectNode f = (ObjectNode) j.path("files").path("TRANSCRIPT");
++      f.remove(List.of("state", "sentAt"));
++    }
++    assertThat(actual).isEqualTo(expected);
++  }
++
++  @Then("the job directory still contains {string}, {string} and {string}")
++  public void retained(String a, String b, String c) throws Exception {
++    for (String file : List.of(a, b, c)) assertThat(w.dir.resolve(file)).isRegularFile();
++    assertThat(Files.readAllBytes(w.dir.resolve("source.m4a")))
++        .containsExactly(w.before.get("source.m4a"));
++    assertThat(Files.readAllBytes(w.dir.resolve("transcript.txt")))
++        .containsExactly(w.transcriptBytes);
++  }
++
++  @Then("the Telegram mock receives one sendDocument request")
++  public void uploadAttempt() {
++    assertThat(w.calls("sendDocument")).hasSize(1);
++  }
++
++  @Then("before the upload response is released the summary keyboard shows {string} and {string}")
++  public void progress(String transcript, String audio) {
++    assertThat(w.releaseUpload.getCount()).isEqualTo(1);
++    assertThat(w.calls("editMessageReplyMarkup")).hasSize(1);
++    w.labels(w.calls("editMessageReplyMarkup").getFirst(), audio, transcript);
++  }
++
++  @Then("the tap produces only answerCallbackQuery with {string}")
++  @Then("the second tap produces only answerCallbackQuery with {string}")
++  @Then("the concurrent tap produces only answerCallbackQuery with {string}")
++  public void refusal(String text) {
++    w.refusal(text);
++  }
++
++  @Then("the Telegram mock has received exactly one sendDocument request in total")
++  public void once() {
++    uploadAttempt();
++  }
++
++  @Then("the second tap leaves job.json unchanged")
++  public void jobUnchanged() throws Exception {
++    assertThat(Files.readAllBytes(w.dir.resolve("job.json")))
++        .containsExactly(w.before.get("job.json"));
++  }
++
++  @Then("the job files are unchanged")
++  @Then("the tap leaves all remaining job files unchanged")
++  public void unchanged() throws Exception {
++    w.unchanged();
++  }
++
++  @Then("the Telegram mock receives one sendDocument targeting stored chat {long}")
++  public void destination(long chat) {
++    uploadAttempt();
++    w.multipart("Budget meeting.txt", chat);
++  }
++
++  @Then("the reply-markup edits target stored chat {long} and message {int}")
++  public void storedEdits(long chat, int message) {
++    targets(chat, message);
++  }
++
++  @Then("the Telegram mock receives no document upload or message edit targeting chat {long}")
++  public void noRedirect(long chat) {
++    for (Call c : w.events) {
++      if (c.method().equals("senddocument"))
++        assertThat(c.request().getPart("chat_id").getBody().asString())
++            .isNotEqualTo(Long.toString(chat));
++      else if (c.method().startsWith("editmessage"))
++        assertThat(c.json().path("chat_id").asLong()).isNotEqualTo(chat);
++    }
++  }
++
++  @Then(
++      "^the tap produces (one successful sendDocument and persisted TRANSCRIPT state SENT|only answerCallbackQuery with text .+)$")
++  public void outcome(String outcome) throws Exception {
++    if (outcome.startsWith("one successful")) {
++      successfulUpload();
++      w.state("SENT", true);
++    } else w.refusal(outcome.substring("only answerCallbackQuery with text ".length()));
++  }
++
++  @Then("the job files and sentinel file are unchanged")
++  public void sentinel() throws Exception {
++    w.unchanged();
++    assertThat(Files.readString(w.sentinel)).isEqualTo("keep me");
++  }
++
++  @Then("the Telegram mock receives one sendDocument attempt without an automatic retry")
++  public void noRetry() {
++    uploadAttempt();
++  }
++
++  @Then("the summary keyboard is restored to {string} with {string} unchanged")
++  public void restored(String transcript, String audio) {
++    assertThat(w.calls("editMessageReplyMarkup")).hasSize(2);
++    w.labels(w.calls("editMessageReplyMarkup").getLast(), audio, transcript);
++  }
++
++  @Then("the Telegram mock receives a sendMessage to chat {long} with {string}")
++  public void failureMessage(long chat, String text) {
++    assertThat(w.calls("sendMessage"))
++        .singleElement()
++        .satisfies(c -> {
++          assertThat(c.json().path("chat_id").asLong()).isEqualTo(chat);
++          assertThat(c.json().path("text").asText()).isEqualTo(text);
++        });
++  }
++
++  @Then(
++      "the Telegram mock has received exactly two sendDocument attempts in total with one successful response")
++  public void retry() {
++    assertThat(w.calls("sendDocument")).hasSize(2);
++    assertThat(
++            w.telegram.getAllServeEvents().stream()
++                .filter(e ->
++                    e.getRequest().getUrl().endsWith("/senddocument")
++                        && e.getResponse().getStatus() == 200)
++                .count())
++        .isEqualTo(1);
++  }
++
++  @Then("no Telegram message contains the transport diagnostic or a filesystem path")
++  public void safeErrors() {
++    for (Call c : w.events)
++      if (!c.method().equals("senddocument"))
++        assertThat(c.request().getBodyAsString())
++            .doesNotContain(
++                "transport diagnostic", "/private/jobs", w.root.toString(), "Exception");
++  }
++
++  @Then("the Telegram mock receives one answerCallbackQuery attempt without retry")
++  public void answerOnce() {
++    assertThat(w.calls("answerCallbackQuery")).hasSize(1);
++  }
++
++  @Then("the Telegram mock receives one successful sendDocument")
++  public void successfulUpload() {
++    uploadAttempt();
++    assertThat(w.uploadSuccess).isNotNull();
++    assertThat(
++            w.telegram.getAllServeEvents().stream()
++                .filter(e -> e.getRequest().getUrl().endsWith("/senddocument")))
++        .singleElement()
++        .satisfies(e -> assertThat(e.getResponse().getStatus()).isEqualTo(200));
++  }
++
++  @Then("the sendDocument multipart filename is {string}")
++  public void filename(String filename) {
++    uploadAttempt();
++    w.multipart(filename, 101);
++  }
++
++  @Then("the stored title and transcript bytes are unchanged")
++  public void titleAndBytes() throws Exception {
++    assertThat(w.job().path("title").asText()).isEqualTo(w.originalTitle);
++    assertThat(Files.readAllBytes(w.dir.resolve("transcript.txt")))
++        .containsExactly(w.transcriptBytes);
++  }
++
++  @Then("the sendDocument multipart filename is {int} copies of {string} followed by {string}")
++  public void longFilename(int n, String letter, String suffix) {
++    filename(letter.repeat(n) + suffix);
++  }
++
++  @Then("job.json retains the original {int}-character title")
++  public void longTitle(int n) throws Exception {
++    titleAndBytes();
++    assertThat(w.originalTitle.length()).isEqualTo(n);
++  }
++
++  @Then(
++      "both reply-markup edits retain the audio button label {string} and its original callback data")
++  public void audioLabels(String label) {
++    assertThat(w.calls("editMessageReplyMarkup")).hasSize(2);
++    for (Call c : w.calls("editMessageReplyMarkup"))
++      w.labels(
++          c,
++          label,
++          c == w.calls("editMessageReplyMarkup").getFirst()
++              ? "Sending transcript…"
++              : "Transcript sent");
++  }
++
++  @Then("the AUDIO entry is unchanged")
++  public void audioUnchanged() throws Exception {
++    assertThat(w.job().path("files").path("AUDIO"))
++        .isEqualTo(beforeJob().path("files").path("AUDIO"));
++  }
++
++  @Then("the Telegram mock receives no reply-markup edit")
++  public void noEdits() {
++    assertThat(w.calls("editMessageReplyMarkup")).isEmpty();
++  }
++
++  @Then("the AUDIO entry and remaining source file are unchanged")
++  public void audioAndSource() throws Exception {
++    audioUnchanged();
++    assertThat(Files.readAllBytes(w.dir.resolve("source.m4a")))
++        .containsExactly(w.before.get("source.m4a"));
++    assertThat(Files.exists(w.dir.resolve("transcript.txt"))).isFalse();
++  }
++
++  @Then("the TRANSCRIPT expiresAt in job.json remains {string}")
++  public void retainedExpiry(String expiry) throws Exception {
++    assertThat(w.file("TRANSCRIPT").path("expiresAt").asText()).isEqualTo(expiry);
++  }
++}
+diff --git a/src/it/java/com/video2podcast/functional/TranscriptButtonIT.java b/src/it/java/com/video2podcast/functional/TranscriptButtonIT.java
+new file mode 100644
+index 0000000..f31aabc
+--- /dev/null
++++ b/src/it/java/com/video2podcast/functional/TranscriptButtonIT.java
+@@ -0,0 +1,63 @@
++package com.video2podcast.functional;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++import org.junit.jupiter.api.AfterEach;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++
++/** Full-context transcript callback checks; detailed scenario matrices are in CucumberIT. */
++class TranscriptButtonIT extends FunctionalTest {
++  TranscriptWorld w;
++
++  @BeforeEach
++  void fixtures() throws Exception {
++    w = new TranscriptWorld();
++    w.begin();
++  }
++
++  @AfterEach
++  void cleanup() {
++    w.close();
++  }
++
++  @Test
++  void sendsRetainedBytesOnceAndKeepsAudioAvailable() throws Exception {
++    w.tap("transcript:" + TranscriptWorld.JOB, 101, 701, 101, "private");
++    w.state("SENT", true);
++    w.multipart("Budget meeting.txt", 101);
++    assertThat(w.file("AUDIO").path("state").asText()).isEqualTo("AVAILABLE");
++    w.tap("transcript:" + TranscriptWorld.JOB, 101, 701, 101, "private");
++    w.refusal("Already sent.");
++    assertThat(w.calls("sendDocument")).hasSize(1);
++    w.unchanged();
++    w.noModels();
++  }
++
++  @Test
++  void concurrentTapObservesDurableSendingStateAndCannotUpload() throws Exception {
++    w.hold = true;
++    w.tap("transcript:" + TranscriptWorld.JOB, 101, 701, 101, "private");
++    w.state("SENDING", false);
++    w.tap("transcript:" + TranscriptWorld.JOB, 101, 701, 101, "private");
++    w.refusal("Already being sent.");
++    assertThat(w.calls("sendDocument")).hasSize(1);
++    w.finishUpload();
++    w.state("SENT", true);
++  }
++
++  @Test
++  void ownershipAndExpiryAreEnforcedOnPersistedJobs() throws Exception {
++    w.allowed.add(202L);
++    w.tap("transcript:" + TranscriptWorld.JOB, 202, 701, 101, "private");
++    w.refusal("This button is not for you.");
++    w.unchanged();
++    w.change(j ->
++        ((com.fasterxml.jackson.databind.node.ObjectNode) j.path("files").path("TRANSCRIPT"))
++            .put("expiresAt", w.clock.instant().toString()));
++    w.tap("transcript:" + TranscriptWorld.JOB, 101, 701, 101, "private");
++    w.refusal("Expired, please resend the link.");
++    assertThat(w.calls("sendDocument")).isEmpty();
++    w.unchanged();
++  }
++}
+diff --git a/src/it/java/com/video2podcast/functional/TranscriptSetupSteps.java b/src/it/java/com/video2podcast/functional/TranscriptSetupSteps.java
+new file mode 100644
+index 0000000..fa07828
+--- /dev/null
++++ b/src/it/java/com/video2podcast/functional/TranscriptSetupSteps.java
+@@ -0,0 +1,242 @@
++package com.video2podcast.functional;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++import com.fasterxml.jackson.databind.node.ObjectNode;
++import io.cucumber.java.en.Given;
++import io.cucumber.java.en.When;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.util.List;
++
++/** Retained-job fixtures are written directly before driving the real Telegram consumer. */
++public class TranscriptSetupSteps {
++  final TranscriptWorld w;
++
++  public TranscriptSetupSteps(TranscriptWorld world) {
++    w = world;
++  }
++
++  @Given("an allowed Telegram user with id {long}")
++  public void allowed(long id) {
++    w.user = id;
++    w.allowed.add(id);
++  }
++
++  @Given(
++      "a published job {string} exists on disk for user {long} in private chat {long} with summary message id {int}")
++  public void published(String job, long owner, long chat, int message) throws Exception {
++    assertThat(job).isEqualTo(TranscriptWorld.JOB);
++    w.change(j -> j.put("ownerUserId", owner).put("chatId", chat).put("summaryMessageId", message));
++  }
++
++  @Given("the stored job title is {string}")
++  public void title(String title) throws Exception {
++    w.originalTitle = title;
++    w.change(j -> j.put("title", title));
++  }
++
++  @Given(
++      "the job's AUDIO and TRANSCRIPT entries are {string} with expiresAt {string} and null sentAt")
++  public void entries(String state, String expiry) throws Exception {
++    w.change(j -> {
++      for (String kind : List.of("AUDIO", "TRANSCRIPT")) {
++        ((ObjectNode) j.path("files").path(kind))
++            .put("state", state)
++            .put("expiresAt", expiry)
++            .remove("sentAt");
++      }
++    });
++  }
++
++  @Given("the job directory contains {string} and UTF-8 {string} with content {string}")
++  public void content(String source, String file, String text) throws Exception {
++    assertThat(source).isEqualTo("source.m4a");
++    assertThat(file).isEqualTo("transcript.txt");
++    // The feature's quoted \n denotes one newline in the retained UTF-8 file.
++    w.transcriptBytes = text.replace("\\n", "\n").getBytes(StandardCharsets.UTF_8);
++    Files.write(w.dir.resolve(file), w.transcriptBytes);
++  }
++
++  @Given("the Telegram mock accepts document uploads and keyboard edits")
++  public void accepts() {
++    /* Default real HTTP boundary response. */
++  }
++
++  @Given("the Telegram mock holds the document upload response")
++  public void hold() {
++    w.hold = true;
++  }
++
++  @Given("the Telegram mock has received the document upload and holds its response")
++  public void held() {
++    assertThat(w.uploadReceived.getCount()).isZero();
++    assertThat(w.releaseUpload.getCount()).isEqualTo(1);
++    assertThat(w.pending.getFirst().isDone()).isFalse();
++  }
++
++  @When("the Telegram mock releases the successful upload response")
++  public void release() throws Exception {
++    w.finishUpload();
++  }
++
++  @Given("the user has successfully downloaded this job's transcript through a Telegram callback")
++  public void alreadySent() throws Exception {
++    tap("transcript:" + TranscriptWorld.JOB, 701, 101);
++    w.state("SENT", true);
++  }
++
++  @Given("Telegram user {long} is allowed and is not the bot administrator")
++  public void other(long id) {
++    w.allowed.add(id);
++    assertThat(id).isNotEqualTo(w.admin);
++  }
++
++  @Given("Telegram user {long} is allowed and is the bot administrator")
++  public void admin(long id) {
++    w.admin = id;
++    w.allowed.add(id);
++  }
++
++  @Given("user {long} has been removed from the allowlist and is not the bot administrator")
++  public void revoked(long id) {
++    assertThat(w.context).isNull();
++    assertThat(id).isNotEqualTo(w.admin);
++    w.allowed.remove(id);
++  }
++
++  @Given("the TRANSCRIPT expiresAt in job.json is {string}")
++  public void expires(String expiry) throws Exception {
++    w.change(j -> ((ObjectNode) j.path("files").path("TRANSCRIPT")).put("expiresAt", expiry));
++  }
++
++  @Given("the job directory is absent")
++  public void noDirectory() throws Exception {
++    try (var paths = Files.walk(w.dir)) {
++      for (var p : paths.sorted(java.util.Comparator.reverseOrder()).toList()) Files.delete(p);
++    }
++  }
++
++  @Given("job.json is absent")
++  public void noJob() throws Exception {
++    Files.delete(w.dir.resolve("job.json"));
++  }
++
++  @Given("job.json contains invalid JSON")
++  public void corrupt() throws Exception {
++    Files.writeString(w.dir.resolve("job.json"), "{broken");
++  }
++
++  @Given("job.json has no TRANSCRIPT entry")
++  public void noEntry() throws Exception {
++    w.change(j -> ((ObjectNode) j.path("files")).remove("TRANSCRIPT"));
++  }
++
++  @Given("the TRANSCRIPT state in job.json is EXPIRED")
++  public void expired() throws Exception {
++    state("EXPIRED");
++  }
++
++  @Given("the TRANSCRIPT state in job.json is {string}")
++  @Given("the TRANSCRIPT state in job.json is {string} before application startup")
++  public void state(String state) throws Exception {
++    w.change(j -> {
++      ObjectNode f = (ObjectNode) j.path("files").path("TRANSCRIPT");
++      f.put("state", state);
++      if (state.equals("SENT")) f.put("sentAt", "2026-11-19T12:01:00Z");
++      else f.remove("sentAt");
++    });
++  }
++
++  @Given("a sentinel file outside the job directory contains {string}")
++  public void sentinel(String text) throws Exception {
++    w.sentinel = w.root.resolve("sentinel");
++    Files.writeString(w.sentinel, text);
++  }
++
++  @Given(
++      "the Telegram mock rejects the first sendDocument with HTTP {int} and a Bot API error response")
++  public void rejectUpload(int status) {
++    assertThat(status).isEqualTo(400);
++    w.rejectUpload = 1;
++  }
++
++  @Given(
++      "the Telegram mock accepts the upload bytes but closes the connection without a response on every upload attempt")
++  public void drop() {
++    w.drop = true;
++  }
++
++  @Given(
++      "the Telegram mock rejects answerCallbackQuery with HTTP {int} and a Bot API error response")
++  public void rejectAnswer(int status) {
++    assertThat(status).isEqualTo(400);
++    w.rejectAnswer = true;
++  }
++
++  @Given(
++      "the Telegram mock rejects the {word} reply-markup edit with HTTP {int} and a Bot API error response")
++  public void rejectEdit(String which, int status) {
++    assertThat(status).isEqualTo(400);
++    assertThat(which).isIn("progress", "final");
++    w.rejectEdit = which.equals("progress") ? 1 : 2;
++  }
++
++  @Given("the stored job title contains {int} copies of {string}")
++  public void longTitle(int count, String letter) throws Exception {
++    title(letter.repeat(count));
++  }
++
++  @Given("the AUDIO state in job.json is {string}")
++  public void audioState(String state) throws Exception {
++    w.change(j -> {
++      ObjectNode f = (ObjectNode) j.path("files").path("AUDIO");
++      f.put("state", state);
++      if (state.equals("SENT")) f.put("sentAt", "2026-11-19T12:01:00Z");
++    });
++  }
++
++  @Given("summaryMessageId in job.json is null")
++  public void noSummary() throws Exception {
++    w.change(j -> j.putNull("summaryMessageId"));
++  }
++
++  @Given("the application starts with the existing job directory")
++  public void startup() {
++    assertThat(w.context).isNull();
++    w.start();
++  }
++
++  @Given("transcript.txt is absent")
++  public void noTranscript() throws Exception {
++    Files.delete(w.dir.resolve("transcript.txt"));
++  }
++
++  @Given("job.json records createdAt {string}")
++  public void created(String at) throws Exception {
++    w.change(j -> j.put("createdAt", at));
++  }
++
++  @When("the user taps {string} on private message {int} in chat {long}")
++  @When("the user taps {string} on private message {int} in chat {long} again")
++  @Given("the user has tapped {string} on private message {int} in chat {long}")
++  public void tap(String data, int message, long chat) throws Exception {
++    w.tap(data, w.user, message, chat, "private");
++  }
++
++  @When("Telegram user {long} taps {string} on private message {int} in chat {long}")
++  public void otherTap(long user, String data, int message, long chat) throws Exception {
++    w.tap(data, user, message, chat, "private");
++  }
++
++  @When(
++      "a concurrent Telegram update taps {string} as user {long} on private message {int} in chat {long}")
++  public void concurrent(String data, long user, int message, long chat) throws Exception {
++    w.tap(data, user, message, chat, "private");
++  }
++
++  @When("user {long} sends a Telegram callback with data {string} from a {word} chat")
++  public void group(long user, String data, String type) throws Exception {
++    w.tap(data, user, 701, -100, type);
++  }
++}
+diff --git a/src/it/java/com/video2podcast/functional/TranscriptWorld.java b/src/it/java/com/video2podcast/functional/TranscriptWorld.java
+new file mode 100644
+index 0000000..f380786
+--- /dev/null
++++ b/src/it/java/com/video2podcast/functional/TranscriptWorld.java
+@@ -0,0 +1,363 @@
++package com.video2podcast.functional;
++
++import static com.github.tomakehurst.wiremock.client.WireMock.*;
++import static org.assertj.core.api.Assertions.assertThat;
++
++import com.fasterxml.jackson.databind.JsonNode;
++import com.fasterxml.jackson.databind.node.ObjectNode;
++import com.github.tomakehurst.wiremock.WireMockServer;
++import com.github.tomakehurst.wiremock.extension.ResponseDefinitionTransformerV2;
++import com.github.tomakehurst.wiremock.http.Fault;
++import com.github.tomakehurst.wiremock.http.Request;
++import com.github.tomakehurst.wiremock.http.ResponseDefinition;
++import com.github.tomakehurst.wiremock.stubbing.ServeEvent;
++import com.video2podcast.Video2PodcastApplication;
++import com.video2podcast.bot.TelegramBot;
++import com.video2podcast.media.ProcessRunner;
++import io.cucumber.java.After;
++import io.cucumber.java.Before;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.time.*;
++import java.util.*;
++import java.util.concurrent.*;
++import java.util.concurrent.atomic.AtomicInteger;
++import org.springframework.boot.builder.SpringApplicationBuilder;
++import org.springframework.boot.test.context.TestConfiguration;
++import org.springframework.context.ConfigurableApplicationContext;
++import org.springframework.context.annotation.Bean;
++import org.springframework.context.annotation.Primary;
++import org.telegram.telegrambots.meta.api.objects.Update;
++
++/** T12 fixtures use Telegram HTTP, updates and files only; no delivery service is called. */
++public class TranscriptWorld implements AutoCloseable {
++  static final String JOB = "11111111-1111-4111-8111-111111111111";
++  static final Duration WAIT = Duration.ofSeconds(15);
++  final PipelineWorld.MutableClock clock = new PipelineWorld.MutableClock();
++  final List<Call> events = new CopyOnWriteArrayList<>();
++  final List<Future<?>> pending = new ArrayList<>();
++  final ExecutorService updates = Executors.newVirtualThreadPerTaskExecutor();
++  final AtomicInteger callbackIds = new AtomicInteger();
++  final AtomicInteger uploads = new AtomicInteger();
++  final AtomicInteger edits = new AtomicInteger();
++  final Set<Long> allowed = new HashSet<>();
++  final CountDownLatch uploadReceived = new CountDownLatch(1);
++  final CountDownLatch releaseUpload = new CountDownLatch(1);
++  final Map<String, byte[]> before = new TreeMap<>();
++  WireMockServer telegram, whisper, ollama;
++  ConfigurableApplicationContext context;
++  Path root, dir, sentinel;
++  boolean active, hold, drop, rejectAnswer;
++  int rejectUpload, rejectEdit, tapStart;
++  long user = 101, admin = 999;
++  String originalTitle = "Budget meeting";
++  byte[] transcriptBytes;
++  ObjectNode initial;
++  Instant uploadSuccess;
++  String lastCallback;
++
++  @Before(value = "@T12", order = 10)
++  public void begin() throws Exception {
++    active = true;
++    root = Files.createTempDirectory(Path.of("target"), "transcript-it-");
++    dir = Files.createDirectories(root.resolve("work").resolve(JOB));
++    telegram = WireMocks.scenarioServer(new Boundary());
++    whisper = WireMocks.scenarioServer();
++    ollama = WireMocks.scenarioServer();
++    telegram.stubFor(
++        any(anyUrl()).willReturn(aResponse().withHeader("Content-Type", "application/json")));
++    clock.now = Instant.parse("2026-11-19T12:30:00Z");
++    initial = PipelineWorld.JSON.createObjectNode();
++    initial
++        .put("jobId", JOB)
++        .put("ownerUserId", 101)
++        .put("chatId", 101)
++        .put("summaryMessageId", 701)
++        .put("title", originalTitle)
++        .put("durationSeconds", 300)
++        .put("createdAt", "2026-11-19T12:00:00Z");
++    ObjectNode files = initial.putObject("files");
++    for (String kind : List.of("AUDIO", "TRANSCRIPT")) {
++      files
++          .putObject(kind)
++          .put("path", kind.equals("AUDIO") ? "source.m4a" : "transcript.txt")
++          .put("state", "AVAILABLE")
++          .put("expiresAt", "2026-11-19T13:00:00Z")
++          .remove("sentAt");
++    }
++    allowed.add(user);
++    write(initial);
++    Files.write(dir.resolve("source.m4a"), new byte[] {1, 2, 3, 4});
++    transcriptBytes = "The budget meeting is on Tuesday.\n".getBytes(StandardCharsets.UTF_8);
++    Files.write(dir.resolve("transcript.txt"), transcriptBytes);
++  }
++
++  void start() {
++    if (context != null) return;
++    Map<String, String> props =
++        new LinkedHashMap<>(
++            FunctionalTest.applicationSettings(
++                root, telegram.baseUrl(), whisper.baseUrl(), ollama.baseUrl()));
++    props.put("app.telegram.admin-user-id", Long.toString(admin));
++    props.put("spring.main.banner-mode", "off");
++    props.put("logging.level.root", "WARN");
++    // Initializer registers only boundary fixtures, leaving all delivery wiring real.
++    context =
++        new SpringApplicationBuilder(Video2PodcastApplication.class, Fixtures.class)
++            .initializers(
++                c -> c.getBeanFactory().registerSingleton("transcriptFixtureClock", clock))
++            .run(
++                props.entrySet().stream()
++                    .map(e -> "--" + e.getKey() + "=" + e.getValue())
++                    .toArray(String[]::new));
++    for (long id : allowed) bot().consume(Updates.privateMessage(admin, "/allow " + id));
++    events.clear();
++    telegram.resetRequests();
++  }
++
++  TelegramBot bot() {
++    return context.getBean(TelegramBot.class);
++  }
++
++  void write(ObjectNode job) throws Exception {
++    Files.writeString(dir.resolve("job.json"), PipelineWorld.JSON.writeValueAsString(job));
++  }
++
++  ObjectNode job() throws Exception {
++    return (ObjectNode) PipelineWorld.JSON.readTree(Files.readAllBytes(dir.resolve("job.json")));
++  }
++
++  ObjectNode file(String kind) throws Exception {
++    return (ObjectNode) job().path("files").path(kind);
++  }
++
++  void change(java.util.function.Consumer<ObjectNode> edit) throws Exception {
++    ObjectNode j = job();
++    edit.accept(j);
++    write(j);
++  }
++
++  Map<String, byte[]> snapshot() throws Exception {
++    Map<String, byte[]> result = new TreeMap<>();
++    if (Files.exists(dir))
++      try (var paths = Files.walk(dir)) {
++        for (Path p : paths.filter(Files::isRegularFile).toList())
++          result.put(dir.relativize(p).toString(), Files.readAllBytes(p));
++      }
++    return result;
++  }
++
++  void unchanged() throws Exception {
++    sameFiles(before, snapshot());
++  }
++
++  static void sameFiles(Map<String, byte[]> expected, Map<String, byte[]> actual) {
++    assertThat(actual.keySet()).isEqualTo(expected.keySet());
++    expected.forEach((name, bytes) -> assertThat(actual.get(name)).as(name).containsExactly(bytes));
++  }
++
++  void tap(String data, long sender, int message, long chat, String type) throws Exception {
++    start();
++    before.clear();
++    before.putAll(snapshot());
++    tapStart = events.size();
++    lastCallback = "transcript-tap-" + callbackIds.incrementAndGet();
++    ObjectNode node = PipelineWorld.JSON.createObjectNode();
++    node.put("update_id", callbackIds.get());
++    ObjectNode callback = node.putObject("callback_query");
++    callback.put("id", lastCallback).put("chat_instance", "1").put("data", data);
++    callback.putObject("from").put("id", sender).put("is_bot", false).put("first_name", "Tester");
++    callback
++        .putObject("message")
++        .put("message_id", message)
++        .put("date", 1700000000)
++        .putObject("chat")
++        .put("id", chat)
++        .put("type", type);
++    Update update = PipelineWorld.JSON.treeToValue(node, Update.class);
++    boolean awaitFirstUpload = hold && releaseUpload.getCount() != 0 && pending.isEmpty();
++    Future<?> task = updates.submit(() -> bot().consume(update));
++    pending.add(task);
++    if (awaitFirstUpload) {
++      assertThat(uploadReceived.await(WAIT.toMillis(), TimeUnit.MILLISECONDS))
++          .as("upload reached held HTTP response")
++          .isTrue();
++    } else task.get(WAIT.toMillis(), TimeUnit.MILLISECONDS);
++  }
++
++  void finishUpload() throws Exception {
++    releaseUpload.countDown();
++    for (Future<?> task : pending) task.get(WAIT.toMillis(), TimeUnit.MILLISECONDS);
++  }
++
++  List<Call> calls(String method) {
++    return events.stream().filter(c -> c.method.equals(method.toLowerCase(Locale.ROOT))).toList();
++  }
++
++  List<Call> tapCalls() {
++    return List.copyOf(events.subList(tapStart, events.size()));
++  }
++
++  void refusal(String text) {
++    assertThat(tapCalls())
++        .singleElement()
++        .satisfies(c -> {
++          assertThat(c.method).isEqualTo("answercallbackquery");
++          assertThat(c.json().path("text").asText()).isEqualTo(text);
++          assertThat(c.json().path("callback_query_id").asText()).isEqualTo(lastCallback);
++        });
++  }
++
++  void state(String expected, boolean sent) throws Exception {
++    JsonNode f = file("TRANSCRIPT");
++    assertThat(f.path("state").asText()).isEqualTo(expected);
++    assertThat(f.path("sentAt").isMissingNode() || f.path("sentAt").isNull()).isEqualTo(!sent);
++    if (sent) {
++      Instant at = Instant.parse(f.path("sentAt").asText());
++      assertThat(at).isEqualTo(clock.instant());
++      if (uploadSuccess != null) assertThat(at).isAfterOrEqualTo(uploadSuccess);
++    }
++  }
++
++  void noModels() {
++    assertThat(whisper.getAllServeEvents()).isEmpty();
++    assertThat(ollama.getAllServeEvents()).isEmpty();
++  }
++
++  JsonNode keyboard(Call call) {
++    return call.json().path("reply_markup").path("inline_keyboard");
++  }
++
++  void labels(Call call, String audio, String transcript) {
++    JsonNode rows = keyboard(call);
++    assertThat(rows.size()).isEqualTo(1);
++    assertThat(rows.get(0).size()).isEqualTo(2);
++    assertThat(rows.get(0).get(0).path("text").asText()).isEqualTo(audio);
++    assertThat(rows.get(0).get(1).path("text").asText()).isEqualTo(transcript);
++    for (int i = 0; i < 2; i++) {
++      String data = rows.get(0).get(i).path("callback_data").asText();
++      assertThat(data).isEqualTo((i == 0 ? "audio:" : "transcript:") + JOB);
++      assertThat(data.getBytes(StandardCharsets.UTF_8).length).isLessThanOrEqualTo(64);
++    }
++  }
++
++  void multipart(String filename, long chat) {
++    Request r = calls("sendDocument").getLast().request;
++    assertThat(r.isMultipart()).isTrue();
++    assertThat(r.getPart("chat_id").getBody().asString()).isEqualTo(Long.toString(chat));
++    // Telegram's Java client uses a document=attach://<part-name> reference.
++    String reference = r.getPart("document").getBody().asString();
++    assertThat(reference).startsWith("attach://");
++    var document = r.getPart(reference.substring("attach://".length()));
++    assertThat(document).as("document attachment %s", reference).isNotNull();
++    assertThat(document.getHeader("Content-Disposition").firstValue())
++        .contains("filename=\"" + filename + "\"");
++    assertThat(document.getBody().asBytes()).containsExactly(transcriptBytes);
++    assertThat(r.getPart("caption")).isNull();
++  }
++
++  @After(value = "@T12", order = 100)
++  public void close() {
++    releaseUpload.countDown();
++    updates.shutdown();
++    try {
++      if (!updates.awaitTermination(20, TimeUnit.SECONDS)) updates.shutdownNow();
++    } catch (InterruptedException e) {
++      Thread.currentThread().interrupt();
++      updates.shutdownNow();
++    }
++    if (context != null) context.close();
++    for (WireMockServer server : Arrays.asList(telegram, whisper, ollama))
++      if (server != null) server.stop();
++  }
++
++  @TestConfiguration(proxyBeanMethods = false)
++  static class Fixtures {
++    @Bean
++    @Primary
++    Clock transcriptClock(
++        @org.springframework.beans.factory.annotation.Qualifier("transcriptFixtureClock")
++            Clock transcriptFixtureClock) {
++      return transcriptFixtureClock;
++    }
++
++    @Bean
++    @Primary
++    ProcessRunner noMediaForTranscript() {
++      return (command, timeout) -> {
++        throw new AssertionError("Transcript tap invoked a media process: " + command);
++      };
++    }
++  }
++
++  record Call(String method, Request request, JsonNode persisted) {
++    JsonNode json() {
++      return PipelineWorld.json(request.getBodyAsString());
++    }
++  }
++
++  class Boundary implements ResponseDefinitionTransformerV2 {
++    public String getName() {
++      return "transcript-boundary";
++    }
++
++    public boolean applyGlobally() {
++      return true;
++    }
++
++    public ResponseDefinition transform(ServeEvent serve) {
++      Request request = serve.getRequest();
++      String method =
++          request
++              .getUrl()
++              .substring(request.getUrl().lastIndexOf('/') + 1)
++              .toLowerCase(Locale.ROOT);
++      JsonNode persisted;
++      try {
++        persisted = job();
++      } catch (Exception e) {
++        persisted = null;
++      }
++      events.add(new Call(method, request, persisted));
++      if (method.equals("senddocument")) {
++        int attempt = uploads.incrementAndGet();
++        uploadReceived.countDown();
++        if (hold)
++          try {
++            if (!releaseUpload.await(WAIT.toMillis(), TimeUnit.MILLISECONDS))
++              throw new AssertionError("Held upload was never released");
++          } catch (InterruptedException e) {
++            Thread.currentThread().interrupt();
++            throw new IllegalStateException(e);
++          }
++        if (drop) return aResponse().withFault(Fault.EMPTY_RESPONSE).build();
++        if (attempt == rejectUpload) return rejected();
++        // Mark the success boundary with application time, distinct from claim time.
++        clock.now = clock.instant().plusSeconds(1);
++        uploadSuccess = clock.instant();
++      }
++      if (method.equals("answercallbackquery") && rejectAnswer) return rejected();
++      if (method.equals("editmessagereplymarkup") && edits.incrementAndGet() == rejectEdit)
++        return rejected();
++      if (method.equals("answercallbackquery"))
++        return aResponse()
++            .withHeader("Content-Type", "application/json")
++            .withBody("{\"ok\":true,\"result\":true}")
++            .build();
++      return aResponse()
++          .withHeader("Content-Type", "application/json")
++          .withBody(FunctionalTest.MESSAGE_OK)
++          .build();
++    }
++
++    ResponseDefinition rejected() {
++      return aResponse()
++          .withStatus(400)
++          .withHeader("Content-Type", "application/json")
++          .withBody(
++              "{\"ok\":false,\"error_code\":400,\"description\":\"transport diagnostic /private/jobs/secret\"}")
++          .build();
++    }
++  }
++}
+diff --git a/src/it/java/com/video2podcast/functional/WhoamiSteps.java b/src/it/java/com/video2podcast/functional/WhoamiSteps.java
+index 327a2d0..3849b7d 100644
+--- a/src/it/java/com/video2podcast/functional/WhoamiSteps.java
++++ b/src/it/java/com/video2podcast/functional/WhoamiSteps.java
+@@ -15,6 +15,7 @@ public class WhoamiSteps {
+ 
+   private long userId;
+   private final PipelineWorld pipeline;
++  @Autowired private TranscriptWorld transcript;
+ 
+   public WhoamiSteps(PipelineWorld pipeline) {
+     this.pipeline = pipeline;
+@@ -54,6 +55,10 @@ public class WhoamiSteps {
+ 
+   @Then("the bot sends nothing")
+   public void sendsNothing() {
++    if (transcript.active) {
++      assertThat(transcript.events).isEmpty();
++      return;
++    }
+     if (pipeline.active) {
+       assertThat(pipeline.calls("sendMessage")).isEmpty();
+       return;

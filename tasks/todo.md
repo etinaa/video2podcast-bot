@@ -152,7 +152,7 @@ Sizes: S = 1-2 files, M = 3-5 files.
 
 ## Phase 4: On-demand delivery and cleanup
 
-- [~] **T12: Download transcript button** (S)
+- [x] **T12: Download transcript button** (S)
   - Acceptance:
     - Tapping **Download transcript** from the job's owner sends `<title>.txt` with `sendDocument`. The file state goes `AVAILABLE` → `SENDING` → `SENT`, and the button changes to "Transcript sent". The audio button stays active.
     - A second tap, or a tap at the same moment, sends the file once. A tap from another user is rejected. A tap on an expired or missing job gives "expired, please resend the link".
