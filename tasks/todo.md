@@ -289,3 +289,13 @@ Work that is not scheduled in a phase. Technical debt carries the `[debt]` mark.
   - Verify: `./mvnw verify -Dno-it`, and one by-hand run of the real `yt-dlp` on a local mp4 with the new selector (the command and the result go into `tasks/TD5/evidence.md`). Technical task: the Developer writes, both code reviewers review; no Architect, no Analyst, no Tester.
   - Depends on: T8
   - Files: `media/YtDlpClient.java`, `YtDlpClientTest.java`, `SPEC.md`
+
+- [ ] **TD6 [debt]: Flaky T9 scenario "Broken successful responses are retried rather than called silence"** (S)
+  - Why: one of five full `./mvnw clean verify` runs failed at the step `"chunk-000.wav" is sent exactly twice` (`T9-transcription.feature:122`, example 1.1 `{broken`): the Whisper mock journal had 0 requests after 30 seconds. The rerun was green. A flaky test weakens trust in `verify`.
+  - Acceptance:
+    - The cause is found (in the test or in the code) and written in `tasks/TD6/evidence.md`: the log of the failed run, the code version, the explanation.
+    - The cause is removed, not hidden: no timeout is raised by guesswork, and the wait is tied to an observable event. If the cause is in production code (a race in the queue, the retries or the status edits), the Developer fixes it in a separate `fix` commit.
+    - The scenario is not disabled and gets no test-level retries.
+  - Verify: the failed scenario and the whole T9 group pass 20 times in a row (`-Dcucumber.filter.tags=@T9` in a loop, result in `evidence.md`), then `./mvnw clean verify` is green with the JaCoCo, Spotless, SpotBugs and PMD gates unchanged. Technical task: the Tester investigates and fixes the tests; the Developer joins only if the cause is in the code; both code reviewers review; no Analyst, no Architect (scenarios and contracts do not change).
+  - Depends on: T11
+  - Files: `src/it/java/com/video2podcast/functional/*` (steps and scenario world), if needed `job/`, `transcript/`, `tasks/TD6/evidence.md`
