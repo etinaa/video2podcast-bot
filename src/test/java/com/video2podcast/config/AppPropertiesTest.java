@@ -25,6 +25,8 @@ class AppPropertiesTest {
   void usesSpecDefaults() {
     assertThat(props.ollama().model()).isEqualTo("qwen3:32b");
     assertThat(props.ollama().baseUrl()).isEqualTo("http://host.containers.internal:11434");
+    assertThat(props.ollama().numCtx()).isEqualTo(8192);
+    assertThat(props.ollama().timeout()).isEqualTo(Duration.ofMinutes(10));
     assertThat(props.whisper().baseUrl()).isEqualTo("http://host.containers.internal:8081");
     assertThat(props.whisper().timeout()).isEqualTo(Duration.ofMinutes(10));
     assertThat(props.access().file()).isEqualTo(Path.of("/data/allowed-users.json"));

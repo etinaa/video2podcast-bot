@@ -14,6 +14,8 @@ app:
   ollama:
     base-url: ${OLLAMA_BASE_URL:http://host.containers.internal:11434}
     model: ${OLLAMA_MODEL:qwen3:32b}
+    num-ctx: ${OLLAMA_NUM_CTX:8192}
+    timeout: ${OLLAMA_TIMEOUT:PT10M}
   whisper:
     base-url: ${WHISPER_BASE_URL:http://host.containers.internal:8081}
     timeout: ${WHISPER_TIMEOUT:PT10M}

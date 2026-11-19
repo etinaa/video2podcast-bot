@@ -13,7 +13,11 @@ public record AppProperties(
 
   public record Access(Path file, Duration requestCooldown) {}
 
-  public record Ollama(String baseUrl, String model) {}
+  /**
+   * {@code numCtx} is sent as {@code options.num_ctx} on every request; {@code timeout} is how long
+   * one request may wait for its answer.
+   */
+  public record Ollama(String baseUrl, String model, int numCtx, Duration timeout) {}
 
   /** {@code timeout} is how long one chunk may wait for its answer. */
   public record Whisper(String baseUrl, Duration timeout) {}

@@ -52,6 +52,18 @@ class JobFailureTest {
   }
 
   @Test
+  void summaryFailuresHaveTheirOwnMessages() {
+    assertThat(JobFailure.of(JobFailure.Kind.SUMMARY_UNREACHABLE).getMessage())
+        .isEqualTo("The summary server is unreachable.");
+    Exception cause = new java.io.IOException("/secret/path");
+    JobFailure failure = JobFailure.summaryFailed(cause);
+    assertThat(failure.kind()).isEqualTo(JobFailure.Kind.FAILED);
+    assertThat(failure.getMessage()).isEqualTo("Summary failed. Please try again later.");
+    assertThat(failure.getCause()).isSameAs(cause);
+    assertThat(JobFailure.summaryFailed(null).getCause()).isNull();
+  }
+
+  @Test
   void causeIsKeptForLogsButNotInTheMessage() {
     Exception cause = new java.io.IOException("/secret/path");
 

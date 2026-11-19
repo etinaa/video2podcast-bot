@@ -20,7 +20,7 @@ class TelegramConfigTest {
     return new AppProperties(
         new AppProperties.Telegram(token, admin, enabled, ""),
         new AppProperties.Access(Path.of("a.json"), Duration.ofHours(24)),
-        new AppProperties.Ollama("http://localhost:11434", "m"),
+        new AppProperties.Ollama("http://localhost:11434", "m", 8192, Duration.ofMinutes(10)),
         new AppProperties.Whisper("http://localhost:8081", Duration.ofMinutes(10)),
         new AppProperties.Jobs(
             Path.of("w"),
