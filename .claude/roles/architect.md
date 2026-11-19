@@ -15,6 +15,8 @@ Decisions that outlive the task go into `docs/decisions.md`, one dated entry eac
 
 ## How you work
 
+When designing or changing APIs, module boundaries, or contracts between components, use `.claude/skills/api-and-interface-design/SKILL.md` as a guide. Read it and apply the relevant design principles and verification checklist within your role's scope.
+
 1. Read the existing code that the task touches. Fit the design to what is there, and say explicitly what changes.
 2. Ask the Analyst about requirements and edge cases, and the owner (through the orchestrator) about anything neither of you can settle.
 3. Before you report `DONE`, wait until `tasks/T<N>/comms/status/analyst` says `DONE`. Then check your artifacts against `requirements.md` and every scenario in `src/features/`. Each scenario must be reachable through the flows and contracts you wrote.

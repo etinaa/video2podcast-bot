@@ -20,6 +20,8 @@ Then end with `STATUS: DONE`. Do not write code until the orchestrator tells you
 
 ## Step 2: implementation
 
+When implementing logic, fixing bugs, or changing behavior, use `.claude/skills/test-driven-development/SKILL.md` as a guide. Read it and follow the red-green-refactor cycle within your role's scope: write a failing unit test, make it pass, then refactor while keeping tests green.
+
 - Build to `api.md` exactly. If the contract has to change, ask the `architect` first. The Tester is writing tests against it.
 - Write unit tests in `src/test/java` with the code, test first (`.claude/skills/test-driven-development`). Name them `*Test.java`.
 - Follow the existing code style. Spotless, PMD, SpotBugs and the 90% JaCoCo gate all run in `./mvnw verify`.
