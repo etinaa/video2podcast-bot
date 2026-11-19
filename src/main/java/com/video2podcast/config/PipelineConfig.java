@@ -9,6 +9,7 @@ import com.video2podcast.job.JobQueue;
 import com.video2podcast.job.JobStore;
 import com.video2podcast.job.PipelineService;
 import com.video2podcast.job.SummaryPublisher;
+import com.video2podcast.media.AudioPreparer;
 import com.video2podcast.media.FfmpegRunner;
 import com.video2podcast.media.UrlValidator;
 import com.video2podcast.media.YtDlpClient;
@@ -64,7 +65,7 @@ public class PipelineConfig {
 
   @Bean
   DeliveryCallbackHandler deliveryCallbackHandler(
-      TelegramGateway gateway, DeliveryService delivery) {
-    return new DeliveryCallbackHandler(gateway, delivery);
+      TelegramGateway gateway, DeliveryService delivery, AudioPreparer audio, JobQueue queue) {
+    return new DeliveryCallbackHandler(gateway, delivery, audio, queue);
   }
 }

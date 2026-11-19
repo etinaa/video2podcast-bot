@@ -5,6 +5,7 @@ import com.video2podcast.job.JobFailure;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -80,6 +81,48 @@ public class FfmpegRunner {
       throw JobFailure.of(JobFailure.Kind.FAILED);
     }
     return chunks;
+  }
+
+  /**
+   * Writes an M4A (AAC) file without video to {@code target}, replacing any file there.
+   *
+   * @return target
+   * @throws JobFailure FAILED (non-zero exit, no or empty output) or TIMEOUT; no output is left
+   *     behind
+   */
+  public Path encodeM4a(Path source, Path target, int kbps, boolean mono) {
+    try {
+      Files.deleteIfExists(target);
+    } catch (IOException e) {
+      throw JobFailure.of(JobFailure.Kind.FAILED, e);
+    }
+    List<String> args = new ArrayList<>();
+    args.addAll(List.of("ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i"));
+    args.add(source.toString());
+    args.add("-vn");
+    if (mono) {
+      args.addAll(List.of("-ac", "1"));
+    }
+    args.addAll(List.of("-c:a", "aac", "-b:a", kbps + "k", "-movflags", "+faststart"));
+    args.add(target.toString());
+    try {
+      run(args);
+      if (!nonEmptyFile(target)) {
+        throw JobFailure.of(JobFailure.Kind.FAILED);
+      }
+    } catch (RuntimeException e) {
+      deleteQuietly(target);
+      throw e;
+    }
+    return target;
+  }
+
+  private static void deleteQuietly(Path file) {
+    try {
+      Files.deleteIfExists(file);
+    } catch (IOException e) {
+      LOG.warn("Could not delete {}", file, e);
+    }
   }
 
   private void run(List<String> args) {

@@ -9,6 +9,7 @@ import com.video2podcast.job.DeliveryService;
 import com.video2podcast.job.FileKind;
 import com.video2podcast.job.FileState;
 import com.video2podcast.job.JobFile;
+import com.video2podcast.job.JobQueue;
 import com.video2podcast.job.JobRecord;
 import com.video2podcast.job.JobStore;
 import com.video2podcast.support.MutableClock;
@@ -76,7 +77,11 @@ class TranscriptButtonTest {
             gateway,
             access,
             mock(UrlMessageHandler.class),
-            new DeliveryCallbackHandler(gateway, new DeliveryService(store, clock)));
+            new DeliveryCallbackHandler(
+                gateway,
+                new DeliveryService(store, clock),
+                StubAudioPreparer.unchanged(),
+                new JobQueue()));
     Instant expires = T0.plus(Duration.ofMinutes(30));
     store.create(
         new JobRecord(

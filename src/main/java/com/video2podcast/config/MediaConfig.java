@@ -1,5 +1,6 @@
 package com.video2podcast.config;
 
+import com.video2podcast.media.AudioPreparer;
 import com.video2podcast.media.DefaultProcessRunner;
 import com.video2podcast.media.FfmpegRunner;
 import com.video2podcast.media.ProcessRunner;
@@ -31,5 +32,10 @@ public class MediaConfig {
   @Bean
   FfmpegRunner ffmpegRunner(ProcessRunner runner, AppProperties props) {
     return new FfmpegRunner(runner, props.jobs());
+  }
+
+  @Bean
+  AudioPreparer audioPreparer(FfmpegRunner ffmpeg) {
+    return new AudioPreparer(ffmpeg);
   }
 }

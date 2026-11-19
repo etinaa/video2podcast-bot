@@ -22,8 +22,15 @@ public interface TelegramGateway {
 
   void sendDocument(long chatId, Path file, String fileName, String caption);
 
-  /** Sends an audio file that plays in Telegram's player. */
-  void sendAudio(long chatId, Path file, String title, String performer);
+  /**
+   * Sends an audio file that plays in Telegram's player.
+   *
+   * @param fileName shown to the user, e.g. "Budget meeting.m4a"
+   * @param caption HTML, may be null
+   * @throws TelegramGatewayException if Telegram refuses or cannot be reached
+   */
+  void sendAudio(
+      long chatId, Path file, String fileName, String title, String performer, String caption);
 
   /** Acknowledges a button tap, optionally showing a short notice to the user. */
   void answerCallback(String callbackQueryId, String text);

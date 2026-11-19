@@ -278,14 +278,25 @@ class BotUpdateHandlerTest {
   }
 
   @Test
-  void audioCallbackIsStillIgnored() {
+  void audioCallbackFromAnAllowedUserGoesToTheDeliveryHandler() {
     Update update = callbackUpdate("cb6", ALLOWED, "private");
     update.getCallbackQuery().setData("audio:job-1");
 
     handler.handle(update);
 
-    verify(deliveries, never()).handle(any());
+    verify(deliveries).handle(update.getCallbackQuery());
     assertThat(gateway.answers).isEmpty();
+  }
+
+  @Test
+  void audioCallbackFromAnUnknownUserNeverReachesTheDeliveryHandler() {
+    Update update = callbackUpdate("cb7", STRANGER, "private");
+    update.getCallbackQuery().setData("audio:job-1");
+
+    handler.handle(update);
+
+    verify(deliveries, never()).handle(any());
+    assertThat(gateway.answers).containsExactly(new RecordingGateway.Answer("cb7", "No access."));
   }
 
   @Test

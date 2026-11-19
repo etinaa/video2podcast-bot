@@ -2,6 +2,7 @@ package com.video2podcast.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.video2podcast.media.AudioPreparer;
 import com.video2podcast.media.DefaultProcessRunner;
 import com.video2podcast.media.FfmpegRunner;
 import com.video2podcast.media.ProcessResult;
@@ -44,6 +45,7 @@ class MediaConfigTest {
           assertThat(context).hasSingleBean(UrlValidator.class);
           assertThat(context).hasSingleBean(YtDlpClient.class);
           assertThat(context).hasSingleBean(FfmpegRunner.class);
+          assertThat(context).hasSingleBean(AudioPreparer.class);
         });
   }
 

@@ -201,4 +201,119 @@ class FfmpegRunnerTest {
     assertKind(
         () -> new FfmpegRunner(runner, JOBS).split(dir.resolve("audio.wav"), dir), Kind.FAILED);
   }
+
+  @Test
+  void encodeM4aCommandAndResult() {
+    Path source = dir.resolve("source.mp4");
+    Path target = dir.resolve("out.m4a");
+    write(target, "stale");
+    FakeProcessRunner runner =
+        new FakeProcessRunner((args, timeout) -> {
+          assertThat(target).doesNotExist();
+          write(target, "aac");
+          return ok();
+        });
+
+    Path result = new FfmpegRunner(runner, JOBS).encodeM4a(source, target, 37, true);
+
+    assertThat(result).isEqualTo(target);
+    assertThat(runner.calls.get(0))
+        .containsExactly(
+            "ffmpeg",
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            source.toString(),
+            "-vn",
+            "-ac",
+            "1",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "37k",
+            "-movflags",
+            "+faststart",
+            target.toString());
+    assertThat(runner.timeouts.get(0)).isEqualTo(JOBS.ffmpegTimeout());
+  }
+
+  @Test
+  void encodeM4aKeepsTheChannelsWhenNotMono() {
+    Path target = dir.resolve("out.m4a");
+    FakeProcessRunner runner =
+        new FakeProcessRunner((args, timeout) -> {
+          write(target, "aac");
+          return ok();
+        });
+
+    new FfmpegRunner(runner, JOBS).encodeM4a(dir.resolve("s.webm"), target, 128, false);
+
+    assertThat(runner.calls.get(0)).doesNotContain("-ac").contains("128k");
+  }
+
+  @Test
+  void encodeM4aFailsOnAnExitCodeAndLeavesNothing() {
+    Path target = dir.resolve("out.m4a");
+    FakeProcessRunner runner =
+        new FakeProcessRunner((args, timeout) -> {
+          write(target, "partial");
+          return new ProcessResult(1, "", "boom");
+        });
+
+    assertKind(
+        () -> new FfmpegRunner(runner, JOBS).encodeM4a(dir.resolve("s.webm"), target, 64, true),
+        Kind.FAILED);
+    assertThat(target).doesNotExist();
+  }
+
+  @Test
+  void encodeM4aFailsWhenNoOrEmptyOutputIsWritten() {
+    Path target = dir.resolve("out.m4a");
+
+    assertKind(
+        () ->
+            new FfmpegRunner(FakeProcessRunner.returning(ok()), JOBS)
+                .encodeM4a(dir.resolve("s.webm"), target, 64, true),
+        Kind.FAILED);
+
+    FakeProcessRunner empty =
+        new FakeProcessRunner((args, timeout) -> {
+          write(target, "");
+          return ok();
+        });
+    assertKind(
+        () -> new FfmpegRunner(empty, JOBS).encodeM4a(dir.resolve("s.webm"), target, 64, true),
+        Kind.FAILED);
+    assertThat(target).doesNotExist();
+  }
+
+  @Test
+  void encodeM4aPassesATimeoutOn() {
+    Path target = dir.resolve("out.m4a");
+    FakeProcessRunner runner =
+        new FakeProcessRunner((args, timeout) -> {
+          write(target, "partial");
+          throw JobFailure.of(Kind.TIMEOUT);
+        });
+
+    assertKind(
+        () -> new FfmpegRunner(runner, JOBS).encodeM4a(dir.resolve("s.webm"), target, 64, true),
+        Kind.TIMEOUT);
+    assertThat(target).doesNotExist();
+  }
+
+  @Test
+  void encodeM4aFailsWhenTheTargetCannotBeReplaced() throws IOException {
+    Path target = dir.resolve("out.m4a");
+    Files.createDirectories(target.resolve("inner"));
+
+    assertKind(
+        () ->
+            new FfmpegRunner(FakeProcessRunner.returning(ok()), JOBS)
+                .encodeM4a(dir.resolve("s.webm"), target, 64, true),
+        Kind.FAILED);
+  }
 }

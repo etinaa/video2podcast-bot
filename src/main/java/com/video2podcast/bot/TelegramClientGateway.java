@@ -80,13 +80,16 @@ public class TelegramClientGateway implements TelegramGateway {
   }
 
   @Override
-  public void sendAudio(long chatId, Path file, String title, String performer) {
+  public void sendAudio(
+      long chatId, Path file, String fileName, String title, String performer, String caption) {
     SendAudio request =
         SendAudio.builder()
             .chatId(chatId)
-            .audio(new InputFile(file.toFile()))
+            .audio(new InputFile(file.toFile(), fileName))
             .title(title)
             .performer(performer)
+            .caption(caption)
+            .parseMode(HTML)
             .build();
     call(() -> client.execute(request));
   }

@@ -6,6 +6,7 @@ import com.video2podcast.job.DeliveryService;
 import com.video2podcast.job.FileKind;
 import com.video2podcast.job.FileState;
 import com.video2podcast.job.JobFile;
+import com.video2podcast.job.JobQueue;
 import com.video2podcast.job.JobRecord;
 import com.video2podcast.job.JobStore;
 import com.video2podcast.job.JobStoreException;
@@ -42,7 +43,12 @@ class DeliveryCallbackHandlerTest {
   @BeforeEach
   void setUp() throws IOException {
     store = new JobStore(dir.resolve("work"), clock);
-    handler = new DeliveryCallbackHandler(gateway, new DeliveryService(store, clock));
+    handler =
+        new DeliveryCallbackHandler(
+            gateway,
+            new DeliveryService(store, clock),
+            StubAudioPreparer.unchanged(),
+            new JobQueue());
     create(SUMMARY);
   }
 
@@ -272,7 +278,8 @@ class DeliveryCallbackHandlerTest {
           }
         };
 
-    new DeliveryCallbackHandler(gateway, broken).handle(tap(OWNER, ID));
+    new DeliveryCallbackHandler(gateway, broken, StubAudioPreparer.unchanged(), new JobQueue())
+        .handle(tap(OWNER, ID));
 
     assertThat(answerTexts()).containsExactly("Something went wrong, please try again.");
     assertThat(gateway.documents).isEmpty();
@@ -288,7 +295,8 @@ class DeliveryCallbackHandlerTest {
           }
         };
 
-    new DeliveryCallbackHandler(gateway, failing).handle(tap(OWNER, ID));
+    new DeliveryCallbackHandler(gateway, failing, StubAudioPreparer.unchanged(), new JobQueue())
+        .handle(tap(OWNER, ID));
 
     assertThat(gateway.documents).hasSize(1);
     assertThat(transcriptState()).isEqualTo(FileState.SENDING);
@@ -307,7 +315,8 @@ class DeliveryCallbackHandlerTest {
           }
         };
 
-    new DeliveryCallbackHandler(gateway, failing).handle(tap(OWNER, ID));
+    new DeliveryCallbackHandler(gateway, failing, StubAudioPreparer.unchanged(), new JobQueue())
+        .handle(tap(OWNER, ID));
 
     assertThat(gateway.messages).hasSize(1);
   }

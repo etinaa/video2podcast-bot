@@ -89,7 +89,8 @@ public class BotUpdateHandler {
         && callback.getData().startsWith(Keyboards.ACCESS_PREFIX)) {
       admin.handleCallback(callback);
     } else if (callback.getData() != null
-        && callback.getData().startsWith(Keyboards.TRANSCRIPT_PREFIX)) {
+        && (callback.getData().startsWith(Keyboards.TRANSCRIPT_PREFIX)
+            || callback.getData().startsWith(Keyboards.AUDIO_PREFIX))) {
       delivery.handle(callback);
     }
   }

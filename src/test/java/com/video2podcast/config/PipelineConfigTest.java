@@ -11,6 +11,7 @@ import com.video2podcast.job.JobQueue;
 import com.video2podcast.job.JobStore;
 import com.video2podcast.job.PipelineService;
 import com.video2podcast.job.SummaryPublisher;
+import com.video2podcast.media.AudioPreparer;
 import com.video2podcast.media.FfmpegRunner;
 import com.video2podcast.media.UrlValidator;
 import com.video2podcast.media.YtDlpClient;
@@ -46,6 +47,7 @@ class PipelineConfigTest {
         .withBean(TelegramGateway.class, () -> mock(TelegramGateway.class))
         .withBean(YtDlpClient.class, () -> mock(YtDlpClient.class))
         .withBean(FfmpegRunner.class, () -> mock(FfmpegRunner.class))
+        .withBean(AudioPreparer.class, () -> mock(AudioPreparer.class))
         .withBean(TranscriptionClient.class, () -> mock(TranscriptionClient.class))
         .withBean(SummaryService.class, () -> mock(SummaryService.class))
         .withBean(JobStore.class, () -> mock(JobStore.class))

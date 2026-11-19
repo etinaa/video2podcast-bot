@@ -186,11 +186,13 @@ class TelegramClientGatewayTest {
             .willReturn(
                 aResponse().withBody(MESSAGE_OK).withHeader("Content-Type", "application/json")));
 
-    gateway.sendAudio(5L, file, "Episode", "Channel");
+    gateway.sendAudio(5L, file, "Episode.m4a", "Episode", "Channel", "Converted &amp; done");
 
     telegram.verify(
         postRequestedFor(urlPathEqualTo(path("sendAudio")))
-            .withRequestBody(containing("filename=\"audio.m4a\""))
+            .withRequestBody(containing("filename=\"Episode.m4a\""))
+            .withRequestBody(containing("Converted &amp; done"))
+            .withRequestBody(containing("HTML"))
             .withRequestBody(containing("Episode"))
             .withRequestBody(containing("Channel")));
   }

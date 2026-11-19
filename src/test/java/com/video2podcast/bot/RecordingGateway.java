@@ -1,25 +1,27 @@
 package com.video2podcast.bot;
 
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 
-/** Test double that records outgoing messages. */
+/**
+ * Test double that records outgoing messages. The records are safe to fill from several threads.
+ */
 class RecordingGateway implements TelegramGateway {
 
   record Sent(long chatId, String html, List<InlineButton> buttons) {}
 
   record Answer(String callbackId, String text) {}
 
-  final List<Sent> messages = new ArrayList<>();
+  final List<Sent> messages = new CopyOnWriteArrayList<>();
 
   record Edit(long chatId, int messageId, String html, List<InlineButton> buttons) {}
 
-  final List<Answer> answers = new ArrayList<>();
-  final List<Edit> edits = new ArrayList<>();
+  final List<Answer> answers = new CopyOnWriteArrayList<>();
+  final List<Edit> edits = new CopyOnWriteArrayList<>();
 
   /** Chats for which sending fails, to simulate a user who blocked the bot. */
-  final java.util.Set<Long> failingChats = new java.util.HashSet<>();
+  final java.util.Set<Long> failingChats = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
   boolean failEdits;
 
@@ -44,8 +46,16 @@ class RecordingGateway implements TelegramGateway {
 
   record Document(long chatId, Path file, String fileName, String caption) {}
 
-  final List<Buttons> buttonEdits = new ArrayList<>();
-  final List<Document> documents = new ArrayList<>();
+  final List<Buttons> buttonEdits = new CopyOnWriteArrayList<>();
+  final List<Document> documents = new CopyOnWriteArrayList<>();
+
+  record Audio(
+      long chatId, Path file, String fileName, String title, String performer, String caption) {}
+
+  final List<Audio> audios = new CopyOnWriteArrayList<>();
+
+  /** Fails the audio sends, to simulate a Telegram error. */
+  boolean failAudio;
 
   /** Fails the next document sends, to simulate a Telegram error. */
   boolean failDocuments;
@@ -71,8 +81,12 @@ class RecordingGateway implements TelegramGateway {
   }
 
   @Override
-  public void sendAudio(long chatId, Path file, String title, String performer) {
-    throw new UnsupportedOperationException();
+  public void sendAudio(
+      long chatId, Path file, String fileName, String title, String performer, String caption) {
+    if (failAudio) {
+      throw new TelegramGatewayException("cannot send audio", null);
+    }
+    audios.add(new Audio(chatId, file, fileName, title, performer, caption));
   }
 
   @Override

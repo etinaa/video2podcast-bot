@@ -56,4 +56,20 @@ class FileNamesTest {
     assertThat(FileNames.transcriptName("A".repeat(97) + emoji + "B"))
         .isEqualTo("A".repeat(97) + emoji + "B.txt");
   }
+
+  @Test
+  void audioNamesUseTheExtensionAndTheSameRules() {
+    assertThat(FileNames.audioName("Budget meeting", "m4a")).isEqualTo("Budget meeting.m4a");
+    assertThat(FileNames.audioName("R&D <notes>", "mp3")).isEqualTo("R&D _notes_.mp3");
+    assertThat(FileNames.audioName("   ", "m4a")).isEqualTo("audio.m4a");
+    assertThat(FileNames.audioName(null, "m4a")).isEqualTo("audio.m4a");
+  }
+
+  @Test
+  void limitCutsAtTheMaximumWithoutSplittingAPair() {
+    assertThat(FileNames.limit("abc", 3)).isEqualTo("abc");
+    assertThat(FileNames.limit("abcd", 3)).isEqualTo("abc");
+    assertThat(FileNames.limit("ab\uD83D\uDE00", 3)).isEqualTo("ab");
+    assertThat(FileNames.limit("a\uD83D\uDE00", 3)).isEqualTo("a\uD83D\uDE00");
+  }
 }
