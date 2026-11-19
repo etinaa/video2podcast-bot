@@ -124,7 +124,7 @@ Sizes: S = 1-2 files, M = 3-5 files.
   - Depends on: T3, T8
   - Files: `transcript/TranscriptionClient.java`, `transcript/TranscriptMerger.java`, `job/JobFailure.java` (kinds `NO_SPEECH`, `SERVICE_UNREACHABLE`), `config/AppProperties.java`, `application.yml`, `SPEC.md`, tests
 
-- [ ] **T10: Ollama client and map-reduce summary** (M)
+- [~] **T10: Ollama client and map-reduce summary** (M)
   - Acceptance:
     - The `LlmClient` interface has an Ollama implementation that sets `num_ctx` and the model on every request.
     - `SummaryService` splits the transcript into chunks that fit the context, summarizes each chunk, then summarizes the partial summaries. A short transcript is summarized in a single call.
@@ -132,7 +132,7 @@ Sizes: S = 1-2 files, M = 3-5 files.
     - The output is English bullet points, capped at 1,500 characters. An unreachable Ollama gives a clear failure.
   - Verify: `./mvnw test -Dtest='OllamaClientTest,SummaryServiceTest'` with WireMock (single call, map-reduce call count, chunk size fits `num_ctx`, length cap, unreachable).
   - Depends on: T3
-  - Files: `summary/LlmClient.java`, `summary/OllamaClient.java`, `summary/SummaryService.java`, `summary/Prompts.java`, tests
+  - Files: `summary/LlmClient.java`, `summary/OllamaClient.java`, `summary/SummaryService.java`, `summary/Prompts.java`, `job/JobFailure.java` (kind `SUMMARY_UNREACHABLE`), `config/AppProperties.java`, `application.yml`, `SPEC.md`, tests
 
 - [ ] **T11: Link to summary message with buttons (end-to-end)** (M)
   - Acceptance:

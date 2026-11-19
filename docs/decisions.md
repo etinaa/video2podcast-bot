@@ -105,3 +105,9 @@ chunks again.
 **Why:** JaCoCo (90%) shows which lines run; PIT shows whether a test notices a wrong result. A separate profile keeps the default build fast. `src/it` is left out because it is owned by the Tester, runs the whole application and would make a PIT run very slow.
 
 **Consequences:** unit tests must assert behaviour, not only execute lines. Exclusions of classes from PIT are listed in `pom.xml` with a reason and need the owner's approval.
+
+## D8: Summary client and map-reduce (T10, 2026-11-17)
+
+**Decision:** `SummaryService` talks to a backend-neutral `LlmClient`; `OllamaClient` (JDK `HttpClient`) sends `num_ctx`, `num_predict`, `think:false` and the model on every request. Chunk size comes from one formula (`numCtx - 1024 output reserve - longest prompt - 32 template overhead`, 3 characters per token, deliberately high). Truncation is detected by comparing `prompt_eval_count` (measured: the cached count is a subset of it, so it is not added) with the same estimate: below half of it fails the job. When the partial summaries do not fit one request they are grouped in order and reduced in rounds (at most 8); every intermediate answer is clipped to a character bound so a group always fits. Only the final answer is normalized to `• ` bullets and capped at 1,500 UTF-16 units. There is no retry in T10.
+
+**Consequences:** new settings `OLLAMA_NUM_CTX` (8192) and `OLLAMA_TIMEOUT` (PT10M). `JobFailure.Kind` gains `SUMMARY_UNREACHABLE`; an answer timeout is `TIMEOUT`, everything else `FAILED` with its own summary message. A `numCtx` below about 3,300 is rejected at start. The estimate is a heuristic: if T17 shows real prompts far below the estimate, only the constants change.
