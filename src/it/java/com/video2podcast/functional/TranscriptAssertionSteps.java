@@ -58,12 +58,14 @@ public class TranscriptAssertionSteps {
     for (Call c : w.calls("editMessageReplyMarkup")) {
       assertThat(c.json().path("chat_id").asLong()).isEqualTo(chat);
       assertThat(c.json().path("message_id").asInt()).isEqualTo(message);
-      w.labels(
-          c,
-          "Download audio",
-          c == w.calls("editMessageReplyMarkup").getFirst()
-              ? "Sending transcript…"
-              : "Transcript sent");
+      boolean first = c == w.calls("editMessageReplyMarkup").getFirst();
+      String audioLabel = "Download audio";
+      String transcriptLabel = first ? "Sending transcript…" : "Transcript sent";
+      if (w.audio != null) {
+        audioLabel = first ? "Preparing audio…" : "Audio sent";
+        transcriptLabel = "Download transcript";
+      }
+      w.labels(c, audioLabel, transcriptLabel);
     }
   }
 
@@ -71,7 +73,7 @@ public class TranscriptAssertionSteps {
   public void keepAudio(String label, String data) {
     assertThat(w.calls("editMessageReplyMarkup")).hasSize(2);
     for (Call c : w.calls("editMessageReplyMarkup")) {
-      JsonNode b = w.keyboard(c).path(0).path(0);
+      JsonNode b = w.keyboard(c).path(0).path(w.audio == null ? 0 : 1);
       assertThat(b.path("text").asText()).isEqualTo(label);
       assertThat(b.path("callback_data").asText()).isEqualTo(data);
     }
@@ -216,7 +218,10 @@ public class TranscriptAssertionSteps {
   @Then("the summary keyboard is restored to {string} with {string} unchanged")
   public void restored(String transcript, String audio) {
     assertThat(w.calls("editMessageReplyMarkup")).hasSize(2);
-    w.labels(w.calls("editMessageReplyMarkup").getLast(), audio, transcript);
+    w.labels(
+        w.calls("editMessageReplyMarkup").getLast(),
+        w.audio == null ? audio : transcript,
+        w.audio == null ? transcript : audio);
   }
 
   @Then("the Telegram mock receives a sendMessage to chat {long} with {string}")

@@ -41,7 +41,6 @@ public class PipelineWorld implements AutoCloseable {
   static final ObjectMapper JSON = new ObjectMapper();
   static final String TAGS = "@T8 or @T9 or @T10 or @T11 or @TD2";
   static final Duration WAIT = Duration.ofSeconds(30);
-  static volatile PipelineWorld building;
   final List<Event> events = new CopyOnWriteArrayList<>();
   final List<List<String>> commands = new CopyOnWriteArrayList<>();
   final Map<String, String> properties = new LinkedHashMap<>();
@@ -114,15 +113,20 @@ public class PipelineWorld implements AutoCloseable {
   }
 
   void start() {
+    assertThat(active).as("pipeline scenario is active before starting its application").isTrue();
     if (context != null) return;
     FunctionalTest.applicationSettings(
             root, telegram.baseUrl(), whisper.baseUrl(), ollama.baseUrl())
         .forEach(properties::putIfAbsent);
     properties.put("spring.main.banner-mode", "off");
     properties.put("logging.level.root", "WARN");
-    building = this;
     context =
         new SpringApplicationBuilder(Video2PodcastApplication.class, Fixtures.class)
+            .initializers(c -> {
+              c.getBeanFactory().registerSingleton("pipelineFixtureClock", clock);
+              c.getBeanFactory()
+                  .registerSingleton("pipelineFixtureProcesses", (ProcessRunner) this::run);
+            })
             .run(
                 properties.entrySet().stream()
                     .map(e -> "--" + e.getKey() + "=" + e.getValue())
@@ -132,6 +136,16 @@ public class PipelineWorld implements AutoCloseable {
 
   void allow(long id) {
     context.getBean(TelegramBot.class).consume(Updates.privateMessage(1, "/allow " + id));
+    assertThat(calls("sendMessage"))
+        .as(
+            "allowlist acknowledgement reached Telegram mock %s for user %s",
+            telegram.baseUrl(), id)
+        .anySatisfy(e -> {
+          assertThat(e.json().path("chat_id").asLong()).isEqualTo(1);
+          assertThat(e.text())
+              .isIn("User " + id + " allowed.", "User " + id + " already has access.");
+          assertThat(responseIds).containsKey(e);
+        });
     events.removeIf(e -> e.service.equals("telegram"));
   }
 
@@ -365,16 +379,39 @@ public class PipelineWorld implements AutoCloseable {
             .isGreaterThanOrEqualTo((long) submissions));
   }
 
-  void finishOne() {
+  Event latestTerminal() {
+    List<Event> queued =
+        calls("sendMessage").stream()
+            .filter(e -> e.nanos >= lastUpdateNanos && e.text().startsWith("Queued:"))
+            .toList();
+    if (queued.isEmpty()) return null;
+    Event submission = queued.getLast();
+    Integer messageId = responseIds.get(submission);
+    if (messageId == null) return null;
+    long chat = submission.json().path("chat_id").asLong();
+    return calls("editMessageText").stream()
+        .filter(e ->
+            e.nanos >= submission.nanos
+                && e.json().path("chat_id").asLong() == chat
+                && e.json().path("message_id").asInt() == messageId
+                && Set.of("Done.", "Failed.").contains(e.text()))
+        .reduce((previous, current) -> current)
+        .orElse(null);
+  }
+
+  Event finishOne() {
     until(() ->
-        assertThat(
-                calls("editMessageText").stream()
-                    .anyMatch(e -> e.text().equals("Done.") || e.text().equals("Failed.")))
-            .isTrue());
+        assertThat(latestTerminal())
+            .as("terminal status for the latest submission %s at %s", lastUrl, telegram.baseUrl())
+            .isNotNull());
+    return latestTerminal();
   }
 
   void reply(String text) {
-    until(() -> assertThat(calls("sendMessage").stream().map(Event::text).toList()).contains(text));
+    until(() ->
+        assertThat(calls("sendMessage").stream().map(Event::text).toList())
+            .as("Telegram replies at %s for submission %s", telegram.baseUrl(), lastUrl)
+            .contains(text));
   }
 
   void transcriptionSettled() {
@@ -536,6 +573,7 @@ public class PipelineWorld implements AutoCloseable {
 
   @Override
   public void close() {
+    active = false;
     holds.forEach(h -> h.release.countDown());
     if (context != null) {
       try {
@@ -578,14 +616,18 @@ public class PipelineWorld implements AutoCloseable {
   static class Fixtures {
     @Bean
     @Primary
-    Clock testClock() {
-      return building.clock;
+    Clock testClock(
+        @org.springframework.beans.factory.annotation.Qualifier("pipelineFixtureClock")
+            Clock clock) {
+      return clock;
     }
 
     @Bean
     @Primary
-    ProcessRunner testProcesses() {
-      return building::run;
+    ProcessRunner testProcesses(
+        @org.springframework.beans.factory.annotation.Qualifier("pipelineFixtureProcesses")
+            ProcessRunner runner) {
+      return runner;
     }
   }
 

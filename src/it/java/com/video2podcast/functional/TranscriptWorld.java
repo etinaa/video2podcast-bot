@@ -48,13 +48,14 @@ public class TranscriptWorld implements AutoCloseable {
   WireMockServer telegram, whisper, ollama;
   ConfigurableApplicationContext context;
   Path root, dir, sentinel;
+  AudioSupport audio;
   boolean active, hold, drop, rejectAnswer;
   int rejectUpload, rejectEdit, tapStart;
   long user = 101, admin = 999;
   String originalTitle = "Budget meeting";
   byte[] transcriptBytes;
   ObjectNode initial;
-  Instant uploadSuccess;
+  volatile Instant uploadSuccess;
   String lastCallback;
 
   @Before(value = "@T12", order = 10)
@@ -93,7 +94,16 @@ public class TranscriptWorld implements AutoCloseable {
     Files.write(dir.resolve("transcript.txt"), transcriptBytes);
   }
 
+  @Before(value = "@T13", order = 10)
+  public void beginAudio() throws Exception {
+    begin();
+    audio = new AudioSupport(this);
+  }
+
   void start() {
+    assertThat(active)
+        .as("retained-job scenario is active before starting its application")
+        .isTrue();
     if (context != null) return;
     Map<String, String> props =
         new LinkedHashMap<>(
@@ -105,8 +115,17 @@ public class TranscriptWorld implements AutoCloseable {
     // Initializer registers only boundary fixtures, leaving all delivery wiring real.
     context =
         new SpringApplicationBuilder(Video2PodcastApplication.class, Fixtures.class)
-            .initializers(
-                c -> c.getBeanFactory().registerSingleton("transcriptFixtureClock", clock))
+            .initializers(c -> {
+              c.getBeanFactory().registerSingleton("transcriptFixtureClock", clock);
+              ProcessRunner runner =
+                  audio == null
+                      ? (command, timeout) -> {
+                        throw new AssertionError(
+                            "Transcript tap invoked a media process: " + command);
+                      }
+                      : audio::run;
+              c.getBeanFactory().registerSingleton("retainedFixtureProcesses", runner);
+            })
             .run(
                 props.entrySet().stream()
                     .map(e -> "--" + e.getKey() + "=" + e.getValue())
@@ -184,11 +203,13 @@ public class TranscriptWorld implements AutoCloseable {
           .as("upload reached held HTTP response")
           .isTrue();
     } else task.get(WAIT.toMillis(), TimeUnit.MILLISECONDS);
+    if (audio != null) audio.afterTap(data);
   }
 
   void finishUpload() throws Exception {
     releaseUpload.countDown();
     for (Future<?> task : pending) task.get(WAIT.toMillis(), TimeUnit.MILLISECONDS);
+    if (audio != null) audio.awaitDelivery();
   }
 
   List<Call> calls(String method) {
@@ -196,7 +217,8 @@ public class TranscriptWorld implements AutoCloseable {
   }
 
   List<Call> tapCalls() {
-    return List.copyOf(events.subList(tapStart, events.size()));
+    List<Call> snapshot = List.copyOf(events);
+    return snapshot.subList(tapStart, snapshot.size());
   }
 
   void refusal(String text) {
@@ -257,9 +279,11 @@ public class TranscriptWorld implements AutoCloseable {
     assertThat(r.getPart("caption")).isNull();
   }
 
-  @After(value = "@T12", order = 100)
+  @After(value = "@T12 or @T13", order = 100)
   public void close() {
+    active = false;
     releaseUpload.countDown();
+    if (audio != null) audio.releaseWhisper.countDown();
     updates.shutdown();
     try {
       if (!updates.awaitTermination(20, TimeUnit.SECONDS)) updates.shutdownNow();
@@ -267,7 +291,11 @@ public class TranscriptWorld implements AutoCloseable {
       Thread.currentThread().interrupt();
       updates.shutdownNow();
     }
-    if (context != null) context.close();
+    if (context != null) {
+      context.close();
+      context = null;
+    }
+    if (audio != null) audio.close();
     for (WireMockServer server : Arrays.asList(telegram, whisper, ollama))
       if (server != null) server.stop();
   }
@@ -284,10 +312,10 @@ public class TranscriptWorld implements AutoCloseable {
 
     @Bean
     @Primary
-    ProcessRunner noMediaForTranscript() {
-      return (command, timeout) -> {
-        throw new AssertionError("Transcript tap invoked a media process: " + command);
-      };
+    ProcessRunner retainedProcesses(
+        @org.springframework.beans.factory.annotation.Qualifier("retainedFixtureProcesses")
+            ProcessRunner runner) {
+      return runner;
     }
   }
 
@@ -320,7 +348,7 @@ public class TranscriptWorld implements AutoCloseable {
         persisted = null;
       }
       events.add(new Call(method, request, persisted));
-      if (method.equals("senddocument")) {
+      if (method.equals(audio == null ? "senddocument" : "sendaudio")) {
         int attempt = uploads.incrementAndGet();
         uploadReceived.countDown();
         if (hold)
@@ -334,7 +362,7 @@ public class TranscriptWorld implements AutoCloseable {
         if (drop) return aResponse().withFault(Fault.EMPTY_RESPONSE).build();
         if (attempt == rejectUpload) return rejected();
         // Mark the success boundary with application time, distinct from claim time.
-        clock.now = clock.instant().plusSeconds(1);
+        if (audio == null) clock.now = clock.instant().plusSeconds(1);
         uploadSuccess = clock.instant();
       }
       if (method.equals("answercallbackquery") && rejectAnswer) return rejected();

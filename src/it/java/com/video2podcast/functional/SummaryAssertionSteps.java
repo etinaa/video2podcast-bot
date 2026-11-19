@@ -21,8 +21,15 @@ public class SummaryAssertionSteps {
 
   @Then("the Ollama mock receives exactly {int} POST request(s) to {string}")
   public void ollamaCount(int n, String path) {
-    w.finishOne();
-    assertThat(w.service("ollama")).hasSize(n).allSatisfy(e -> assertThat(e.url()).isEqualTo(path));
+    Event terminal = w.finishOne();
+    assertThat(w.service("ollama"))
+        .as(
+            "Ollama mock %s after latest submission reached %s; Telegram replies: %s",
+            w.ollama.baseUrl(),
+            terminal.text(),
+            w.calls("sendMessage").stream().map(Event::text).toList())
+        .hasSize(n)
+        .allSatisfy(e -> assertThat(e.url()).isEqualTo(path));
   }
 
   @Then(

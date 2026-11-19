@@ -109,11 +109,16 @@ class AccessGateIT extends FunctionalTest {
     receive(Updates.callback(allowed, "cb-allowed", "audio:job1", 5));
 
     assertThat(telegramCalls("answerCallbackQuery"))
-        .singleElement()
-        .satisfies(call -> {
-          assertThat(call.get("callback_query_id").asText()).isEqualTo("cb-stranger");
-          assertThat(call.get("text").asText()).isEqualTo("No access.");
-        });
+        .satisfiesExactly(
+            refusal -> {
+              assertThat(refusal.get("callback_query_id").asText()).isEqualTo("cb-stranger");
+              assertThat(refusal.get("text").asText()).isEqualTo("No access.");
+            },
+            passedGate -> {
+              assertThat(passedGate.get("callback_query_id").asText()).isEqualTo("cb-allowed");
+              assertThat(passedGate.get("text").asText())
+                  .isEqualTo("Expired, please resend the link.");
+            });
     assertThat(telegramCalls("sendMessage")).isEmpty();
   }
 }
