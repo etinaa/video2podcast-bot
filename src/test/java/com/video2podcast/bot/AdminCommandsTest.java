@@ -30,6 +30,7 @@ class AdminCommandsTest {
 
   private final RecordingGateway gateway = new RecordingGateway();
   private final MutableClock clock = new MutableClock(Instant.parse("2026-11-15T10:00:00Z"));
+  private final UrlMessageHandler urls = org.mockito.Mockito.mock(UrlMessageHandler.class);
   private Path file;
   private AccessService access;
   private BotUpdateHandler handler;
@@ -38,7 +39,7 @@ class AdminCommandsTest {
   void setUp() {
     file = dir.resolve("allowed-users.json");
     access = newAccess();
-    handler = new BotUpdateHandler(gateway, access);
+    handler = new BotUpdateHandler(gateway, access, urls);
   }
 
   private AccessService newAccess() {
@@ -201,7 +202,7 @@ class AdminCommandsTest {
     gateway.messages.clear();
 
     AccessService restarted = newAccess();
-    BotUpdateHandler afterRestart = new BotUpdateHandler(gateway, restarted);
+    BotUpdateHandler afterRestart = new BotUpdateHandler(gateway, restarted, urls);
     afterRestart.handle(tap(OWNER, "cb1", "access:approve:60", 2));
 
     assertThat(restarted.isAllowed(BOB)).isTrue();

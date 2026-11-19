@@ -5,6 +5,7 @@ import com.video2podcast.bot.BotUpdateHandler;
 import com.video2podcast.bot.TelegramBot;
 import com.video2podcast.bot.TelegramClientGateway;
 import com.video2podcast.bot.TelegramGateway;
+import com.video2podcast.bot.UrlMessageHandler;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
@@ -33,8 +34,9 @@ public class TelegramConfig {
   }
 
   @Bean
-  BotUpdateHandler botUpdateHandler(TelegramGateway gateway, AccessService access) {
-    return new BotUpdateHandler(gateway, access);
+  BotUpdateHandler botUpdateHandler(
+      TelegramGateway gateway, AccessService access, UrlMessageHandler urls) {
+    return new BotUpdateHandler(gateway, access, urls);
   }
 
   /** At startup, tell the owner about requests that could not be delivered earlier. */

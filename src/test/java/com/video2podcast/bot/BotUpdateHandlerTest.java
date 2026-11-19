@@ -4,6 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.video2podcast.access.AccessService;
@@ -34,6 +36,7 @@ class BotUpdateHandlerTest {
 
   private final RecordingGateway gateway = new RecordingGateway();
   private final MutableClock clock = new MutableClock(Instant.parse("2026-11-15T10:00:00Z"));
+  private final UrlMessageHandler urls = mock(UrlMessageHandler.class);
   private AccessService access;
   private BotUpdateHandler handler;
 
@@ -43,7 +46,7 @@ class BotUpdateHandlerTest {
         new AccessService(
             new AccessStore(dir.resolve("allowed-users.json")), OWNER, Duration.ofHours(24), clock);
     access.allow(ALLOWED, "ann", OWNER);
-    handler = new BotUpdateHandler(gateway, access);
+    handler = new BotUpdateHandler(gateway, access, urls);
   }
 
   @ParameterizedTest
@@ -86,11 +89,34 @@ class BotUpdateHandlerTest {
   }
 
   @ParameterizedTest
-  @ValueSource(strings = {"hello", "/whoamix", "whoami"})
-  void ignoresOtherTextFromAllowedUsers(String text) {
+  @ValueSource(strings = {"/whoamix", "/unknown", "  /unknown arg"})
+  void ignoresUnknownCommandsFromAllowedUsers(String text) {
     handler.handle(update(message("private", 555L, ALLOWED, text)));
 
     assertThat(gateway.messages).isEmpty();
+    verify(urls, never()).handle(any(), any());
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"hello", "whoami", "https://videos.example/v", "  https://x.example  "})
+  void passesOtherTextFromAllowedUsersToTheUrlHandler(String text) {
+    handler.handle(update(message("private", 555L, ALLOWED, text)));
+
+    verify(urls).handle(new Sender(ALLOWED, 555L, null, "Test"), text);
+  }
+
+  @Test
+  void passesTextFromTheOwnerToTheUrlHandler() {
+    handler.handle(update(message("private", 8L, OWNER, "https://videos.example/v")));
+
+    verify(urls).handle(any(), eq("https://videos.example/v"));
+  }
+
+  @Test
+  void neverPassesTextFromUnknownUsersToTheUrlHandler() {
+    handler.handle(update(message("private", 9L, STRANGER, "https://videos.example/v")));
+
+    verify(urls, never()).handle(any(), any());
   }
 
   @Test
@@ -183,19 +209,12 @@ class BotUpdateHandlerTest {
     AccessService racing = mock(AccessService.class);
     when(racing.requestAccess(eq(STRANGER), any(), any()))
         .thenReturn(new AccessService.RequestOutcome.AlreadyAllowed());
-    new BotUpdateHandler(gateway, racing)
+    new BotUpdateHandler(gateway, racing, urls)
         .handle(update(message("private", 9L, STRANGER, "/start")));
 
     assertThat(gateway.messages)
         .extracting(RecordingGateway.Sent::html)
         .containsExactly(BotUpdateHandler.HELP);
-  }
-
-  @Test
-  void allowedUsersGetNoReplyToOtherText() {
-    handler.handle(update(message("private", 7L, ALLOWED, "hello")));
-
-    assertThat(gateway.messages).isEmpty();
   }
 
   @Test

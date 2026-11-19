@@ -8,6 +8,7 @@ import com.video2podcast.access.AccessService;
 import com.video2podcast.bot.BotUpdateHandler;
 import com.video2podcast.bot.TelegramBot;
 import com.video2podcast.bot.TelegramGateway;
+import com.video2podcast.bot.UrlMessageHandler;
 import java.nio.file.Path;
 import java.time.Duration;
 import org.junit.jupiter.api.Test;
@@ -36,6 +37,7 @@ class TelegramConfigTest {
         .withUserConfiguration(TelegramConfig.class)
         .withBean(AppProperties.class, () -> props(token, admin, enabled))
         .withBean(AccessService.class, () -> mock(AccessService.class))
+        .withBean(UrlMessageHandler.class, () -> mock(UrlMessageHandler.class))
         .withPropertyValues("app.telegram.enabled=" + enabled);
   }
 

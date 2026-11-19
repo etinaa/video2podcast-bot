@@ -26,12 +26,14 @@ public class BotUpdateHandler {
 
   private final TelegramGateway gateway;
   private final AccessService access;
+  private final UrlMessageHandler urls;
   private final AccessAdmin admin;
   private final UnknownUserHandler unknownUsers;
 
-  public BotUpdateHandler(TelegramGateway gateway, AccessService access) {
+  public BotUpdateHandler(TelegramGateway gateway, AccessService access, UrlMessageHandler urls) {
     this.gateway = gateway;
     this.access = access;
+    this.urls = urls;
     this.admin = new AccessAdmin(gateway, access);
     this.unknownUsers = new UnknownUserHandler(gateway, access, admin);
   }
@@ -65,6 +67,8 @@ public class BotUpdateHandler {
       gateway.sendMessage(sender.chatId(), HELP, List.of());
     } else if (ADMIN_COMMANDS.contains(command)) {
       admin.handleCommand(sender, command, args);
+    } else if (!message.getText().strip().startsWith("/")) {
+      urls.handle(sender, message.getText());
     }
   }
 

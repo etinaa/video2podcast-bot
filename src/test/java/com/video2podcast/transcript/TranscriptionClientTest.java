@@ -87,6 +87,24 @@ class TranscriptionClientTest {
   }
 
   @Test
+  void aConnectionErrorThenSuccessKeepsEarlierChunksAndOrderWithOneProgressEventPerChunk()
+      throws Exception {
+    when(whisper.transcribe(c0)).thenReturn("A");
+    when(whisper.transcribe(c1)).thenThrow(connection()).thenReturn("B");
+    when(whisper.transcribe(c2)).thenReturn("C");
+
+    run(c0, c1, c2);
+
+    assertThat(Files.readString(jobDir.resolve("transcript.txt"))).isEqualTo("A B C\n");
+    assertThat(events).containsExactly("1/3", "2/3", "3/3");
+    InOrder order = Mockito.inOrder(whisper);
+    order.verify(whisper).transcribe(c0);
+    order.verify(whisper, times(2)).transcribe(c1);
+    order.verify(whisper).transcribe(c2);
+    Mockito.verifyNoMoreInteractions(whisper);
+  }
+
+  @Test
   void emptyAnswerOnRetryIsValid() throws Exception {
     when(whisper.transcribe(c0)).thenThrow(other()).thenReturn(" ");
     when(whisper.transcribe(c1)).thenReturn("Speech");

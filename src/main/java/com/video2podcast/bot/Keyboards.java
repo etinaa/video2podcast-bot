@@ -9,7 +9,17 @@ final class Keyboards {
   static final String APPROVE = "approve";
   static final String DENY = "deny";
 
+  static final String AUDIO_PREFIX = "audio:";
+  static final String TRANSCRIPT_PREFIX = "transcript:";
+
   private Keyboards() {}
+
+  /** One row, in this order. */
+  static List<InlineButton> delivery(String jobId) {
+    return List.of(
+        new InlineButton("Download audio", AUDIO_PREFIX + jobId),
+        new InlineButton("Download transcript", TRANSCRIPT_PREFIX + jobId));
+  }
 
   static List<InlineButton> accessRequest(long userId) {
     return List.of(
