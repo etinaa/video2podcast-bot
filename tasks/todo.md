@@ -161,7 +161,7 @@ Sizes: S = 1-2 files, M = 3-5 files.
   - Depends on: T11
   - Files: `bot/DeliveryCallbackHandler.java`, `job/DeliveryService.java`, `bot/Keyboards.java`, test
 
-- [~] **T13: Audio preparation and Download audio button** (M)
+- [x] **T13: Audio preparation and Download audio button** (M)
   - Acceptance:
     - `AudioPreparer` follows the compression rule: a file of 50 MB or less in MP3 or M4A is returned unchanged. A smaller file in another format is converted to M4A at 128 kbps. A file over 50 MB is re-encoded to mono AAC at `48 MiB × 8 / duration`, verified under 50 MB, with one retry at a lower bitrate.
     - Tapping **Download audio** goes through the job queue, shows "Preparing audio…", sends with `sendAudio` (title and performer set), and notes whether and how it was compressed. The same one-send, owner-only, and expired rules as T12 apply.
@@ -291,6 +291,7 @@ Work that is not scheduled in a phase. Technical debt carries the `[debt]` mark.
   - Files: `media/YtDlpClient.java`, `YtDlpClientTest.java`, `SPEC.md`
 
 - [ ] **TD6 [debt]: Flaky T9 scenario "Broken successful responses are retried rather than called silence"** (S)
+  - Update from T13 (2026-11-19): two more single-scenario failures (a T8 scenario and a T10 scenario) in `clean verify` runs started from the orchestrator's sandboxed shell; the T10 log shows `Ollama answered 403 ... "reason":"not_allowed_local","source":"baseline_policy"`: the sandbox network policy sometimes denies calls to localhost. Outside the sandbox the same suite was green. The T9 failure below may have the same cause (check its log for `not_allowed_local`). The owner decided that full gates run outside the sandbox with approval. Logs: `tasks/TD6/failed-run*.log`. The Tester already hardened the fixtures in T13 (`tasks/T13/comms/tester-flaky.md`), so TD6 may shrink to checking the T9 log and the remaining weak waits (and the one-off `OllamaClientTest.anAnswerStoppedAtTheLengthLimitIsAccepted` failure, `header parser received no bytes`).
   - Why: one of five full `./mvnw clean verify` runs failed at the step `"chunk-000.wav" is sent exactly twice` (`T9-transcription.feature:122`, example 1.1 `{broken`): the Whisper mock journal had 0 requests after 30 seconds. The rerun was green. A flaky test weakens trust in `verify`.
   - Acceptance:
     - The cause is found (in the test or in the code) and written in `tasks/TD6/evidence.md`: the log of the failed run, the code version, the explanation.

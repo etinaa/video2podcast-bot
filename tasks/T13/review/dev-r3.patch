@@ -1,0 +1,1884 @@
+diff --git a/src/main/java/com/video2podcast/bot/BotUpdateHandler.java b/src/main/java/com/video2podcast/bot/BotUpdateHandler.java
+index 877299c..89d420d 100644
+--- a/src/main/java/com/video2podcast/bot/BotUpdateHandler.java
++++ b/src/main/java/com/video2podcast/bot/BotUpdateHandler.java
+@@ -89,7 +89,8 @@ public class BotUpdateHandler {
+         && callback.getData().startsWith(Keyboards.ACCESS_PREFIX)) {
+       admin.handleCallback(callback);
+     } else if (callback.getData() != null
+-        && callback.getData().startsWith(Keyboards.TRANSCRIPT_PREFIX)) {
++        && (callback.getData().startsWith(Keyboards.TRANSCRIPT_PREFIX)
++            || callback.getData().startsWith(Keyboards.AUDIO_PREFIX))) {
+       delivery.handle(callback);
+     }
+   }
+diff --git a/src/main/java/com/video2podcast/bot/DeliveryCallbackHandler.java b/src/main/java/com/video2podcast/bot/DeliveryCallbackHandler.java
+index a9a126a..648b1ec 100644
+--- a/src/main/java/com/video2podcast/bot/DeliveryCallbackHandler.java
++++ b/src/main/java/com/video2podcast/bot/DeliveryCallbackHandler.java
+@@ -5,10 +5,18 @@ import com.video2podcast.job.DeliveryService.Claim;
+ import com.video2podcast.job.FileKind;
+ import com.video2podcast.job.FileState;
+ import com.video2podcast.job.JobFile;
++import com.video2podcast.job.JobQueue;
+ import com.video2podcast.job.JobRecord;
+ import com.video2podcast.job.JobStoreException;
++import com.video2podcast.media.AudioPreparer;
++import com.video2podcast.media.PreparedAudio;
++import java.io.IOException;
++import java.nio.file.Files;
++import java.nio.file.Path;
+ import java.util.List;
++import java.util.Locale;
+ import java.util.Optional;
++import java.util.concurrent.RejectedExecutionException;
+ import org.slf4j.Logger;
+ import org.slf4j.LoggerFactory;
+ import org.telegram.telegrambots.meta.api.objects.CallbackQuery;
+@@ -19,33 +27,47 @@ public class DeliveryCallbackHandler {
+   private static final Logger LOG = LoggerFactory.getLogger(DeliveryCallbackHandler.class);
+ 
+   static final String SENDING = "Sending transcript…";
++  static final String PREPARING = "Preparing audio…";
+   static final String EXPIRED = "Expired, please resend the link.";
+   static final String NOT_OWNER = "This button is not for you.";
+   static final String ALREADY_SENT = "Already sent.";
+   static final String IN_PROGRESS = "Already being sent.";
+   static final String ERROR = "Something went wrong, please try again.";
+   static final String SEND_FAILED = "Could not send the transcript. Tap the button to try again.";
++  static final String AUDIO_SEND_FAILED = "Could not send the audio. Tap the button to try again.";
++  static final String PERFORMER = "Video2Podcast";
++  private static final int MAX_TITLE = 256;
+ 
+   private final TelegramGateway gateway;
+   private final DeliveryService delivery;
++  private final AudioPreparer audio;
++  private final JobQueue queue;
+ 
+-  public DeliveryCallbackHandler(TelegramGateway gateway, DeliveryService delivery) {
++  public DeliveryCallbackHandler(
++      TelegramGateway gateway, DeliveryService delivery, AudioPreparer audio, JobQueue queue) {
+     this.gateway = gateway;
+     this.delivery = delivery;
++    this.audio = audio;
++    this.queue = queue;
+   }
+ 
+   /**
+    * Called only by {@link BotUpdateHandler} for data that starts with {@link
+-   * Keyboards#TRANSCRIPT_PREFIX}. Answers the tap exactly once and never throws for a failed
+-   * Telegram call or a job store error.
++   * Keyboards#TRANSCRIPT_PREFIX} or {@link Keyboards#AUDIO_PREFIX}. Answers the tap exactly once
++   * and never throws for a failed Telegram call or a job store error.
+    */
+   void handle(CallbackQuery callback) {
+-    String jobId = callback.getData().substring(Keyboards.TRANSCRIPT_PREFIX.length());
++    boolean isAudio = callback.getData().startsWith(Keyboards.AUDIO_PREFIX);
++    FileKind kind = isAudio ? FileKind.AUDIO : FileKind.TRANSCRIPT;
++    String jobId =
++        callback
++            .getData()
++            .substring((isAudio ? Keyboards.AUDIO_PREFIX : Keyboards.TRANSCRIPT_PREFIX).length());
+     Claim claim;
+     try {
+-      claim = delivery.claim(jobId, callback.getFrom().getId(), FileKind.TRANSCRIPT);
++      claim = delivery.claim(jobId, callback.getFrom().getId(), kind);
+     } catch (JobStoreException e) {
+-      LOG.error("Could not claim the transcript of job {}", jobId, e);
++      LOG.error("Could not claim the {} of job {}", kind, jobId, e);
+       answer(callback, ERROR);
+       return;
+     }
+@@ -54,7 +76,102 @@ public class DeliveryCallbackHandler {
+       case NOT_OWNER -> answer(callback, NOT_OWNER);
+       case ALREADY_SENT -> answer(callback, ALREADY_SENT);
+       case IN_PROGRESS -> answer(callback, IN_PROGRESS);
+-      case GRANTED -> send(callback, jobId, claim);
++      case GRANTED -> {
++        if (isAudio) {
++          startAudio(callback, jobId, claim);
++        } else {
++          send(callback, jobId, claim);
++        }
++      }
++    }
++  }
++
++  private void startAudio(CallbackQuery callback, String jobId, Claim claim) {
++    JobRecord job = claim.job();
++    answer(callback, PREPARING);
++    editButtons(job, jobId, FileState.SENDING, transcriptState(job));
++    try {
++      queue.submit(() -> deliverAudio(jobId, claim));
++    } catch (RejectedExecutionException e) {
++      LOG.error("Could not queue the audio of job {}", jobId, e);
++      failAudio(job, jobId);
++    }
++  }
++
++  /** Runs in the queue worker. Never throws. */
++  private void deliverAudio(String jobId, Claim claim) {
++    JobRecord job = claim.job();
++    PreparedAudio prepared = null;
++    try {
++      prepared = audio.prepare(claim.file(), job.durationSeconds());
++      String title = FileNames.limit(job.title() == null ? "" : job.title(), MAX_TITLE);
++      gateway.sendAudio(
++          job.chatId(),
++          prepared.file(),
++          FileNames.audioName(title, extensionOf(prepared.file())),
++          title,
++          PERFORMER,
++          caption(prepared));
++    } catch (RuntimeException e) {
++      LOG.error("Could not send the audio of job {}", jobId, e);
++      failAudio(job, jobId);
++      return;
++    } finally {
++      if (prepared != null && !prepared.file().equals(claim.file())) {
++        deleteQuietly(prepared.file());
++      }
++    }
++    Optional<JobRecord> done;
++    try {
++      done = delivery.complete(jobId, FileKind.AUDIO);
++    } catch (RuntimeException e) {
++      LOG.error("The audio of job {} was sent but could not be marked as sent", jobId, e);
++      return;
++    }
++    editButtons(job, jobId, FileState.SENT, transcriptState(done.orElse(job)));
++  }
++
++  private void failAudio(JobRecord job, String jobId) {
++    FileState transcript = transcriptState(job);
++    try {
++      Optional<JobRecord> released = delivery.release(jobId, FileKind.AUDIO);
++      transcript = transcriptState(released.orElse(job));
++    } catch (RuntimeException e) {
++      LOG.error("Could not release the audio of job {}", jobId, e);
++    }
++    editButtons(job, jobId, FileState.AVAILABLE, transcript);
++    try {
++      gateway.sendMessage(job.chatId(), AUDIO_SEND_FAILED, List.of());
++    } catch (RuntimeException e) {
++      LOG.warn("Could not tell the user that the audio of job {} failed", jobId, e);
++    }
++  }
++
++  private static String caption(PreparedAudio prepared) {
++    return switch (prepared.mode()) {
++      case UNCHANGED -> "Original audio, not compressed.";
++      case CONVERTED -> "Converted to M4A, 128 kbps.";
++      case COMPRESSED ->
++          "Compressed to mono AAC, " + prepared.kbps() + " kbps, to fit Telegram's 50 MB limit.";
++    };
++  }
++
++  /** The lower-case extension of the file, or "m4a" when it has no file name or no extension. */
++  static String extensionOf(Path file) {
++    Path fileName = file.getFileName();
++    if (fileName == null) {
++      return "m4a";
++    }
++    String name = fileName.toString();
++    int dot = name.lastIndexOf('.');
++    return dot < 0 ? "m4a" : name.substring(dot + 1).toLowerCase(Locale.ROOT);
++  }
++
++  private static void deleteQuietly(Path file) {
++    try {
++      Files.deleteIfExists(file);
++    } catch (IOException e) {
++      LOG.warn("Could not delete {}", file, e);
+     }
+   }
+ 
+@@ -114,6 +231,11 @@ public class DeliveryCallbackHandler {
+     }
+   }
+ 
++  private static FileState transcriptState(JobRecord job) {
++    JobFile transcript = job.files().get(FileKind.TRANSCRIPT);
++    return transcript == null ? FileState.AVAILABLE : transcript.state();
++  }
++
+   private static FileState audioState(JobRecord job) {
+     JobFile audio = job.files().get(FileKind.AUDIO);
+     return audio == null ? FileState.AVAILABLE : audio.state();
+diff --git a/src/main/java/com/video2podcast/bot/FileNames.java b/src/main/java/com/video2podcast/bot/FileNames.java
+index 8036f7f..2d0b2b4 100644
+--- a/src/main/java/com/video2podcast/bot/FileNames.java
++++ b/src/main/java/com/video2podcast/bot/FileNames.java
+@@ -5,27 +5,38 @@ final class FileNames {
+ 
+   private static final int MAX_STEM = 100;
+   private static final String FORBIDDEN = "\\/:*?\"<>|";
+-  private static final String FALLBACK = "transcript";
++  private static final String TRANSCRIPT_FALLBACK = "transcript";
++  private static final String AUDIO_FALLBACK = "audio";
+ 
+   private FileNames() {}
+ 
+   /** The upload name for a transcript: the title made safe for a file name, plus ".txt". */
+   static String transcriptName(String title) {
++    return name(title, TRANSCRIPT_FALLBACK, "txt");
++  }
++
++  /** The upload name for audio: the title made safe for a file name, a dot and the extension. */
++  static String audioName(String title, String extension) {
++    return name(title, AUDIO_FALLBACK, extension);
++  }
++
++  private static String name(String title, String fallback, String extension) {
+     StringBuilder safe = new StringBuilder();
+     String text = title == null ? "" : title;
+     for (int i = 0; i < text.length(); i++) {
+       char c = text.charAt(i);
+       safe.append(FORBIDDEN.indexOf(c) >= 0 || Character.isISOControl(c) ? '_' : c);
+     }
+-    String stem = clip(safe.toString().strip());
+-    return (stem.isEmpty() ? FALLBACK : stem) + ".txt";
++    String stem = limit(safe.toString().strip(), MAX_STEM);
++    return (stem.isEmpty() ? fallback : stem) + "." + extension;
+   }
+ 
+-  private static String clip(String text) {
+-    if (text.length() <= MAX_STEM) {
++  /** The text cut to at most {@code max} UTF-16 units, never inside a surrogate pair. */
++  static String limit(String text, int max) {
++    if (text.length() <= max) {
+       return text;
+     }
+-    int end = MAX_STEM;
++    int end = max;
+     if (Character.isHighSurrogate(text.charAt(end - 1))) {
+       end--;
+     }
+diff --git a/src/main/java/com/video2podcast/bot/TelegramClientGateway.java b/src/main/java/com/video2podcast/bot/TelegramClientGateway.java
+index f4caffd..6829571 100644
+--- a/src/main/java/com/video2podcast/bot/TelegramClientGateway.java
++++ b/src/main/java/com/video2podcast/bot/TelegramClientGateway.java
+@@ -80,13 +80,16 @@ public class TelegramClientGateway implements TelegramGateway {
+   }
+ 
+   @Override
+-  public void sendAudio(long chatId, Path file, String title, String performer) {
++  public void sendAudio(
++      long chatId, Path file, String fileName, String title, String performer, String caption) {
+     SendAudio request =
+         SendAudio.builder()
+             .chatId(chatId)
+-            .audio(new InputFile(file.toFile()))
++            .audio(new InputFile(file.toFile(), fileName))
+             .title(title)
+             .performer(performer)
++            .caption(caption)
++            .parseMode(HTML)
+             .build();
+     call(() -> client.execute(request));
+   }
+diff --git a/src/main/java/com/video2podcast/bot/TelegramGateway.java b/src/main/java/com/video2podcast/bot/TelegramGateway.java
+index 22b690c..148b98d 100644
+--- a/src/main/java/com/video2podcast/bot/TelegramGateway.java
++++ b/src/main/java/com/video2podcast/bot/TelegramGateway.java
+@@ -22,8 +22,15 @@ public interface TelegramGateway {
+ 
+   void sendDocument(long chatId, Path file, String fileName, String caption);
+ 
+-  /** Sends an audio file that plays in Telegram's player. */
+-  void sendAudio(long chatId, Path file, String title, String performer);
++  /**
++   * Sends an audio file that plays in Telegram's player.
++   *
++   * @param fileName shown to the user, e.g. "Budget meeting.m4a"
++   * @param caption HTML, may be null
++   * @throws TelegramGatewayException if Telegram refuses or cannot be reached
++   */
++  void sendAudio(
++      long chatId, Path file, String fileName, String title, String performer, String caption);
+ 
+   /** Acknowledges a button tap, optionally showing a short notice to the user. */
+   void answerCallback(String callbackQueryId, String text);
+diff --git a/src/main/java/com/video2podcast/config/MediaConfig.java b/src/main/java/com/video2podcast/config/MediaConfig.java
+index 7fc9c6a..a92c534 100644
+--- a/src/main/java/com/video2podcast/config/MediaConfig.java
++++ b/src/main/java/com/video2podcast/config/MediaConfig.java
+@@ -1,5 +1,6 @@
+ package com.video2podcast.config;
+ 
++import com.video2podcast.media.AudioPreparer;
+ import com.video2podcast.media.DefaultProcessRunner;
+ import com.video2podcast.media.FfmpegRunner;
+ import com.video2podcast.media.ProcessRunner;
+@@ -32,4 +33,9 @@ public class MediaConfig {
+   FfmpegRunner ffmpegRunner(ProcessRunner runner, AppProperties props) {
+     return new FfmpegRunner(runner, props.jobs());
+   }
++
++  @Bean
++  AudioPreparer audioPreparer(FfmpegRunner ffmpeg) {
++    return new AudioPreparer(ffmpeg);
++  }
+ }
+diff --git a/src/main/java/com/video2podcast/config/PipelineConfig.java b/src/main/java/com/video2podcast/config/PipelineConfig.java
+index 16f4d12..8f660d5 100644
+--- a/src/main/java/com/video2podcast/config/PipelineConfig.java
++++ b/src/main/java/com/video2podcast/config/PipelineConfig.java
+@@ -9,6 +9,7 @@ import com.video2podcast.job.JobQueue;
+ import com.video2podcast.job.JobStore;
+ import com.video2podcast.job.PipelineService;
+ import com.video2podcast.job.SummaryPublisher;
++import com.video2podcast.media.AudioPreparer;
+ import com.video2podcast.media.FfmpegRunner;
+ import com.video2podcast.media.UrlValidator;
+ import com.video2podcast.media.YtDlpClient;
+@@ -64,7 +65,7 @@ public class PipelineConfig {
+ 
+   @Bean
+   DeliveryCallbackHandler deliveryCallbackHandler(
+-      TelegramGateway gateway, DeliveryService delivery) {
+-    return new DeliveryCallbackHandler(gateway, delivery);
++      TelegramGateway gateway, DeliveryService delivery, AudioPreparer audio, JobQueue queue) {
++    return new DeliveryCallbackHandler(gateway, delivery, audio, queue);
+   }
+ }
+diff --git a/src/main/java/com/video2podcast/media/AudioPreparer.java b/src/main/java/com/video2podcast/media/AudioPreparer.java
+new file mode 100644
+index 0000000..ccfd87a
+--- /dev/null
++++ b/src/main/java/com/video2podcast/media/AudioPreparer.java
+@@ -0,0 +1,112 @@
++package com.video2podcast.media;
++
++import com.video2podcast.job.JobFailure;
++import java.io.IOException;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.util.Locale;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
++/**
++ * Makes the audio of a job fit Telegram's upload limit. A small MP3 or M4A is sent as it is, any
++ * other small source becomes M4A, and a big one is compressed to mono AAC. Knows nothing about
++ * Telegram or job state.
++ */
++public class AudioPreparer {
++
++  private static final Logger LOG = LoggerFactory.getLogger(AudioPreparer.class);
++
++  static final long LIMIT_BYTES = 50L * 1024 * 1024;
++  static final long TARGET_BYTES = 48L * 1024 * 1024;
++  static final int CONVERT_KBPS = 128;
++  static final int MIN_KBPS = 8;
++  static final int MAX_KBPS = 128;
++  static final String OUTPUT_NAME = "out.m4a";
++
++  private final FfmpegRunner ffmpeg;
++
++  public AudioPreparer(FfmpegRunner ffmpeg) {
++    this.ffmpeg = ffmpeg;
++  }
++
++  /**
++   * The file to upload for {@code source}. An encoded file is {@code out.m4a} next to the source.
++   *
++   * @param durationSeconds a value of 0 or less is treated as 1
++   * @throws JobFailure FAILED or TIMEOUT; no {@code out.m4a} is left behind
++   */
++  public PreparedAudio prepare(Path source, long durationSeconds) {
++    long size = sizeOf(source);
++    Path out = source.resolveSibling(OUTPUT_NAME);
++    try {
++      if (size <= LIMIT_BYTES) {
++        if (isMp3OrM4a(source)) {
++          return new PreparedAudio(source, PreparedAudio.Mode.UNCHANGED, 0);
++        }
++        ffmpeg.encodeM4a(source, out, CONVERT_KBPS, false);
++        if (fits(out)) {
++          return new PreparedAudio(out, PreparedAudio.Mode.CONVERTED, CONVERT_KBPS);
++        }
++      }
++      return compress(source, out, durationSeconds);
++    } catch (RuntimeException e) {
++      deleteQuietly(out);
++      throw e;
++    }
++  }
++
++  /** The bitrate that would put {@code durationSeconds} of audio at the target size. */
++  static int targetKbps(long durationSeconds) {
++    long seconds = Math.max(durationSeconds, 1);
++    long kbps = TARGET_BYTES * 8 / seconds / 1000;
++    return (int) Math.min(MAX_KBPS, Math.max(MIN_KBPS, kbps));
++  }
++
++  private PreparedAudio compress(Path source, Path out, long durationSeconds) {
++    int kbps = targetKbps(durationSeconds);
++    ffmpeg.encodeM4a(source, out, kbps, true);
++    if (fits(out)) {
++      return new PreparedAudio(out, PreparedAudio.Mode.COMPRESSED, kbps);
++    }
++    int lower = Math.max(MIN_KBPS, kbps * 4 / 5);
++    if (lower < kbps) {
++      ffmpeg.encodeM4a(source, out, lower, true);
++      if (fits(out)) {
++        return new PreparedAudio(out, PreparedAudio.Mode.COMPRESSED, lower);
++      }
++    }
++    LOG.warn("Audio is still over the upload limit after compression");
++    throw JobFailure.of(JobFailure.Kind.FAILED);
++  }
++
++  private static boolean fits(Path file) {
++    long size = sizeOf(file);
++    return size > 0 && size < LIMIT_BYTES;
++  }
++
++  private static boolean isMp3OrM4a(Path file) {
++    Path fileName = file.getFileName();
++    if (fileName == null) {
++      return false;
++    }
++    String name = fileName.toString().toLowerCase(Locale.ROOT);
++    return name.endsWith(".mp3") || name.endsWith(".m4a");
++  }
++
++  private static long sizeOf(Path file) {
++    try {
++      return Files.size(file);
++    } catch (IOException e) {
++      throw JobFailure.of(JobFailure.Kind.FAILED, e);
++    }
++  }
++
++  private static void deleteQuietly(Path file) {
++    try {
++      Files.deleteIfExists(file);
++    } catch (IOException e) {
++      LOG.warn("Could not delete {}", file, e);
++    }
++  }
++}
+diff --git a/src/main/java/com/video2podcast/media/FfmpegRunner.java b/src/main/java/com/video2podcast/media/FfmpegRunner.java
+index df852e8..fedf609 100644
+--- a/src/main/java/com/video2podcast/media/FfmpegRunner.java
++++ b/src/main/java/com/video2podcast/media/FfmpegRunner.java
+@@ -5,6 +5,7 @@ import com.video2podcast.job.JobFailure;
+ import java.io.IOException;
+ import java.nio.file.Files;
+ import java.nio.file.Path;
++import java.util.ArrayList;
+ import java.util.List;
+ import org.slf4j.Logger;
+ import org.slf4j.LoggerFactory;
+@@ -82,6 +83,48 @@ public class FfmpegRunner {
+     return chunks;
+   }
+ 
++  /**
++   * Writes an M4A (AAC) file without video to {@code target}, replacing any file there.
++   *
++   * @return target
++   * @throws JobFailure FAILED (non-zero exit, no or empty output) or TIMEOUT; no output is left
++   *     behind
++   */
++  public Path encodeM4a(Path source, Path target, int kbps, boolean mono) {
++    try {
++      Files.deleteIfExists(target);
++    } catch (IOException e) {
++      throw JobFailure.of(JobFailure.Kind.FAILED, e);
++    }
++    List<String> args = new ArrayList<>();
++    args.addAll(List.of("ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i"));
++    args.add(source.toString());
++    args.add("-vn");
++    if (mono) {
++      args.addAll(List.of("-ac", "1"));
++    }
++    args.addAll(List.of("-c:a", "aac", "-b:a", kbps + "k", "-movflags", "+faststart"));
++    args.add(target.toString());
++    try {
++      run(args);
++      if (!nonEmptyFile(target)) {
++        throw JobFailure.of(JobFailure.Kind.FAILED);
++      }
++    } catch (RuntimeException e) {
++      deleteQuietly(target);
++      throw e;
++    }
++    return target;
++  }
++
++  private static void deleteQuietly(Path file) {
++    try {
++      Files.deleteIfExists(file);
++    } catch (IOException e) {
++      LOG.warn("Could not delete {}", file, e);
++    }
++  }
++
+   private void run(List<String> args) {
+     ProcessResult result = runner.run(args, jobs.ffmpegTimeout());
+     if (result.exitCode() != 0) {
+diff --git a/src/main/java/com/video2podcast/media/PreparedAudio.java b/src/main/java/com/video2podcast/media/PreparedAudio.java
+new file mode 100644
+index 0000000..6acc3fc
+--- /dev/null
++++ b/src/main/java/com/video2podcast/media/PreparedAudio.java
+@@ -0,0 +1,18 @@
++package com.video2podcast.media;
++
++import java.nio.file.Path;
++
++/**
++ * An audio file ready to upload.
++ *
++ * @param kbps the bitrate of an encoded file; 0 for {@code UNCHANGED}, where it is not known
++ */
++public record PreparedAudio(Path file, Mode mode, int kbps) {
++
++  /** How the file was made. */
++  public enum Mode {
++    UNCHANGED,
++    CONVERTED,
++    COMPRESSED
++  }
++}
+diff --git a/src/test/java/com/video2podcast/bot/AudioButtonTest.java b/src/test/java/com/video2podcast/bot/AudioButtonTest.java
+new file mode 100644
+index 0000000..a292b94
+--- /dev/null
++++ b/src/test/java/com/video2podcast/bot/AudioButtonTest.java
+@@ -0,0 +1,577 @@
++package com.video2podcast.bot;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++import com.video2podcast.job.DeliveryService;
++import com.video2podcast.job.FileKind;
++import com.video2podcast.job.FileState;
++import com.video2podcast.job.JobFailure;
++import com.video2podcast.job.JobFile;
++import com.video2podcast.job.JobQueue;
++import com.video2podcast.job.JobRecord;
++import com.video2podcast.job.JobStore;
++import com.video2podcast.media.PreparedAudio;
++import com.video2podcast.media.PreparedAudio.Mode;
++import com.video2podcast.support.MutableClock;
++import java.io.IOException;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.time.Duration;
++import java.time.Instant;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Map;
++import java.util.Optional;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CopyOnWriteArrayList;
++import java.util.concurrent.CyclicBarrier;
++import java.util.concurrent.RejectedExecutionException;
++import java.util.concurrent.TimeUnit;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.io.TempDir;
++import org.junit.jupiter.params.ParameterizedTest;
++import org.junit.jupiter.params.provider.EnumSource;
++import org.telegram.telegrambots.meta.api.objects.CallbackQuery;
++import org.telegram.telegrambots.meta.api.objects.User;
++
++class AudioButtonTest {
++
++  private static final Instant T0 = Instant.parse("2026-11-19T12:30:00Z");
++  private static final String ID = "job-1";
++  private static final long OWNER = 101L;
++  private static final long CHAT = 102L;
++  private static final int SUMMARY = 701;
++
++  /** Keeps the tasks until the test runs them, like a worker that is busy with another job. */
++  private static final class HeldQueue extends JobQueue {
++    final List<Runnable> tasks = new CopyOnWriteArrayList<>();
++    boolean reject;
++
++    @Override
++    public CompletableFuture<Void> submit(Runnable task) {
++      if (reject) {
++        throw new RejectedExecutionException("closed");
++      }
++      tasks.add(task);
++      return new CompletableFuture<>();
++    }
++
++    void runAll() {
++      List<Runnable> now = new ArrayList<>(tasks);
++      tasks.clear();
++      now.forEach(Runnable::run);
++    }
++  }
++
++  @TempDir Path dir;
++
++  private final MutableClock clock = new MutableClock(T0);
++  private final RecordingGateway gateway = new RecordingGateway();
++  private final HeldQueue queue = new HeldQueue();
++  private JobStore store;
++  private DeliveryService delivery;
++  private Path source;
++
++  @BeforeEach
++  void setUp() throws IOException {
++    store = new JobStore(dir.resolve("work"), clock);
++    delivery = new DeliveryService(store, clock);
++    create("Budget meeting", SUMMARY);
++  }
++
++  private DeliveryCallbackHandler handler(StubAudioPreparer preparer) {
++    return new DeliveryCallbackHandler(gateway, delivery, preparer, queue);
++  }
++
++  private void create(String title, Integer summaryMessageId) throws IOException {
++    Instant expires = T0.plus(Duration.ofMinutes(30));
++    store.create(
++        new JobRecord(
++            ID,
++            OWNER,
++            CHAT,
++            summaryMessageId,
++            title,
++            10_800,
++            T0.minusSeconds(60),
++            Map.of(
++                FileKind.AUDIO, new JobFile("source.m4a", FileState.AVAILABLE, expires, null),
++                FileKind.TRANSCRIPT,
++                    new JobFile("transcript.txt", FileState.AVAILABLE, expires, null))));
++    source = store.directory(ID).resolve("source.m4a");
++    Files.writeString(source, "audio");
++    Files.writeString(store.directory(ID).resolve("transcript.txt"), "text");
++  }
++
++  private static CallbackQuery tap(long userId) {
++    CallbackQuery callback = new CallbackQuery();
++    callback.setId("cb");
++    callback.setFrom(User.builder().id(userId).firstName("T").isBot(false).build());
++    callback.setData(Keyboards.AUDIO_PREFIX + ID);
++    return callback;
++  }
++
++  private FileState state(FileKind kind) {
++    return store.load(ID).orElseThrow().files().get(kind).state();
++  }
++
++  private List<String> answers() {
++    return gateway.answers.stream().map(RecordingGateway.Answer::text).toList();
++  }
++
++  private List<String> labels() {
++    return gateway.buttonEdits.stream()
++        .map(edit -> edit.buttons().get(0).text() + "|" + edit.buttons().get(1).text())
++        .toList();
++  }
++
++  private StubAudioPreparer encoding(Mode mode, int kbps) {
++    return new StubAudioPreparer((src, seconds) -> {
++      Path out = src.resolveSibling("out.m4a");
++      try {
++        Files.writeString(out, "encoded");
++      } catch (IOException e) {
++        throw new java.io.UncheckedIOException(e);
++      }
++      return new PreparedAudio(out, mode, kbps);
++    });
++  }
++
++  @Test
++  void aTapAnswersMarksTheButtonAndQueuesWithoutPreparingYet() {
++    StubAudioPreparer preparer = StubAudioPreparer.unchanged();
++
++    handler(preparer).handle(tap(OWNER));
++
++    assertThat(answers()).containsExactly("Preparing audio…");
++    assertThat(labels()).containsExactly("Preparing audio…|Download transcript");
++    assertThat(state(FileKind.AUDIO)).isEqualTo(FileState.SENDING);
++    assertThat(queue.tasks).hasSize(1);
++    assertThat(preparer.calls).isEmpty();
++    assertThat(gateway.audios).isEmpty();
++  }
++
++  @Test
++  void theQueuedTaskSendsTheUnchangedSourceOnce() {
++    StubAudioPreparer preparer = StubAudioPreparer.unchanged();
++    DeliveryCallbackHandler handler = handler(preparer);
++    handler.handle(tap(OWNER));
++
++    queue.runAll();
++
++    assertThat(preparer.calls)
++        .singleElement()
++        .satisfies(call -> {
++          assertThat(call.source()).isEqualTo(source);
++          assertThat(call.durationSeconds()).isEqualTo(10_800);
++        });
++    assertThat(gateway.audios)
++        .singleElement()
++        .satisfies(audio -> {
++          assertThat(audio.chatId()).isEqualTo(CHAT);
++          assertThat(audio.file()).isEqualTo(source);
++          assertThat(audio.fileName()).isEqualTo("Budget meeting.m4a");
++          assertThat(audio.title()).isEqualTo("Budget meeting");
++          assertThat(audio.performer()).isEqualTo("Video2Podcast");
++          assertThat(audio.caption()).isEqualTo("Original audio, not compressed.");
++        });
++    assertThat(labels())
++        .containsExactly("Preparing audio…|Download transcript", "Audio sent|Download transcript");
++    assertThat(gateway.buttonEdits)
++        .allSatisfy(edit -> {
++          assertThat(edit.chatId()).isEqualTo(CHAT);
++          assertThat(edit.messageId()).isEqualTo(SUMMARY);
++        });
++    assertThat(state(FileKind.AUDIO)).isEqualTo(FileState.SENT);
++    assertThat(state(FileKind.TRANSCRIPT)).isEqualTo(FileState.AVAILABLE);
++    assertThat(Files.exists(source)).isTrue();
++    assertThat(gateway.messages).isEmpty();
++  }
++
++  @Test
++  void aConvertedFileIsSentAsM4aWithItsCaptionAndDeleted() {
++    handler(encoding(Mode.CONVERTED, 128)).handle(tap(OWNER));
++
++    queue.runAll();
++
++    assertThat(gateway.audios)
++        .singleElement()
++        .satisfies(audio -> {
++          assertThat(audio.fileName()).isEqualTo("Budget meeting.m4a");
++          assertThat(audio.caption()).isEqualTo("Converted to M4A, 128 kbps.");
++        });
++    assertThat(Files.exists(source.resolveSibling("out.m4a"))).isFalse();
++    assertThat(Files.exists(source)).isTrue();
++  }
++
++  @Test
++  void aCompressedFileReportsTheBitrate() {
++    handler(encoding(Mode.COMPRESSED, 37)).handle(tap(OWNER));
++
++    queue.runAll();
++
++    assertThat(gateway.audios)
++        .singleElement()
++        .satisfies(audio ->
++            assertThat(audio.caption())
++                .isEqualTo("Compressed to mono AAC, 37 kbps, to fit Telegram's 50 MB limit."));
++  }
++
++  @Test
++  void theFileNameTakesTheExtensionOfTheFileSent() throws IOException {
++    Path mp3 = source.resolveSibling("source.MP3");
++    Files.writeString(mp3, "mp3");
++    handler(new StubAudioPreparer((src, s) -> new PreparedAudio(mp3, Mode.UNCHANGED, 0)))
++        .handle(tap(OWNER));
++
++    queue.runAll();
++
++    assertThat(gateway.audios.get(0).fileName()).isEqualTo("Budget meeting.mp3");
++    assertThat(Files.exists(mp3)).isFalse();
++  }
++
++  @Test
++  void theTitleIsCutTo256UnitsWithoutSplittingASurrogatePair() throws IOException {
++    store.discard(ID);
++    String title = "a".repeat(255) + "😀";
++    create(title, SUMMARY);
++    handler(StubAudioPreparer.unchanged()).handle(tap(OWNER));
++
++    queue.runAll();
++
++    assertThat(gateway.audios.get(0).title()).isEqualTo("a".repeat(255));
++  }
++
++  @Test
++  void aTitleWithMarkupCharactersIsPassedAsText() throws IOException {
++    store.discard(ID);
++    create("R&D <notes>", SUMMARY);
++    handler(StubAudioPreparer.unchanged()).handle(tap(OWNER));
++
++    queue.runAll();
++
++    assertThat(gateway.audios.get(0).title()).isEqualTo("R&D <notes>");
++    assertThat(gateway.audios.get(0).fileName()).isEqualTo("R&D _notes_.m4a");
++  }
++
++  @Test
++  void aTranscriptSentWhileTheAudioWaitsKeepsItsLabel() {
++    DeliveryCallbackHandler handler = handler(StubAudioPreparer.unchanged());
++    handler.handle(tap(OWNER));
++    delivery.claim(ID, OWNER, FileKind.TRANSCRIPT);
++    delivery.complete(ID, FileKind.TRANSCRIPT);
++
++    queue.runAll();
++
++    assertThat(labels()).last().isEqualTo("Audio sent|Transcript sent");
++  }
++
++  @Test
++  void aSecondTapWhileQueuedIsToldItIsInProgress() {
++    DeliveryCallbackHandler handler = handler(StubAudioPreparer.unchanged());
++    handler.handle(tap(OWNER));
++    gateway.answers.clear();
++
++    handler.handle(tap(OWNER));
++
++    assertThat(answers()).containsExactly("Already being sent.");
++    assertThat(queue.tasks).hasSize(1);
++  }
++
++  @Test
++  void aTapAfterTheSendIsToldItIsSent() {
++    DeliveryCallbackHandler handler = handler(StubAudioPreparer.unchanged());
++    handler.handle(tap(OWNER));
++    queue.runAll();
++    gateway.answers.clear();
++
++    handler.handle(tap(OWNER));
++
++    assertThat(answers()).containsExactly("Already sent.");
++    assertThat(queue.tasks).isEmpty();
++  }
++
++  @Test
++  void anotherUserIsRefusedWithOnlyAnAnswer() {
++    handler(StubAudioPreparer.unchanged()).handle(tap(999L));
++
++    assertThat(answers()).containsExactly("This button is not for you.");
++    assertThat(queue.tasks).isEmpty();
++    assertThat(gateway.buttonEdits).isEmpty();
++    assertThat(state(FileKind.AUDIO)).isEqualTo(FileState.AVAILABLE);
++  }
++
++  @Test
++  void anExpiredTapQueuesNothing() {
++    clock.advance(Duration.ofMinutes(30));
++
++    handler(StubAudioPreparer.unchanged()).handle(tap(OWNER));
++
++    assertThat(answers()).containsExactly("Expired, please resend the link.");
++    assertThat(queue.tasks).isEmpty();
++  }
++
++  @Test
++  void aClaimGrantedBeforeExpiryFinishesAfterIt() {
++    handler(StubAudioPreparer.unchanged()).handle(tap(OWNER));
++    clock.advance(Duration.ofMinutes(35));
++
++    queue.runAll();
++
++    assertThat(gateway.audios).hasSize(1);
++    assertThat(state(FileKind.AUDIO)).isEqualTo(FileState.SENT);
++  }
++
++  @Test
++  void aMissingSummaryMessageSendsWithoutEditingButtons() throws IOException {
++    store.discard(ID);
++    create("Budget meeting", null);
++
++    handler(StubAudioPreparer.unchanged()).handle(tap(OWNER));
++    queue.runAll();
++
++    assertThat(gateway.audios).hasSize(1);
++    assertThat(gateway.buttonEdits).isEmpty();
++  }
++
++  @Test
++  void aFailedPreparationReleasesTheAudioAndTellsTheUser() {
++    StubAudioPreparer failing =
++        new StubAudioPreparer((src, seconds) -> {
++          throw JobFailure.of(JobFailure.Kind.FAILED);
++        });
++    handler(failing).handle(tap(OWNER));
++
++    queue.runAll();
++
++    assertThat(gateway.audios).isEmpty();
++    assertThat(state(FileKind.AUDIO)).isEqualTo(FileState.AVAILABLE);
++    assertThat(labels()).last().isEqualTo("Download audio|Download transcript");
++    assertThat(gateway.messages)
++        .singleElement()
++        .satisfies(sent -> {
++          assertThat(sent.chatId()).isEqualTo(CHAT);
++          assertThat(sent.html())
++              .isEqualTo("Could not send the audio. Tap the button to try again.");
++        });
++  }
++
++  @Test
++  void aRejectedUploadReleasesTheAudioAndDeletesTheOutput() {
++    gateway.failAudio = true;
++    handler(encoding(Mode.CONVERTED, 128)).handle(tap(OWNER));
++
++    queue.runAll();
++
++    assertThat(state(FileKind.AUDIO)).isEqualTo(FileState.AVAILABLE);
++    assertThat(Files.exists(source.resolveSibling("out.m4a"))).isFalse();
++    assertThat(Files.exists(source)).isTrue();
++    assertThat(gateway.messages).hasSize(1);
++  }
++
++  @Test
++  void aRejectedUploadOfTheSourceKeepsTheSource() {
++    gateway.failAudio = true;
++    handler(StubAudioPreparer.unchanged()).handle(tap(OWNER));
++
++    queue.runAll();
++
++    assertThat(Files.exists(source)).isTrue();
++  }
++
++  @Test
++  void aFailedAudioCanBeRequestedAgain() {
++    gateway.failAudio = true;
++    DeliveryCallbackHandler handler = handler(StubAudioPreparer.unchanged());
++    handler.handle(tap(OWNER));
++    queue.runAll();
++    gateway.failAudio = false;
++
++    handler.handle(tap(OWNER));
++    queue.runAll();
++
++    assertThat(gateway.audios).hasSize(1);
++    assertThat(state(FileKind.AUDIO)).isEqualTo(FileState.SENT);
++  }
++
++  @Test
++  void aRejectedQueueSubmissionReleasesTheAudioAndTellsTheUser() {
++    queue.reject = true;
++
++    handler(StubAudioPreparer.unchanged()).handle(tap(OWNER));
++
++    assertThat(state(FileKind.AUDIO)).isEqualTo(FileState.AVAILABLE);
++    assertThat(labels()).last().isEqualTo("Download audio|Download transcript");
++    assertThat(gateway.messages).hasSize(1);
++  }
++
++  @Test
++  void aFailureToMarkSentKeepsSendingAndSaysNothingMore() {
++    DeliveryService failing =
++        new DeliveryService(store, clock) {
++          @Override
++          public Optional<JobRecord> complete(String jobId, FileKind kind) {
++            throw new IllegalStateException("disk");
++          }
++        };
++    new DeliveryCallbackHandler(gateway, failing, StubAudioPreparer.unchanged(), queue)
++        .handle(tap(OWNER));
++
++    queue.runAll();
++
++    assertThat(gateway.audios).hasSize(1);
++    assertThat(state(FileKind.AUDIO)).isEqualTo(FileState.SENDING);
++    assertThat(gateway.messages).isEmpty();
++    assertThat(labels()).hasSize(1);
++  }
++
++  @Test
++  void aFailureToReleaseStillRestoresTheButtonAndTellsTheUser() {
++    gateway.failAudio = true;
++    DeliveryService failing =
++        new DeliveryService(store, clock) {
++          @Override
++          public Optional<JobRecord> release(String jobId, FileKind kind) {
++            throw new IllegalStateException("disk");
++          }
++        };
++    new DeliveryCallbackHandler(gateway, failing, StubAudioPreparer.unchanged(), queue)
++        .handle(tap(OWNER));
++
++    queue.runAll();
++
++    assertThat(labels()).last().isEqualTo("Download audio|Download transcript");
++    assertThat(gateway.messages).hasSize(1);
++  }
++
++  @Test
++  void failedAnswersEditsAndNoticesDoNotEscapeOrStopTheUpload() {
++    gateway.failAnswers = true;
++    gateway.failButtons = true;
++    gateway.failMessages = true;
++
++    handler(StubAudioPreparer.unchanged()).handle(tap(OWNER));
++    queue.runAll();
++
++    assertThat(gateway.audios).hasSize(1);
++    assertThat(state(FileKind.AUDIO)).isEqualTo(FileState.SENT);
++  }
++
++  @Test
++  void aStoreFailureBeforeTheClaimGivesAGenericAnswerAndNoQueueWork() {
++    DeliveryService broken =
++        new DeliveryService(store, clock) {
++          @Override
++          public Claim claim(String jobId, long userId, FileKind kind) {
++            throw new com.video2podcast.job.JobStoreException("disk", null);
++          }
++        };
++
++    new DeliveryCallbackHandler(gateway, broken, StubAudioPreparer.unchanged(), queue)
++        .handle(tap(OWNER));
++
++    assertThat(answers()).containsExactly("Something went wrong, please try again.");
++    assertThat(queue.tasks).isEmpty();
++  }
++
++  @Test
++  void aPathWithoutAFileNameGetsTheM4aExtension() {
++    assertThat(DeliveryCallbackHandler.extensionOf(Path.of("/"))).isEqualTo("m4a");
++    assertThat(DeliveryCallbackHandler.extensionOf(Path.of("/w/source.MP3"))).isEqualTo("mp3");
++    assertThat(DeliveryCallbackHandler.extensionOf(Path.of("/w/source"))).isEqualTo("m4a");
++  }
++
++  private void setTranscript(FileState target) {
++    store.transition(ID, FileKind.TRANSCRIPT, FileState.AVAILABLE, FileState.SENDING);
++    if (target == FileState.SENT) {
++      store.transition(ID, FileKind.TRANSCRIPT, FileState.SENDING, FileState.SENT);
++    }
++  }
++
++  @Test
++  void twoCompetingFirstTapsQueueOneUpload() throws Exception {
++    CyclicBarrier bothAtTheClaim = new CyclicBarrier(2);
++    DeliveryService racing =
++        new DeliveryService(store, clock) {
++          @Override
++          public Claim claim(String jobId, long userId, FileKind kind) {
++            try {
++              bothAtTheClaim.await(10, TimeUnit.SECONDS);
++            } catch (Exception e) {
++              throw new IllegalStateException(e);
++            }
++            return super.claim(jobId, userId, kind);
++          }
++        };
++    DeliveryCallbackHandler handler =
++        new DeliveryCallbackHandler(gateway, racing, StubAudioPreparer.unchanged(), queue);
++    Thread first = new Thread(() -> handler.handle(tap(OWNER)));
++    Thread second = new Thread(() -> handler.handle(tap(OWNER)));
++
++    first.start();
++    second.start();
++    first.join(10_000);
++    second.join(10_000);
++    queue.runAll();
++
++    assertThat(gateway.audios).hasSize(1);
++    assertThat(answers())
++        .hasSize(2)
++        .contains("Preparing audio…")
++        .containsAnyOf("Already being sent.", "Already sent.");
++    assertThat(state(FileKind.AUDIO)).isEqualTo(FileState.SENT);
++  }
++
++  @ParameterizedTest
++  @EnumSource(
++      value = FileState.class,
++      names = {"SENDING", "SENT"})
++  void theFirstEditShowsTheTranscriptStateOfTheClaimRecord(FileState transcript) {
++    {
++      DeliveryService changing =
++          new DeliveryService(store, clock) {
++            @Override
++            public Claim claim(String jobId, long userId, FileKind kind) {
++              if (state(FileKind.TRANSCRIPT) == FileState.AVAILABLE) {
++                setTranscript(transcript);
++              }
++              return super.claim(jobId, userId, kind);
++            }
++          };
++
++      new DeliveryCallbackHandler(gateway, changing, StubAudioPreparer.unchanged(), queue)
++          .handle(tap(OWNER));
++
++      String label = transcript == FileState.SENT ? "Transcript sent" : "Sending transcript…";
++      assertThat(labels()).containsExactly("Preparing audio…|" + label);
++    }
++  }
++
++  @ParameterizedTest
++  @EnumSource(
++      value = FileState.class,
++      names = {"SENDING", "SENT"})
++  void theFinalEditShowsTheTranscriptStateOfTheCompletionRecord(FileState transcript) {
++    {
++      DeliveryService changing =
++          new DeliveryService(store, clock) {
++            @Override
++            public Optional<JobRecord> complete(String jobId, FileKind kind) {
++              if (state(FileKind.TRANSCRIPT) == FileState.AVAILABLE) {
++                setTranscript(transcript);
++              }
++              return super.complete(jobId, kind);
++            }
++          };
++      DeliveryCallbackHandler handler =
++          new DeliveryCallbackHandler(gateway, changing, StubAudioPreparer.unchanged(), queue);
++      handler.handle(tap(OWNER));
++      queue.runAll();
++
++      String label = transcript == FileState.SENT ? "Transcript sent" : "Sending transcript…";
++      assertThat(labels())
++          .containsExactly("Preparing audio…|Download transcript", "Audio sent|" + label);
++    }
++  }
++}
+diff --git a/src/test/java/com/video2podcast/bot/BotUpdateHandlerTest.java b/src/test/java/com/video2podcast/bot/BotUpdateHandlerTest.java
+index 0e92401..4dd1f63 100644
+--- a/src/test/java/com/video2podcast/bot/BotUpdateHandlerTest.java
++++ b/src/test/java/com/video2podcast/bot/BotUpdateHandlerTest.java
+@@ -278,16 +278,27 @@ class BotUpdateHandlerTest {
+   }
+ 
+   @Test
+-  void audioCallbackIsStillIgnored() {
++  void audioCallbackFromAnAllowedUserGoesToTheDeliveryHandler() {
+     Update update = callbackUpdate("cb6", ALLOWED, "private");
+     update.getCallbackQuery().setData("audio:job-1");
+ 
+     handler.handle(update);
+ 
+-    verify(deliveries, never()).handle(any());
++    verify(deliveries).handle(update.getCallbackQuery());
+     assertThat(gateway.answers).isEmpty();
+   }
+ 
++  @Test
++  void audioCallbackFromAnUnknownUserNeverReachesTheDeliveryHandler() {
++    Update update = callbackUpdate("cb7", STRANGER, "private");
++    update.getCallbackQuery().setData("audio:job-1");
++
++    handler.handle(update);
++
++    verify(deliveries, never()).handle(any());
++    assertThat(gateway.answers).containsExactly(new RecordingGateway.Answer("cb7", "No access."));
++  }
++
+   @Test
+   void callbacksOutsidePrivateChatsAreIgnored() {
+     handler.handle(callbackUpdate("cb3", STRANGER, "group"));
+diff --git a/src/test/java/com/video2podcast/bot/DeliveryCallbackHandlerTest.java b/src/test/java/com/video2podcast/bot/DeliveryCallbackHandlerTest.java
+index 0bad237..4ad27ed 100644
+--- a/src/test/java/com/video2podcast/bot/DeliveryCallbackHandlerTest.java
++++ b/src/test/java/com/video2podcast/bot/DeliveryCallbackHandlerTest.java
+@@ -6,6 +6,7 @@ import com.video2podcast.job.DeliveryService;
+ import com.video2podcast.job.FileKind;
+ import com.video2podcast.job.FileState;
+ import com.video2podcast.job.JobFile;
++import com.video2podcast.job.JobQueue;
+ import com.video2podcast.job.JobRecord;
+ import com.video2podcast.job.JobStore;
+ import com.video2podcast.job.JobStoreException;
+@@ -42,7 +43,12 @@ class DeliveryCallbackHandlerTest {
+   @BeforeEach
+   void setUp() throws IOException {
+     store = new JobStore(dir.resolve("work"), clock);
+-    handler = new DeliveryCallbackHandler(gateway, new DeliveryService(store, clock));
++    handler =
++        new DeliveryCallbackHandler(
++            gateway,
++            new DeliveryService(store, clock),
++            StubAudioPreparer.unchanged(),
++            new JobQueue());
+     create(SUMMARY);
+   }
+ 
+@@ -272,7 +278,8 @@ class DeliveryCallbackHandlerTest {
+           }
+         };
+ 
+-    new DeliveryCallbackHandler(gateway, broken).handle(tap(OWNER, ID));
++    new DeliveryCallbackHandler(gateway, broken, StubAudioPreparer.unchanged(), new JobQueue())
++        .handle(tap(OWNER, ID));
+ 
+     assertThat(answerTexts()).containsExactly("Something went wrong, please try again.");
+     assertThat(gateway.documents).isEmpty();
+@@ -288,7 +295,8 @@ class DeliveryCallbackHandlerTest {
+           }
+         };
+ 
+-    new DeliveryCallbackHandler(gateway, failing).handle(tap(OWNER, ID));
++    new DeliveryCallbackHandler(gateway, failing, StubAudioPreparer.unchanged(), new JobQueue())
++        .handle(tap(OWNER, ID));
+ 
+     assertThat(gateway.documents).hasSize(1);
+     assertThat(transcriptState()).isEqualTo(FileState.SENDING);
+@@ -307,7 +315,8 @@ class DeliveryCallbackHandlerTest {
+           }
+         };
+ 
+-    new DeliveryCallbackHandler(gateway, failing).handle(tap(OWNER, ID));
++    new DeliveryCallbackHandler(gateway, failing, StubAudioPreparer.unchanged(), new JobQueue())
++        .handle(tap(OWNER, ID));
+ 
+     assertThat(gateway.messages).hasSize(1);
+   }
+diff --git a/src/test/java/com/video2podcast/bot/FileNamesTest.java b/src/test/java/com/video2podcast/bot/FileNamesTest.java
+index 2ac1e75..1d6af14 100644
+--- a/src/test/java/com/video2podcast/bot/FileNamesTest.java
++++ b/src/test/java/com/video2podcast/bot/FileNamesTest.java
+@@ -56,4 +56,20 @@ class FileNamesTest {
+     assertThat(FileNames.transcriptName("A".repeat(97) + emoji + "B"))
+         .isEqualTo("A".repeat(97) + emoji + "B.txt");
+   }
++
++  @Test
++  void audioNamesUseTheExtensionAndTheSameRules() {
++    assertThat(FileNames.audioName("Budget meeting", "m4a")).isEqualTo("Budget meeting.m4a");
++    assertThat(FileNames.audioName("R&D <notes>", "mp3")).isEqualTo("R&D _notes_.mp3");
++    assertThat(FileNames.audioName("   ", "m4a")).isEqualTo("audio.m4a");
++    assertThat(FileNames.audioName(null, "m4a")).isEqualTo("audio.m4a");
++  }
++
++  @Test
++  void limitCutsAtTheMaximumWithoutSplittingAPair() {
++    assertThat(FileNames.limit("abc", 3)).isEqualTo("abc");
++    assertThat(FileNames.limit("abcd", 3)).isEqualTo("abc");
++    assertThat(FileNames.limit("ab\uD83D\uDE00", 3)).isEqualTo("ab");
++    assertThat(FileNames.limit("a\uD83D\uDE00", 3)).isEqualTo("a\uD83D\uDE00");
++  }
+ }
+diff --git a/src/test/java/com/video2podcast/bot/RecordingGateway.java b/src/test/java/com/video2podcast/bot/RecordingGateway.java
+index dd7f292..666f6af 100644
+--- a/src/test/java/com/video2podcast/bot/RecordingGateway.java
++++ b/src/test/java/com/video2podcast/bot/RecordingGateway.java
+@@ -1,25 +1,27 @@
+ package com.video2podcast.bot;
+ 
+ import java.nio.file.Path;
+-import java.util.ArrayList;
+ import java.util.List;
++import java.util.concurrent.CopyOnWriteArrayList;
+ 
+-/** Test double that records outgoing messages. */
++/**
++ * Test double that records outgoing messages. The records are safe to fill from several threads.
++ */
+ class RecordingGateway implements TelegramGateway {
+ 
+   record Sent(long chatId, String html, List<InlineButton> buttons) {}
+ 
+   record Answer(String callbackId, String text) {}
+ 
+-  final List<Sent> messages = new ArrayList<>();
++  final List<Sent> messages = new CopyOnWriteArrayList<>();
+ 
+   record Edit(long chatId, int messageId, String html, List<InlineButton> buttons) {}
+ 
+-  final List<Answer> answers = new ArrayList<>();
+-  final List<Edit> edits = new ArrayList<>();
++  final List<Answer> answers = new CopyOnWriteArrayList<>();
++  final List<Edit> edits = new CopyOnWriteArrayList<>();
+ 
+   /** Chats for which sending fails, to simulate a user who blocked the bot. */
+-  final java.util.Set<Long> failingChats = new java.util.HashSet<>();
++  final java.util.Set<Long> failingChats = java.util.concurrent.ConcurrentHashMap.newKeySet();
+ 
+   boolean failEdits;
+ 
+@@ -44,8 +46,16 @@ class RecordingGateway implements TelegramGateway {
+ 
+   record Document(long chatId, Path file, String fileName, String caption) {}
+ 
+-  final List<Buttons> buttonEdits = new ArrayList<>();
+-  final List<Document> documents = new ArrayList<>();
++  final List<Buttons> buttonEdits = new CopyOnWriteArrayList<>();
++  final List<Document> documents = new CopyOnWriteArrayList<>();
++
++  record Audio(
++      long chatId, Path file, String fileName, String title, String performer, String caption) {}
++
++  final List<Audio> audios = new CopyOnWriteArrayList<>();
++
++  /** Fails the audio sends, to simulate a Telegram error. */
++  boolean failAudio;
+ 
+   /** Fails the next document sends, to simulate a Telegram error. */
+   boolean failDocuments;
+@@ -71,8 +81,12 @@ class RecordingGateway implements TelegramGateway {
+   }
+ 
+   @Override
+-  public void sendAudio(long chatId, Path file, String title, String performer) {
+-    throw new UnsupportedOperationException();
++  public void sendAudio(
++      long chatId, Path file, String fileName, String title, String performer, String caption) {
++    if (failAudio) {
++      throw new TelegramGatewayException("cannot send audio", null);
++    }
++    audios.add(new Audio(chatId, file, fileName, title, performer, caption));
+   }
+ 
+   @Override
+diff --git a/src/test/java/com/video2podcast/bot/StubAudioPreparer.java b/src/test/java/com/video2podcast/bot/StubAudioPreparer.java
+new file mode 100644
+index 0000000..767dd9f
+--- /dev/null
++++ b/src/test/java/com/video2podcast/bot/StubAudioPreparer.java
+@@ -0,0 +1,34 @@
++package com.video2podcast.bot;
++
++import com.video2podcast.media.AudioPreparer;
++import com.video2podcast.media.PreparedAudio;
++import java.nio.file.Path;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.function.BiFunction;
++
++/** An {@link AudioPreparer} that answers with whatever the test supplied. */
++class StubAudioPreparer extends AudioPreparer {
++
++  record Call(Path source, long durationSeconds) {}
++
++  final List<Call> calls = new ArrayList<>();
++  private final BiFunction<Path, Long, PreparedAudio> answer;
++
++  StubAudioPreparer(BiFunction<Path, Long, PreparedAudio> answer) {
++    super(null);
++    this.answer = answer;
++  }
++
++  /** Returns the source unchanged. */
++  static StubAudioPreparer unchanged() {
++    return new StubAudioPreparer(
++        (source, seconds) -> new PreparedAudio(source, PreparedAudio.Mode.UNCHANGED, 0));
++  }
++
++  @Override
++  public PreparedAudio prepare(Path source, long durationSeconds) {
++    calls.add(new Call(source, durationSeconds));
++    return answer.apply(source, durationSeconds);
++  }
++}
+diff --git a/src/test/java/com/video2podcast/bot/TelegramClientGatewayTest.java b/src/test/java/com/video2podcast/bot/TelegramClientGatewayTest.java
+index c019c2e..b09db2c 100644
+--- a/src/test/java/com/video2podcast/bot/TelegramClientGatewayTest.java
++++ b/src/test/java/com/video2podcast/bot/TelegramClientGatewayTest.java
+@@ -186,11 +186,13 @@ class TelegramClientGatewayTest {
+             .willReturn(
+                 aResponse().withBody(MESSAGE_OK).withHeader("Content-Type", "application/json")));
+ 
+-    gateway.sendAudio(5L, file, "Episode", "Channel");
++    gateway.sendAudio(5L, file, "Episode.m4a", "Episode", "Channel", "Converted &amp; done");
+ 
+     telegram.verify(
+         postRequestedFor(urlPathEqualTo(path("sendAudio")))
+-            .withRequestBody(containing("filename=\"audio.m4a\""))
++            .withRequestBody(containing("filename=\"Episode.m4a\""))
++            .withRequestBody(containing("Converted &amp; done"))
++            .withRequestBody(containing("HTML"))
+             .withRequestBody(containing("Episode"))
+             .withRequestBody(containing("Channel")));
+   }
+diff --git a/src/test/java/com/video2podcast/bot/TranscriptButtonTest.java b/src/test/java/com/video2podcast/bot/TranscriptButtonTest.java
+index 1807e4c..a55fc60 100644
+--- a/src/test/java/com/video2podcast/bot/TranscriptButtonTest.java
++++ b/src/test/java/com/video2podcast/bot/TranscriptButtonTest.java
+@@ -9,6 +9,7 @@ import com.video2podcast.job.DeliveryService;
+ import com.video2podcast.job.FileKind;
+ import com.video2podcast.job.FileState;
+ import com.video2podcast.job.JobFile;
++import com.video2podcast.job.JobQueue;
+ import com.video2podcast.job.JobRecord;
+ import com.video2podcast.job.JobStore;
+ import com.video2podcast.support.MutableClock;
+@@ -76,7 +77,11 @@ class TranscriptButtonTest {
+             gateway,
+             access,
+             mock(UrlMessageHandler.class),
+-            new DeliveryCallbackHandler(gateway, new DeliveryService(store, clock)));
++            new DeliveryCallbackHandler(
++                gateway,
++                new DeliveryService(store, clock),
++                StubAudioPreparer.unchanged(),
++                new JobQueue()));
+     Instant expires = T0.plus(Duration.ofMinutes(30));
+     store.create(
+         new JobRecord(
+diff --git a/src/test/java/com/video2podcast/bot/UrlMessageHandlerTest.java b/src/test/java/com/video2podcast/bot/UrlMessageHandlerTest.java
+index 1d3d648..db71fc3 100644
+--- a/src/test/java/com/video2podcast/bot/UrlMessageHandlerTest.java
++++ b/src/test/java/com/video2podcast/bot/UrlMessageHandlerTest.java
+@@ -94,7 +94,8 @@ class UrlMessageHandlerTest {
+     }
+ 
+     @Override
+-    public void sendAudio(long chatId, Path file, String title, String performer) {
++    public void sendAudio(
++        long chatId, Path file, String fileName, String title, String performer, String caption) {
+       throw new UnsupportedOperationException();
+     }
+ 
+diff --git a/src/test/java/com/video2podcast/config/MediaConfigTest.java b/src/test/java/com/video2podcast/config/MediaConfigTest.java
+index ed4ed67..120ee46 100644
+--- a/src/test/java/com/video2podcast/config/MediaConfigTest.java
++++ b/src/test/java/com/video2podcast/config/MediaConfigTest.java
+@@ -2,6 +2,7 @@ package com.video2podcast.config;
+ 
+ import static org.assertj.core.api.Assertions.assertThat;
+ 
++import com.video2podcast.media.AudioPreparer;
+ import com.video2podcast.media.DefaultProcessRunner;
+ import com.video2podcast.media.FfmpegRunner;
+ import com.video2podcast.media.ProcessResult;
+@@ -44,6 +45,7 @@ class MediaConfigTest {
+           assertThat(context).hasSingleBean(UrlValidator.class);
+           assertThat(context).hasSingleBean(YtDlpClient.class);
+           assertThat(context).hasSingleBean(FfmpegRunner.class);
++          assertThat(context).hasSingleBean(AudioPreparer.class);
+         });
+   }
+ 
+diff --git a/src/test/java/com/video2podcast/config/PipelineConfigTest.java b/src/test/java/com/video2podcast/config/PipelineConfigTest.java
+index d03db91..20879a9 100644
+--- a/src/test/java/com/video2podcast/config/PipelineConfigTest.java
++++ b/src/test/java/com/video2podcast/config/PipelineConfigTest.java
+@@ -11,6 +11,7 @@ import com.video2podcast.job.JobQueue;
+ import com.video2podcast.job.JobStore;
+ import com.video2podcast.job.PipelineService;
+ import com.video2podcast.job.SummaryPublisher;
++import com.video2podcast.media.AudioPreparer;
+ import com.video2podcast.media.FfmpegRunner;
+ import com.video2podcast.media.UrlValidator;
+ import com.video2podcast.media.YtDlpClient;
+@@ -46,6 +47,7 @@ class PipelineConfigTest {
+         .withBean(TelegramGateway.class, () -> mock(TelegramGateway.class))
+         .withBean(YtDlpClient.class, () -> mock(YtDlpClient.class))
+         .withBean(FfmpegRunner.class, () -> mock(FfmpegRunner.class))
++        .withBean(AudioPreparer.class, () -> mock(AudioPreparer.class))
+         .withBean(TranscriptionClient.class, () -> mock(TranscriptionClient.class))
+         .withBean(SummaryService.class, () -> mock(SummaryService.class))
+         .withBean(JobStore.class, () -> mock(JobStore.class))
+diff --git a/src/test/java/com/video2podcast/media/AudioPreparerTest.java b/src/test/java/com/video2podcast/media/AudioPreparerTest.java
+new file mode 100644
+index 0000000..6e0fbe9
+--- /dev/null
++++ b/src/test/java/com/video2podcast/media/AudioPreparerTest.java
+@@ -0,0 +1,298 @@
++package com.video2podcast.media;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.assertj.core.api.Assertions.assertThatThrownBy;
++
++import com.video2podcast.config.AppProperties;
++import com.video2podcast.job.JobFailure;
++import com.video2podcast.job.JobFailure.Kind;
++import com.video2podcast.media.PreparedAudio.Mode;
++import java.io.IOException;
++import java.io.RandomAccessFile;
++import java.io.UncheckedIOException;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.time.Duration;
++import java.util.List;
++import java.util.function.ToLongFunction;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.io.TempDir;
++import org.junit.jupiter.params.ParameterizedTest;
++import org.junit.jupiter.params.provider.CsvSource;
++
++class AudioPreparerTest {
++
++  private static final long LIMIT = 50L * 1024 * 1024;
++  private static final AppProperties.Jobs JOBS =
++      new AppProperties.Jobs(
++          Path.of("w"),
++          Duration.ofHours(3),
++          Duration.ofHours(1),
++          Duration.ofMinutes(1),
++          Duration.ofMinutes(30),
++          Duration.ofMinutes(20));
++
++  @TempDir Path dir;
++
++  private static void sized(Path file, long size) {
++    try (RandomAccessFile f = new RandomAccessFile(file.toFile(), "rw")) {
++      f.setLength(size);
++    } catch (IOException e) {
++      throw new UncheckedIOException(e);
++    }
++  }
++
++  private Path source(String name, long size) {
++    Path file = dir.resolve(name);
++    sized(file, size);
++    return file;
++  }
++
++  /** An ffmpeg that writes the target with a size chosen from the bitrate in the command. */
++  private FakeProcessRunner ffmpeg(ToLongFunction<Integer> sizeForKbps) {
++    return new FakeProcessRunner((args, timeout) -> {
++      String bitrate = args.get(args.indexOf("-b:a") + 1);
++      int kbps = Integer.parseInt(bitrate.replace("k", ""));
++      sized(Path.of(args.get(args.size() - 1)), sizeForKbps.applyAsLong(kbps));
++      return new ProcessResult(0, "", "");
++    });
++  }
++
++  private AudioPreparer preparer(FakeProcessRunner runner) {
++    return new AudioPreparer(new FfmpegRunner(runner, JOBS));
++  }
++
++  private static List<String> kbpsOf(FakeProcessRunner runner) {
++    return runner.calls.stream().map(args -> args.get(args.indexOf("-b:a") + 1)).toList();
++  }
++
++  private static boolean mono(List<String> args) {
++    return args.contains("-ac");
++  }
++
++  @ParameterizedTest
++  @CsvSource({"source.mp3", "source.m4a", "SOURCE.MP3", "Source.M4A"})
++  void aSmallMp3OrM4aIsSentUnchanged(String name) {
++    Path source = source(name, 1000);
++    FakeProcessRunner runner = ffmpeg(kbps -> 10);
++
++    PreparedAudio result = preparer(runner).prepare(source, 60);
++
++    assertThat(result.mode()).isEqualTo(Mode.UNCHANGED);
++    assertThat(result.file()).isSameAs(source);
++    assertThat(result.kbps()).isZero();
++    assertThat(runner.calls).isEmpty();
++  }
++
++  @Test
++  void anMp3ExactlyAtTheLimitIsUnchanged() {
++    Path source = source("source.mp3", LIMIT);
++    FakeProcessRunner runner = ffmpeg(kbps -> 10);
++
++    assertThat(preparer(runner).prepare(source, 60).mode()).isEqualTo(Mode.UNCHANGED);
++    assertThat(runner.calls).isEmpty();
++  }
++
++  @Test
++  void anMp3OneByteOverTheLimitIsCompressed() {
++    Path source = source("source.mp3", LIMIT + 1);
++    FakeProcessRunner runner = ffmpeg(kbps -> 1000);
++
++    PreparedAudio result = preparer(runner).prepare(source, 60);
++
++    assertThat(result.mode()).isEqualTo(Mode.COMPRESSED);
++    assertThat(result.kbps()).isEqualTo(128);
++    assertThat(mono(runner.calls.get(0))).isTrue();
++  }
++
++  @ParameterizedTest
++  @CsvSource({"source.mp4", "source.webm", "source.opus", "source.mp3x", "source"})
++  void aSmallSourceInAnotherFormatIsConvertedAt128Kbps(String name) {
++    Path source = source(name, 1000);
++    FakeProcessRunner runner = ffmpeg(kbps -> 5000);
++
++    PreparedAudio result = preparer(runner).prepare(source, 60);
++
++    assertThat(result.mode()).isEqualTo(Mode.CONVERTED);
++    assertThat(result.kbps()).isEqualTo(128);
++    assertThat(result.file()).isEqualTo(dir.resolve("out.m4a"));
++    assertThat(kbpsOf(runner)).containsExactly("128k");
++    List<String> args = runner.calls.get(0);
++    assertThat(mono(args)).isFalse();
++    assertThat(args).contains("-vn", "aac", "+faststart").contains(source.toString());
++    assertThat(source).exists();
++  }
++
++  @Test
++  void aConvertedOutputExactlyAtTheLimitFallsBackToCompression() {
++    Path source = source("source.webm", 1000);
++    // the first call (128k, stereo) is oversized; the compression call (mono) is small
++    FakeProcessRunner sequence =
++        new FakeProcessRunner((args, timeout) -> {
++          boolean stereo = !mono(args);
++          sized(Path.of(args.get(args.size() - 1)), stereo ? LIMIT : 5000);
++          return new ProcessResult(0, "", "");
++        });
++
++    PreparedAudio result = preparer(sequence).prepare(source, 3600);
++
++    assertThat(result.mode()).isEqualTo(Mode.COMPRESSED);
++    assertThat(result.kbps()).isEqualTo(111);
++    assertThat(kbpsOf(sequence)).containsExactly("128k", "111k");
++  }
++
++  @ParameterizedTest
++  @CsvSource({
++    "10800, 37",
++    "3600, 111",
++    "60, 128",
++    "1, 128",
++    "0, 128",
++    "-5, 128",
++    "393216, 8",
++    "5000000, 8",
++    "33554, 12"
++  })
++  void theBitrateFitsTheDurationIntoTheTarget(long seconds, int kbps) {
++    assertThat(AudioPreparer.targetKbps(seconds)).isEqualTo(kbps);
++  }
++
++  @Test
++  void anOversizedSourceIsCompressedToMonoAtTheComputedBitrate() {
++    Path source = source("source.m4a", LIMIT + 1);
++    FakeProcessRunner runner = ffmpeg(kbps -> 40_000_000L);
++
++    PreparedAudio result = preparer(runner).prepare(source, 10_800);
++
++    assertThat(result.mode()).isEqualTo(Mode.COMPRESSED);
++    assertThat(result.kbps()).isEqualTo(37);
++    assertThat(result.file()).isEqualTo(dir.resolve("out.m4a"));
++    assertThat(kbpsOf(runner)).containsExactly("37k");
++    assertThat(mono(runner.calls.get(0))).isTrue();
++  }
++
++  @Test
++  void anOutputOverTheLimitIsRetriedOnceAtEightyPercent() {
++    Path source = source("source.m4a", LIMIT + 1);
++    FakeProcessRunner runner = ffmpeg(kbps -> kbps == 37 ? LIMIT : LIMIT - 1);
++
++    PreparedAudio result = preparer(runner).prepare(source, 10_800);
++
++    assertThat(result.mode()).isEqualTo(Mode.COMPRESSED);
++    assertThat(result.kbps()).isEqualTo(29);
++    assertThat(kbpsOf(runner)).containsExactly("37k", "29k");
++  }
++
++  @Test
++  void aRetryAt128GoesTo102() {
++    Path source = source("source.m4a", LIMIT + 1);
++    FakeProcessRunner runner = ffmpeg(kbps -> kbps == 128 ? LIMIT + 1 : 1000);
++
++    PreparedAudio result = preparer(runner).prepare(source, 60);
++
++    assertThat(result.kbps()).isEqualTo(102);
++  }
++
++  @Test
++  void aSecondOversizedOutputFailsAndLeavesNoOutput() {
++    Path source = source("source.m4a", LIMIT + 1);
++    FakeProcessRunner runner = ffmpeg(kbps -> LIMIT + 5);
++
++    assertThatThrownBy(() -> preparer(runner).prepare(source, 10_800))
++        .isInstanceOfSatisfying(JobFailure.class, f -> assertThat(f.kind()).isEqualTo(Kind.FAILED));
++
++    assertThat(kbpsOf(runner)).containsExactly("37k", "29k");
++    assertThat(dir.resolve("out.m4a")).doesNotExist();
++    assertThat(source).exists();
++  }
++
++  @Test
++  void atTheFloorThereIsNoLowerRetry() {
++    Path source = source("source.m4a", LIMIT + 1);
++    FakeProcessRunner runner = ffmpeg(kbps -> LIMIT);
++
++    assertThatThrownBy(() -> preparer(runner).prepare(source, 5_000_000))
++        .isInstanceOf(JobFailure.class);
++
++    assertThat(kbpsOf(runner)).containsExactly("8k");
++    assertThat(dir.resolve("out.m4a")).doesNotExist();
++  }
++
++  @Test
++  void aNonPositiveDurationIsTreatedAsOneSecond() {
++    Path source = source("source.m4a", LIMIT + 1);
++    FakeProcessRunner runner = ffmpeg(kbps -> 1000);
++
++    assertThat(preparer(runner).prepare(source, -3).kbps()).isEqualTo(128);
++  }
++
++  @Test
++  void anEncodingErrorIsAFailureWithoutOutput() {
++    Path source = source("source.webm", 1000);
++    FakeProcessRunner runner =
++        FakeProcessRunner.returning(new ProcessResult(1, "", "Invalid data found"));
++
++    assertThatThrownBy(() -> preparer(runner).prepare(source, 60))
++        .isInstanceOfSatisfying(JobFailure.class, f -> assertThat(f.kind()).isEqualTo(Kind.FAILED))
++        .hasMessageNotContaining("Invalid data");
++
++    assertThat(dir.resolve("out.m4a")).doesNotExist();
++  }
++
++  @Test
++  void aTimeoutIsPassedOnAndLeavesNoOutput() {
++    Path source = source("source.webm", 1000);
++    FakeProcessRunner runner =
++        new FakeProcessRunner((args, timeout) -> {
++          sized(Path.of(args.get(args.size() - 1)), 10);
++          throw JobFailure.of(Kind.TIMEOUT);
++        });
++
++    assertThatThrownBy(() -> preparer(runner).prepare(source, 60))
++        .isInstanceOfSatisfying(
++            JobFailure.class, f -> assertThat(f.kind()).isEqualTo(Kind.TIMEOUT));
++
++    assertThat(dir.resolve("out.m4a")).doesNotExist();
++  }
++
++  @Test
++  void aMissingSourceFails() {
++    FakeProcessRunner runner = ffmpeg(kbps -> 10);
++
++    assertThatThrownBy(() -> preparer(runner).prepare(dir.resolve("source.m4a"), 60))
++        .isInstanceOfSatisfying(JobFailure.class, f -> assertThat(f.kind()).isEqualTo(Kind.FAILED));
++    assertThat(runner.calls).isEmpty();
++  }
++
++  @Test
++  void aSecondPreparationReplacesAnEarlierOutput() throws IOException {
++    Path source = source("source.webm", 1000);
++    Files.writeString(dir.resolve("out.m4a"), "old");
++    FakeProcessRunner runner = ffmpeg(kbps -> 2000);
++
++    PreparedAudio result = preparer(runner).prepare(source, 60);
++
++    assertThat(Files.size(result.file())).isEqualTo(2000);
++  }
++
++  @Test
++  void aPathWithoutAFileNameIsNotTakenForAnMp3() {
++    FakeProcessRunner runner = FakeProcessRunner.returning(new ProcessResult(1, "", ""));
++
++    assertThatThrownBy(() -> preparer(runner).prepare(Path.of("/"), 60))
++        .isInstanceOf(JobFailure.class);
++
++    assertThat(runner.calls).hasSize(1);
++  }
++
++  @Test
++  void theRetryNeverGoesBelowTheFloor() {
++    Path source = source("source.m4a", LIMIT + 1);
++    FakeProcessRunner runner = ffmpeg(kbps -> kbps == 9 ? LIMIT : 1000);
++
++    PreparedAudio result = preparer(runner).prepare(source, 44_739);
++
++    assertThat(kbpsOf(runner)).containsExactly("9k", "8k");
++    assertThat(result.kbps()).isEqualTo(8);
++  }
++}
+diff --git a/src/test/java/com/video2podcast/media/FfmpegRunnerTest.java b/src/test/java/com/video2podcast/media/FfmpegRunnerTest.java
+index 2ab48cc..fc3c2ce 100644
+--- a/src/test/java/com/video2podcast/media/FfmpegRunnerTest.java
++++ b/src/test/java/com/video2podcast/media/FfmpegRunnerTest.java
+@@ -201,4 +201,119 @@ class FfmpegRunnerTest {
+     assertKind(
+         () -> new FfmpegRunner(runner, JOBS).split(dir.resolve("audio.wav"), dir), Kind.FAILED);
+   }
++
++  @Test
++  void encodeM4aCommandAndResult() {
++    Path source = dir.resolve("source.mp4");
++    Path target = dir.resolve("out.m4a");
++    write(target, "stale");
++    FakeProcessRunner runner =
++        new FakeProcessRunner((args, timeout) -> {
++          assertThat(target).doesNotExist();
++          write(target, "aac");
++          return ok();
++        });
++
++    Path result = new FfmpegRunner(runner, JOBS).encodeM4a(source, target, 37, true);
++
++    assertThat(result).isEqualTo(target);
++    assertThat(runner.calls.get(0))
++        .containsExactly(
++            "ffmpeg",
++            "-nostdin",
++            "-hide_banner",
++            "-loglevel",
++            "error",
++            "-y",
++            "-i",
++            source.toString(),
++            "-vn",
++            "-ac",
++            "1",
++            "-c:a",
++            "aac",
++            "-b:a",
++            "37k",
++            "-movflags",
++            "+faststart",
++            target.toString());
++    assertThat(runner.timeouts.get(0)).isEqualTo(JOBS.ffmpegTimeout());
++  }
++
++  @Test
++  void encodeM4aKeepsTheChannelsWhenNotMono() {
++    Path target = dir.resolve("out.m4a");
++    FakeProcessRunner runner =
++        new FakeProcessRunner((args, timeout) -> {
++          write(target, "aac");
++          return ok();
++        });
++
++    new FfmpegRunner(runner, JOBS).encodeM4a(dir.resolve("s.webm"), target, 128, false);
++
++    assertThat(runner.calls.get(0)).doesNotContain("-ac").contains("128k");
++  }
++
++  @Test
++  void encodeM4aFailsOnAnExitCodeAndLeavesNothing() {
++    Path target = dir.resolve("out.m4a");
++    FakeProcessRunner runner =
++        new FakeProcessRunner((args, timeout) -> {
++          write(target, "partial");
++          return new ProcessResult(1, "", "boom");
++        });
++
++    assertKind(
++        () -> new FfmpegRunner(runner, JOBS).encodeM4a(dir.resolve("s.webm"), target, 64, true),
++        Kind.FAILED);
++    assertThat(target).doesNotExist();
++  }
++
++  @Test
++  void encodeM4aFailsWhenNoOrEmptyOutputIsWritten() {
++    Path target = dir.resolve("out.m4a");
++
++    assertKind(
++        () ->
++            new FfmpegRunner(FakeProcessRunner.returning(ok()), JOBS)
++                .encodeM4a(dir.resolve("s.webm"), target, 64, true),
++        Kind.FAILED);
++
++    FakeProcessRunner empty =
++        new FakeProcessRunner((args, timeout) -> {
++          write(target, "");
++          return ok();
++        });
++    assertKind(
++        () -> new FfmpegRunner(empty, JOBS).encodeM4a(dir.resolve("s.webm"), target, 64, true),
++        Kind.FAILED);
++    assertThat(target).doesNotExist();
++  }
++
++  @Test
++  void encodeM4aPassesATimeoutOn() {
++    Path target = dir.resolve("out.m4a");
++    FakeProcessRunner runner =
++        new FakeProcessRunner((args, timeout) -> {
++          write(target, "partial");
++          throw JobFailure.of(Kind.TIMEOUT);
++        });
++
++    assertKind(
++        () -> new FfmpegRunner(runner, JOBS).encodeM4a(dir.resolve("s.webm"), target, 64, true),
++        Kind.TIMEOUT);
++    assertThat(target).doesNotExist();
++  }
++
++  @Test
++  void encodeM4aFailsWhenTheTargetCannotBeReplaced() throws IOException {
++    Path target = dir.resolve("out.m4a");
++    Files.createDirectories(target.resolve("inner"));
++
++    assertKind(
++        () ->
++            new FfmpegRunner(FakeProcessRunner.returning(ok()), JOBS)
++                .encodeM4a(dir.resolve("s.webm"), target, 64, true),
++        Kind.FAILED);
++  }
+ }

@@ -1,0 +1,1479 @@
+diff --git a/src/it/java/com/video2podcast/functional/AccessGateIT.java b/src/it/java/com/video2podcast/functional/AccessGateIT.java
+index 7cd4a78..3fc18ff 100644
+--- a/src/it/java/com/video2podcast/functional/AccessGateIT.java
++++ b/src/it/java/com/video2podcast/functional/AccessGateIT.java
+@@ -109,11 +109,16 @@ class AccessGateIT extends FunctionalTest {
+     receive(Updates.callback(allowed, "cb-allowed", "audio:job1", 5));
+ 
+     assertThat(telegramCalls("answerCallbackQuery"))
+-        .singleElement()
+-        .satisfies(call -> {
+-          assertThat(call.get("callback_query_id").asText()).isEqualTo("cb-stranger");
+-          assertThat(call.get("text").asText()).isEqualTo("No access.");
+-        });
++        .satisfiesExactly(
++            refusal -> {
++              assertThat(refusal.get("callback_query_id").asText()).isEqualTo("cb-stranger");
++              assertThat(refusal.get("text").asText()).isEqualTo("No access.");
++            },
++            passedGate -> {
++              assertThat(passedGate.get("callback_query_id").asText()).isEqualTo("cb-allowed");
++              assertThat(passedGate.get("text").asText())
++                  .isEqualTo("Expired, please resend the link.");
++            });
+     assertThat(telegramCalls("sendMessage")).isEmpty();
+   }
+ }
+diff --git a/src/it/java/com/video2podcast/functional/AudioAssertionSteps.java b/src/it/java/com/video2podcast/functional/AudioAssertionSteps.java
+new file mode 100644
+index 0000000..f814c52
+--- /dev/null
++++ b/src/it/java/com/video2podcast/functional/AudioAssertionSteps.java
+@@ -0,0 +1,421 @@
++package com.video2podcast.functional;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++import com.fasterxml.jackson.databind.JsonNode;
++import com.video2podcast.functional.TranscriptWorld.Call;
++import io.cucumber.java.en.Then;
++import java.nio.file.*;
++import java.time.Instant;
++import java.util.*;
++
++/** Checks uploaded media, Telegram requests and durable files without calling delivery services. */
++public class AudioAssertionSteps {
++  final TranscriptWorld w;
++
++  public AudioAssertionSteps(TranscriptWorld w) {
++    this.w = w;
++  }
++
++  @Then(
++      "the Telegram mock receives in order an answerCallbackQuery with {string}, a reply-markup edit with {string}, one sendAudio and a reply-markup edit with {string}")
++  public void order(String answer, String progress, String sent) {
++    assertThat(w.tapCalls().stream().map(Call::method).toList())
++        .containsExactly(
++            "answercallbackquery", "editmessagereplymarkup", "sendaudio", "editmessagereplymarkup");
++    assertThat(w.calls("answerCallbackQuery").getFirst().json().path("text").asText())
++        .isEqualTo(answer);
++    assertThat(w.calls("editMessageReplyMarkup").getFirst().json().toString()).contains(progress);
++    assertThat(w.calls("editMessageReplyMarkup").getLast().json().toString()).contains(sent);
++    assertThat(
++            w.calls("sendAudio")
++                .getFirst()
++                .persisted()
++                .path("files")
++                .path("AUDIO")
++                .path("state")
++                .asText())
++        .isEqualTo("SENDING");
++    assertThat(
++            w.calls("editMessageReplyMarkup")
++                .getLast()
++                .persisted()
++                .path("files")
++                .path("AUDIO")
++                .path("state")
++                .asText())
++        .isEqualTo("SENT");
++  }
++
++  @Then(
++      "the sendAudio multipart request targets chat {long} with title {string} and the unchanged retained source bytes")
++  public void multipart(long chat, String title) throws Exception {
++    assertThat(w.audio.part("chat_id")).isEqualTo(Long.toString(chat));
++    part("title", title);
++    unchangedUpload();
++  }
++
++  @Then("the sendAudio multipart request contains exactly the unchanged retained source bytes")
++  public void unchangedUpload() {
++    assertThat(w.audio.upload())
++        .containsExactly(w.before.get(w.audio.source.getFileName().toString()));
++    assertThat(w.audio.encodes).isEmpty();
++  }
++
++  void part(String name, String value) {
++    assertThat(w.audio.part(name)).isEqualTo(value);
++  }
++
++  @Then("the sendAudio multipart performer is {string}")
++  public void performer(String value) {
++    part("performer", value);
++  }
++
++  @Then("the sendAudio multipart caption is exactly {string}")
++  public void caption(String value) {
++    part("caption", value);
++    assertThat(w.audio.part("parse_mode")).isEqualTo("HTML");
++  }
++
++  @Then("the sendAudio multipart title is exactly {string}")
++  public void title(String value) {
++    part("title", value);
++  }
++
++  @Then("the sendAudio multipart title is exactly {int} copies of {string}")
++  public void longTitle(int n, String value) {
++    title(value.repeat(n));
++  }
++
++  String disposition() {
++    var r = w.calls("sendAudio").getLast().request();
++    String ref = r.getPart("audio").getBody().asString();
++    return r.getPart(ref.substring(9)).getHeader("Content-Disposition").firstValue();
++  }
++
++  @Then("the uploaded audio filename ends with {string}")
++  public void extension(String ext) {
++    assertThat(disposition()).endsWith(ext + "\"");
++  }
++
++  @Then("the sendAudio multipart filename is {string}")
++  public void filename(String name) {
++    assertThat(disposition()).contains("filename=\"" + name + "\"");
++  }
++
++  @Then("the sendAudio multipart filename is {int} copies of {string} followed by {string}")
++  public void longFilename(int n, String value, String suffix) {
++    filename(value.repeat(n) + suffix);
++  }
++
++  @Then("job.json records AUDIO state {string} and sentAt {string}")
++  public void stateAt(String state, String at) throws Exception {
++    state(state, true);
++    assertThat(Instant.parse(w.file("AUDIO").path("sentAt").asText())).isEqualTo(Instant.parse(at));
++  }
++
++  @Then("job.json records AUDIO state {string} and nonnull sentAt")
++  public void sent(String state) throws Exception {
++    state(state, true);
++  }
++
++  @Then("job.json records AUDIO state {string} and null sentAt")
++  public void unsent(String state) throws Exception {
++    state(state, false);
++  }
++
++  void state(String expected, boolean sent) throws Exception {
++    PipelineWorld.until(() -> {
++      try {
++        JsonNode f = w.file("AUDIO");
++        assertThat(f.path("state").asText()).isEqualTo(expected);
++        assertThat(f.path("sentAt").isNull() || f.path("sentAt").isMissingNode()).isEqualTo(!sent);
++      } catch (Exception e) {
++        throw new AssertionError(e);
++      }
++    });
++  }
++
++  JsonNode beforeJob() throws Exception {
++    return PipelineWorld.JSON.readTree(w.before.get("job.json"));
++  }
++
++  @Then("the TRANSCRIPT entry and transcript bytes are unchanged")
++  public void transcriptUnchanged() throws Exception {
++    transcriptEntry();
++    assertThat(Files.readAllBytes(w.dir.resolve("transcript.txt")))
++        .containsExactly(w.transcriptBytes);
++  }
++
++  @Then("the TRANSCRIPT entry is unchanged")
++  public void transcriptEntry() throws Exception {
++    assertThat(w.file("TRANSCRIPT")).isEqualTo(beforeJob().path("files").path("TRANSCRIPT"));
++  }
++
++  @Then("both keyboard edits keep audio callback data {string}")
++  public void audioCallback(String data) {
++    assertThat(w.calls("editMessageReplyMarkup")).hasSize(2);
++    for (Call c : w.calls("editMessageReplyMarkup"))
++      assertThat(w.keyboard(c).path(0).path(0).path("callback_data").asText()).isEqualTo(data);
++  }
++
++  @Then("the Telegram mock receives no editMessageText, sendDocument, sendVoice or sendVideo")
++  public void noUnrelated() {
++    for (String method : List.of("editMessageText", "sendDocument", "sendVoice", "sendVideo"))
++      assertThat(w.calls(method)).isEmpty();
++  }
++
++  @Then("the source bytes and both stored expiry timestamps are unchanged")
++  public void unchangedExpiry() throws Exception {
++    sourceUnchanged();
++    for (String kind : List.of("AUDIO", "TRANSCRIPT"))
++      assertThat(w.file(kind).path("expiresAt"))
++          .isEqualTo(beforeJob().path("files").path(kind).path("expiresAt"));
++  }
++
++  @Then("the source bytes are unchanged")
++  public void sourceUnchanged() throws Exception {
++    assertThat(Files.readAllBytes(w.audio.source))
++        .containsExactly(w.before.get(w.audio.source.getFileName().toString()));
++  }
++
++  @Then("the source bytes and transcript bytes are unchanged")
++  public void bytesUnchanged() throws Exception {
++    sourceUnchanged();
++    assertThat(Files.readAllBytes(w.dir.resolve("transcript.txt")))
++        .containsExactly(w.transcriptBytes);
++  }
++
++  @Then("the stored title and source bytes are unchanged")
++  public void titleAndSource() throws Exception {
++    sourceUnchanged();
++    assertThat(w.job().path("title").asText()).isEqualTo(w.originalTitle);
++  }
++
++  @Then("job.json retains the original title")
++  public void storedTitle() throws Exception {
++    assertThat(w.job().path("title").asText()).isEqualTo(w.originalTitle);
++  }
++
++  @Then("the Telegram mock receives one successful sendAudio")
++  @Then("the Telegram mock receives one successful sendAudio for chat 101")
++  public void success() {
++    assertThat(w.calls("sendAudio")).hasSize(1);
++    assertThat(w.uploadSuccess).isNotNull();
++    assertThat(w.audio.part("chat_id")).isEqualTo("101");
++    assertThat(
++            w.telegram.getAllServeEvents().stream()
++                .filter(e -> e.getRequest().getUrl().endsWith("/sendaudio")))
++        .singleElement()
++        .satisfies(e -> assertThat(e.getResponse().getStatus()).isEqualTo(200));
++  }
++
++  @Then("the uploaded bytes form a nonempty M4A with AAC audio and no video stream")
++  public void aac() throws Exception {
++    media(false);
++  }
++
++  @Then("the uploaded bytes form a nonempty M4A with mono AAC audio and no video stream")
++  public void mono() throws Exception {
++    media(true);
++  }
++
++  void media(boolean mono) throws Exception {
++    assertThat(w.audio.upload()).isNotEmpty();
++    JsonNode probe = w.audio.uploadedMedia();
++    assertThat(probe.path("format").path("format_name").asText()).contains("m4a");
++    JsonNode streams = probe.path("streams");
++    assertThat(streams.size()).isEqualTo(1);
++    assertThat(streams.path(0).path("codec_type").asText()).isEqualTo("audio");
++    assertThat(streams.path(0).path("codec_name").asText()).isEqualTo("aac");
++    if (mono) assertThat(streams.path(0).path("channels").asInt()).isEqualTo(1);
++  }
++
++  @Then(
++      "the converted file on disk contains approximately 60 seconds of audio encoded at a requested 128 kbps")
++  public void duration() throws Exception {
++    JsonNode probe = w.audio.uploadedMedia();
++    assertThat(probe.path("format").path("duration").asDouble()).isBetween(59.0, 61.0);
++    assertThat(w.audio.encodes).hasSize(1);
++    assertThat(w.audio.encodes.getFirst())
++        .containsSubsequence("-b:a", "128k")
++        .doesNotContain("-ac");
++    assertThat(probe.path("streams").path(0).path("channels").asInt())
++        .isEqualTo(
++            AudioSupport.probe(w.audio.source).path("streams").findValue("channels").asInt());
++  }
++
++  @Then("the uploaded audio is smaller than {long} bytes")
++  public void size(long size) {
++    assertThat((long) w.audio.upload().length).isLessThan(size);
++  }
++
++  @Then("{string} does not exist in the job directory after delivery")
++  public void cleaned(String name) {
++    PipelineWorld.until(() -> assertThat(w.dir.resolve(name)).doesNotExist());
++  }
++
++  @Then("the one sendAudio upload contains the second encoded output fixture bytes")
++  @Then("the one sendAudio upload contains the mono compression output fixture bytes")
++  public void secondBytes() {
++    assertThat(w.calls("sendAudio")).hasSize(1);
++    assertThat(w.audio.encodedBytes).isNotNull();
++    assertThat(w.audio.upload()).containsExactly(w.audio.encodedBytes);
++  }
++
++  @Then(
++      "the ffmpeg fault journal records exactly two mono AAC encodes at 128 and 102 kbps in order")
++  public void retries() {
++    assertThat(w.audio.encodes).hasSize(2);
++    for (int i = 0; i < 2; i++)
++      assertThat(w.audio.encodes.get(i))
++          .containsSubsequence("-ac", "1")
++          .containsSubsequence("-c:a", "aac")
++          .containsSubsequence("-b:a", i == 0 ? "128k" : "102k");
++  }
++
++  @Then("the ffmpeg fault journal records exactly two encodes")
++  public void twoEncodes() {
++    assertThat(w.audio.encodes).hasSize(2);
++  }
++
++  @Then(
++      "the ffmpeg fault journal records a non-mono 128 kbps conversion followed by one mono 128 kbps encode from the original source")
++  public void fallback() {
++    assertThat(w.audio.encodes).hasSize(2);
++    assertThat(w.audio.encodes.getFirst())
++        .containsSubsequence("-b:a", "128k")
++        .doesNotContain("-ac");
++    assertThat(w.audio.encodes.getLast())
++        .containsSubsequence("-ac", "1")
++        .containsSubsequence("-b:a", "128k");
++    for (var args : w.audio.encodes)
++      assertThat(args).containsSubsequence("-i", w.audio.source.toString());
++  }
++
++  @Then("the Telegram mock receives no sendAudio")
++  public void noAudio() {
++    assertThat(w.calls("sendAudio")).isEmpty();
++  }
++
++  @Then("no Telegram message contains process stderr or a filesystem path")
++  public void safe() {
++    new TranscriptAssertionSteps(w).safeErrors();
++    for (Call c : w.events)
++      if (!c.request().isMultipart())
++        assertThat(c.request().getBodyAsString())
++            .doesNotContain("secret stderr", w.root.toString());
++  }
++
++  @Then("the tap is answered with {string} while the Whisper response remains held")
++  public void acknowledged(String text) {
++    held();
++    assertThat(w.calls("answerCallbackQuery").getLast().json().path("text").asText())
++        .isEqualTo(text);
++  }
++
++  void held() {
++    assertThat(w.audio.whisperReceived.getCount()).isZero();
++    assertThat(w.audio.releaseWhisper.getCount()).isEqualTo(1);
++  }
++
++  @Then("the summary keyboard shows {string} and {string}")
++  public void keyboard(String audio, String transcript) {
++    w.labels(w.calls("editMessageReplyMarkup").getLast(), audio, transcript);
++  }
++
++  @Then(
++      "no delivery audio output or sendAudio upload occurs while the Whisper response remains held")
++  public void queued() {
++    held();
++    noAudio();
++    assertThat(w.audio.encodes).isEmpty();
++    assertThat(w.dir.resolve("out.m4a")).doesNotExist();
++  }
++
++  @Then("the Telegram mock has received exactly one sendAudio request in total")
++  @Then("the Telegram mock receives one sendAudio attempt without an automatic retry")
++  public void once() {
++    assertThat(w.calls("sendAudio")).hasSize(1);
++  }
++
++  @Then("the Telegram mock receives one sendAudio targeting stored chat {long}")
++  public void destination(long chat) {
++    once();
++    assertThat(w.audio.part("chat_id")).isEqualTo(Long.toString(chat));
++  }
++
++  @Then("the Telegram mock receives no audio upload or message edit targeting chat {long}")
++  public void noRedirect(long chat) {
++    assertThat(w.audio.part("chat_id")).isNotEqualTo(Long.toString(chat));
++    for (Call c : w.events)
++      if (c.method().startsWith("editmessage"))
++        assertThat(c.json().path("chat_id").asLong()).isNotEqualTo(chat);
++  }
++
++  @Then("^the tap produces (one successful sendAudio and persisted AUDIO state SENT)$")
++  public void outcome(String outcome) throws Exception {
++    if (outcome.startsWith("one")) {
++      success();
++      sent("SENT");
++    } else w.refusal("Expired, please resend the link.");
++  }
++
++  @Then(
++      "the Telegram mock has received exactly two sendAudio attempts in total with one successful response")
++  public void retryUpload() {
++    assertThat(w.calls("sendAudio")).hasSize(2);
++    assertThat(
++            w.telegram.getAllServeEvents().stream()
++                .filter(e ->
++                    e.getRequest().getUrl().endsWith("/sendaudio")
++                        && e.getResponse().getStatus() == 200)
++                .count())
++        .isEqualTo(1);
++  }
++
++  @Then(
++      "both reply-markup edits retain the transcript button label {string} and its original callback data")
++  public void labels(String label) {
++    assertThat(w.calls("editMessageReplyMarkup")).hasSize(2);
++    for (Call c : w.calls("editMessageReplyMarkup")) {
++      assertThat(w.keyboard(c).path(0).path(1).path("text").asText()).isEqualTo(label);
++      assertThat(w.keyboard(c).path(0).path(1).path("callback_data").asText())
++          .isEqualTo("transcript:" + TranscriptWorld.JOB);
++    }
++  }
++
++  @Then(
++      "the Telegram mock receives one successful sendDocument while the Whisper response remains held")
++  public void transcriptWhileQueued() {
++    held();
++    assertThat(w.calls("sendDocument")).hasSize(1);
++    assertThat(
++            w.telegram.getAllServeEvents().stream()
++                .filter(e -> e.getRequest().getUrl().endsWith("/senddocument")))
++        .singleElement()
++        .satisfies(e -> assertThat(e.getResponse().getStatus()).isEqualTo(200));
++  }
++
++  @Then("the final summary keyboard shows {string} and {string}")
++  public void finalKeyboard(String a, String t) {
++    keyboard(a, t);
++  }
++
++  @Then("the source file, transcript.txt and job.json remain on disk")
++  public void files() {
++    for (Path p :
++        List.of(w.audio.source, w.dir.resolve("transcript.txt"), w.dir.resolve("job.json")))
++      assertThat(p).isRegularFile();
++  }
++
++  @Then("the Telegram mock receives no editMessageReplyMarkup")
++  public void noEdits() {
++    assertThat(w.calls("editMessageReplyMarkup")).isEmpty();
++  }
++
++  @Then("the AUDIO expiresAt in job.json is still {string}")
++  public void expiry(String value) throws Exception {
++    assertThat(w.file("AUDIO").path("expiresAt").asText()).isEqualTo(value);
++  }
++}
+diff --git a/src/it/java/com/video2podcast/functional/AudioButtonIT.java b/src/it/java/com/video2podcast/functional/AudioButtonIT.java
+new file mode 100644
+index 0000000..5c376da
+--- /dev/null
++++ b/src/it/java/com/video2podcast/functional/AudioButtonIT.java
+@@ -0,0 +1,62 @@
++package com.video2podcast.functional;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++import org.junit.jupiter.api.*;
++
++/** Full Spring wiring and real media tools, driven solely by Telegram updates and job files. */
++class AudioButtonIT extends FunctionalTest {
++  TranscriptWorld w;
++
++  @BeforeEach
++  void fixtures() throws Exception {
++    w = new TranscriptWorld();
++    w.beginAudio();
++  }
++
++  @AfterEach
++  void cleanup() {
++    w.close();
++  }
++
++  @Test
++  void unchangedUploadIsSentOnlyOnce() throws Exception {
++    w.tap("audio:" + TranscriptWorld.JOB, 101, 701, 101, "private");
++    assertThat(w.audio.upload()).containsExactly(w.before.get("source.m4a"));
++    assertThat(w.audio.part("caption")).isEqualTo("Original audio, not compressed.");
++    assertThat(w.file("AUDIO").path("state").asText()).isEqualTo("SENT");
++    w.tap("audio:" + TranscriptWorld.JOB, 101, 701, 101, "private");
++    w.refusal("Already sent.");
++    assertThat(w.calls("sendAudio")).hasSize(1);
++    w.unchanged();
++    w.noModels();
++  }
++
++  @Test
++  void realOversizedAudioIsCompressedAndTranscriptPreserved() throws Exception {
++    w.audio.source("source.wav", true, 0);
++    w.tap("audio:" + TranscriptWorld.JOB, 101, 701, 101, "private");
++    assertThat(w.audio.upload().length).isBetween(1, (int) AudioSupport.LIMIT - 1);
++    var streams = w.audio.uploadedMedia().path("streams");
++    assertThat(streams.size()).isEqualTo(1);
++    assertThat(streams.get(0).path("codec_name").asText()).isEqualTo("aac");
++    assertThat(streams.get(0).path("channels").asInt()).isEqualTo(1);
++    assertThat(w.file("TRANSCRIPT").path("state").asText()).isEqualTo("AVAILABLE");
++    assertThat(w.dir.resolve("out.m4a")).doesNotExist();
++  }
++
++  @Test
++  void ownershipAndExpiryPreventAudioDelivery() throws Exception {
++    w.allowed.add(202L);
++    w.tap("audio:" + TranscriptWorld.JOB, 202, 701, 101, "private");
++    w.refusal("This button is not for you.");
++    w.unchanged();
++    w.change(j ->
++        ((com.fasterxml.jackson.databind.node.ObjectNode) j.path("files").path("AUDIO"))
++            .put("expiresAt", w.clock.instant().toString()));
++    w.tap("audio:" + TranscriptWorld.JOB, 101, 701, 101, "private");
++    w.refusal("Expired, please resend the link.");
++    w.unchanged();
++    assertThat(w.calls("sendAudio")).isEmpty();
++  }
++}
+diff --git a/src/it/java/com/video2podcast/functional/AudioSetupSteps.java b/src/it/java/com/video2podcast/functional/AudioSetupSteps.java
+new file mode 100644
+index 0000000..6a2f7ab
+--- /dev/null
++++ b/src/it/java/com/video2podcast/functional/AudioSetupSteps.java
+@@ -0,0 +1,179 @@
++package com.video2podcast.functional;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++import com.fasterxml.jackson.databind.node.ObjectNode;
++import io.cucumber.java.en.*;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.util.concurrent.TimeUnit;
++
++/** Audio-specific setup; shared retained-job and callback steps remain in TranscriptSetupSteps. */
++public class AudioSetupSteps {
++  final TranscriptWorld w;
++
++  public AudioSetupSteps(TranscriptWorld w) {
++    this.w = w;
++  }
++
++  @Given("the stored job duration is {long} seconds")
++  public void duration(long seconds) throws Exception {
++    w.change(j -> j.put("durationSeconds", seconds));
++  }
++
++  @Given(
++      "the job directory contains a real ffmpeg-generated 60 second AAC audio-only {string} below 1000000 bytes")
++  @Given(
++      "the retained audio source is a real ffmpeg-generated 60 second {string} below 1000000 bytes")
++  public void source(String name) throws Exception {
++    w.audio.source(name, false, 0);
++    assertThat(Files.size(w.audio.source)).isLessThan(1000000);
++  }
++
++  @Given(
++      "^the retained audio source is a real ffmpeg-generated 60 second \"([^\"]+)\" below 1000000 bytes with (an Opus audio stream|video and AAC audio)$")
++  public void sourceStreams(String name, String streams) throws Exception {
++    source(name);
++    var media = AudioSupport.probe(w.audio.source).path("streams");
++    assertThat(media.toString()).contains(streams.startsWith("an Opus") ? "opus" : "video");
++  }
++
++  @Given("the job directory contains UTF-8 {string} with content {string}")
++  public void transcript(String name, String text) throws Exception {
++    assertThat(name).isEqualTo("transcript.txt");
++    w.transcriptBytes = text.replace("\\n", "\n").getBytes(StandardCharsets.UTF_8);
++    Files.write(w.dir.resolve(name), w.transcriptBytes);
++  }
++
++  @Given("the Telegram mock accepts audio uploads, document uploads, messages and keyboard edits")
++  public void accepts() {
++    /* HTTP responses supplied by retained boundary. */
++  }
++
++  @Given(
++      "the retained audio source is a real decodable 60 second stereo WAV larger than 52428800 bytes")
++  public void largeWav() throws Exception {
++    w.audio.source("source.wav", true, 0);
++  }
++
++  @Given("the retained audio source is larger than 52428800 bytes")
++  public void large() throws Exception {
++    w.audio.source("source.m4a", false, AudioSupport.LIMIT + 1);
++  }
++
++  @Given("the retained audio source is a valid {string} with padding to exactly {long} bytes")
++  @Given(
++      "the retained audio source is a valid 60 second {string} with padding to exactly {long} bytes")
++  public void padded(String name, long size) throws Exception {
++    w.audio.source(name, false, size);
++    assertThat(Files.size(w.audio.source)).isEqualTo(size);
++  }
++
++  @Given(
++      "the ffmpeg fault fixture writes an oversized M4A for the first encode and a nonempty below-limit M4A for the second encode")
++  public void retry() {
++    w.audio.fault = "retry";
++  }
++
++  @Given("the ffmpeg fault fixture writes an oversized M4A for every encode")
++  public void alwaysLarge() {
++    w.audio.fault = "always-large";
++  }
++
++  @Given(
++      "^the ffmpeg fault fixture (exits with code 1 and writes a partial file|reports a process timeout|exits with code 0 but writes no output|exits with code 0 but writes an empty output)$")
++  public void fault(String failure) {
++    w.audio.fault =
++        failure.contains("partial")
++            ? "partial"
++            : failure.contains("timeout")
++                ? "timeout"
++                : failure.contains("no output") ? "absent" : "empty";
++  }
++
++  @Given(
++      "the ffmpeg fault fixture writes a {long} byte output for the non-mono 128 kbps conversion and a valid below-limit M4A for mono compression")
++  public void conversion(long size) {
++    w.audio.fault = "conversion";
++    w.audio.firstSize = size;
++  }
++
++  @Given(
++      "the ffmpeg fault fixture writes exactly 52428800 bytes for the first mono encode and a valid below-limit M4A for the second")
++  public void equalLimit() {
++    retry();
++    w.audio.firstSize = AudioSupport.LIMIT;
++  }
++
++  @Given("the ffmpeg fault fixture exits with code 1 for the first conversion only")
++  public void once() {
++    w.audio.fault = "once";
++  }
++
++  @Given("the ffmpeg fault fixture now allows real ffmpeg to run")
++  public void real() {
++    w.audio.fault = "";
++  }
++
++  @Given("another allowed user's earlier video link is waiting for a held Whisper HTTP response")
++  public void earlier() throws Exception {
++    w.audio.earlierJob();
++  }
++
++  @When(
++      "the Whisper mock releases the successful response and the earlier job publishes its summary")
++  public void releaseEarlier() {
++    w.audio.releaseEarlier();
++  }
++
++  @Given("the Telegram mock holds the audio upload response")
++  public void hold() {
++    w.hold = true;
++  }
++
++  @Given("the Telegram mock has received the audio upload and holds its response")
++  public void held() throws Exception {
++    assertThat(w.uploadReceived.await(15, TimeUnit.SECONDS)).isTrue();
++    assertThat(w.releaseUpload.getCount()).isEqualTo(1);
++    assertThat(w.file("AUDIO").path("state").asText()).isEqualTo("SENDING");
++  }
++
++  @Given("the user has successfully downloaded this job's audio through a Telegram callback")
++  public void delivered() throws Exception {
++    w.tap("audio:" + TranscriptWorld.JOB, w.user, 701, 101, "private");
++    assertThat(w.audio.readState()).isEqualTo("SENT");
++  }
++
++  @Given("the AUDIO expiresAt in job.json is {string}")
++  public void expiry(String at) throws Exception {
++    w.change(j -> ((ObjectNode) j.path("files").path("AUDIO")).put("expiresAt", at));
++  }
++
++  @Given("job.json has no AUDIO entry")
++  public void noAudio() throws Exception {
++    w.change(j -> ((ObjectNode) j.path("files")).remove("AUDIO"));
++  }
++
++  @Given("the AUDIO state in job.json is EXPIRED")
++  public void expired() throws Exception {
++    w.change(j -> ((ObjectNode) j.path("files").path("AUDIO")).put("state", "EXPIRED"));
++  }
++
++  @Given("the retained audio source file is absent")
++  public void absent() throws Exception {
++    Files.delete(w.audio.source);
++  }
++
++  @Given(
++      "the Telegram mock rejects the first sendAudio with HTTP {int} and a Bot API error response")
++  public void rejects(int status) {
++    assertThat(status).isEqualTo(400);
++    w.rejectUpload = 1;
++  }
++
++  @Given(
++      "the Telegram mock accepts the audio upload bytes but closes the connection without a response on every audio upload attempt")
++  public void drops() {
++    w.drop = true;
++  }
++}
+diff --git a/src/it/java/com/video2podcast/functional/AudioSupport.java b/src/it/java/com/video2podcast/functional/AudioSupport.java
+new file mode 100644
+index 0000000..7fa2441
+--- /dev/null
++++ b/src/it/java/com/video2podcast/functional/AudioSupport.java
+@@ -0,0 +1,339 @@
++package com.video2podcast.functional;
++
++import static com.github.tomakehurst.wiremock.client.WireMock.*;
++import static org.assertj.core.api.Assertions.assertThat;
++
++import com.fasterxml.jackson.databind.JsonNode;
++import com.fasterxml.jackson.databind.node.ObjectNode;
++import com.github.tomakehurst.wiremock.WireMockServer;
++import com.github.tomakehurst.wiremock.extension.ResponseDefinitionTransformerV2;
++import com.github.tomakehurst.wiremock.http.ResponseDefinition;
++import com.github.tomakehurst.wiremock.stubbing.ServeEvent;
++import com.video2podcast.job.JobFailure;
++import com.video2podcast.media.DefaultProcessRunner;
++import com.video2podcast.media.ProcessResult;
++import java.nio.file.*;
++import java.time.Duration;
++import java.util.*;
++import java.util.concurrent.*;
++
++/** T13 process/HTTP boundary fixtures. All successful encodes use real ffmpeg. */
++final class AudioSupport implements AutoCloseable {
++  static final long LIMIT = 50L * 1024 * 1024;
++  final TranscriptWorld w;
++  final List<List<String>> encodes = new CopyOnWriteArrayList<>();
++  final CountDownLatch whisperReceived = new CountDownLatch(1);
++  final CountDownLatch releaseWhisper = new CountDownLatch(1);
++  final WireMockServer media;
++  volatile boolean queued;
++  int deliveryStart;
++  String fault = "";
++  long firstSize = LIMIT + 1;
++  byte[] encodedBytes;
++  Path source;
++
++  AudioSupport(TranscriptWorld world) throws Exception {
++    w = world;
++    media = WireMocks.scenarioServer();
++    w.whisper.stop();
++    w.ollama.stop();
++    w.whisper = WireMocks.scenarioServer(new Models(true));
++    w.ollama = WireMocks.scenarioServer(new Models(false));
++    w.whisper.stubFor(any(anyUrl()).willReturn(aResponse()));
++    w.ollama.stubFor(any(anyUrl()).willReturn(aResponse()));
++    source("source.m4a", false, 0);
++  }
++
++  void source(String name, boolean oversized, long padded) throws Exception {
++    assertThat(w.context).as("source fixture before startup").isNull();
++    source = w.dir.resolve(name);
++    Path fixture = fixture(name, oversized);
++    Files.copy(fixture, source, StandardCopyOption.REPLACE_EXISTING);
++    if (padded != 0) resize(source, padded);
++    w.change(j -> ((ObjectNode) j.path("files").path("AUDIO")).put("path", name));
++    assertThat(probe(source).path("streams").size()).isGreaterThan(0);
++    if (oversized) assertThat(Files.size(source)).isGreaterThan(LIMIT);
++  }
++
++  static synchronized Path fixture(String name, boolean large) throws Exception {
++    String ext = name.substring(name.lastIndexOf('.') + 1).toLowerCase(Locale.ROOT);
++    Path dir = Files.createDirectories(Path.of("target", "audio-fixtures"));
++    Path target = dir.resolve((large ? "large" : "short") + "." + ext);
++    if (Files.exists(target)) return target;
++    var args =
++        new ArrayList<>(
++            List.of(
++                "ffmpeg",
++                "-nostdin",
++                "-hide_banner",
++                "-loglevel",
++                "error",
++                "-y",
++                "-f",
++                "lavfi",
++                "-i",
++                "sine=frequency=440:sample_rate=" + (large ? "192000" : "44100")));
++    if (ext.equals("mp4"))
++      args.addAll(
++          List.of(
++              "-f",
++              "lavfi",
++              "-i",
++              "color=c=black:s=16x16:r=1",
++              "-c:v",
++              "libx264",
++              "-pix_fmt",
++              "yuv420p"));
++    args.addAll(
++        List.of(
++            "-t",
++            "60",
++            "-ac",
++            "2",
++            "-c:a",
++            ext.equals("wav")
++                ? "pcm_s32le"
++                : ext.equals("webm") ? "libopus" : ext.equals("mp3") ? "libmp3lame" : "aac"));
++    if (!ext.equals("wav")) args.addAll(List.of("-b:a", "64k"));
++    Path temporary = Files.createTempFile(dir, "generating-", "." + ext);
++    args.add(temporary.toString());
++    try {
++      MediaFixtures.run(args);
++      Files.move(
++          temporary, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
++      return target;
++    } finally {
++      Files.deleteIfExists(temporary);
++    }
++  }
++
++  static void resize(Path file, long size) throws java.io.IOException {
++    try (var f = new java.io.RandomAccessFile(file.toFile(), "rw")) {
++      f.setLength(size);
++    }
++  }
++
++  static JsonNode probe(Path file) {
++    ProcessResult r =
++        new DefaultProcessRunner()
++            .run(
++                List.of(
++                    "ffprobe",
++                    "-v",
++                    "error",
++                    "-show_streams",
++                    "-show_format",
++                    "-of",
++                    "json",
++                    file.toString()),
++                Duration.ofSeconds(15));
++    assertThat(r.exitCode()).as(r.stderr()).isZero();
++    return PipelineWorld.json(r.stdout());
++  }
++
++  ProcessResult run(List<String> original, Duration timeout) {
++    try {
++      var args = new ArrayList<>(original);
++      if (args.getFirst().equals("yt-dlp")) {
++        args.addAll(1, List.of("--proxy", media.baseUrl(), "--ignore-config"));
++      }
++      boolean delivery = args.getFirst().equals("ffmpeg") && args.getLast().endsWith("out.m4a");
++      if (delivery) {
++        encodes.add(List.copyOf(args));
++        Path out = Path.of(args.getLast());
++        if (!fault.isEmpty()) {
++          if (fault.equals("timeout")) throw JobFailure.of(JobFailure.Kind.TIMEOUT);
++          if (fault.equals("partial") || (fault.equals("once") && encodes.size() == 1)) {
++            Files.writeString(out, "partial secret /private/jobs");
++            return new ProcessResult(1, "", "secret stderr /private/jobs");
++          }
++          if (fault.equals("absent")) return new ProcessResult(0, "", "");
++          if (fault.equals("empty")) {
++            Files.write(out, new byte[0]);
++            return new ProcessResult(0, "", "");
++          }
++          boolean oversized =
++              fault.equals("always-large")
++                  || (fault.equals("retry") && encodes.size() == 1)
++                  || (fault.equals("conversion") && !args.contains("-ac"));
++          if (oversized) {
++            Files.writeString(out, "oversized fixture");
++            resize(out, firstSize);
++          } else {
++            // Following a forced overflow, generate the successful second output with real ffmpeg.
++            ProcessResult result = new DefaultProcessRunner().run(args, timeout);
++            if (result.exitCode() == 0) encodedBytes = Files.readAllBytes(out);
++            return result;
++          }
++          return new ProcessResult(0, "", "");
++        }
++      }
++      return new DefaultProcessRunner().run(args, timeout);
++    } catch (java.io.IOException e) {
++      throw new IllegalStateException(e);
++    }
++  }
++
++  void afterTap(String data) {
++    if (!data.startsWith("audio:")) return;
++    boolean granted =
++        w.tapCalls().stream()
++            .anyMatch(c ->
++                c.method().equals("answercallbackquery")
++                    && c.json().path("text").asText().equals("Preparing audio…"));
++    if (granted) deliveryStart = w.tapStart;
++    if (granted && !w.hold && !queued) awaitDelivery();
++  }
++
++  void awaitDelivery() {
++    PipelineWorld.until(() -> {
++      boolean finished =
++          w.events.stream()
++              .skip(deliveryStart)
++              .anyMatch(c ->
++                  (c.method().equals("editmessagereplymarkup")
++                          && c.json().toString().contains("Audio sent"))
++                      || (c.method().equals("sendmessage")
++                          && c.json()
++                              .path("text")
++                              .asText()
++                              .equals("Could not send the audio. Tap the button to try again.")));
++      if (noSummary()) finished = w.uploadSuccess != null && readState().equals("SENT");
++      assertThat(finished).as("terminal audio notification").isTrue();
++      assertThat(w.dir.resolve("out.m4a")).doesNotExist();
++    });
++  }
++
++  boolean noSummary() {
++    try {
++      JsonNode id = w.job().path("summaryMessageId");
++      return id.isNull() || id.isMissingNode();
++    } catch (Exception e) {
++      throw new AssertionError(e);
++    }
++  }
++
++  String readState() {
++    try {
++      return w.file("AUDIO").path("state").asText();
++    } catch (Exception e) {
++      throw new AssertionError(e);
++    }
++  }
++
++  byte[] upload() {
++    var r = w.calls("sendAudio").getLast().request();
++    assertThat(r.isMultipart()).isTrue();
++    String ref = r.getPart("audio").getBody().asString();
++    assertThat(ref).startsWith("attach://");
++    return r.getPart(ref.substring(9)).getBody().asBytes();
++  }
++
++  String part(String name) {
++    return w.calls("sendAudio").getLast().request().getPart(name).getBody().asString();
++  }
++
++  JsonNode uploadedMedia() throws Exception {
++    Path captured = w.root.resolve("captured-upload.m4a");
++    Files.write(captured, upload());
++    return probe(captured);
++  }
++
++  void earlierJob() throws Exception {
++    queued = true;
++    byte[] bytes = Files.readAllBytes(fixture("source.m4a", false));
++    String page =
++        "<html><head><title>Earlier video</title>"
++            + "<script type=\"application/ld+json\">"
++            + PipelineWorld.stringify(
++                Map.of(
++                    "@context",
++                    "https://schema.org",
++                    "@type",
++                    "VideoObject",
++                    "name",
++                    "Earlier video",
++                    "duration",
++                    "PT60S",
++                    "contentUrl",
++                    "http://videos.example/earlier.m4a"))
++            + "</script></head><body></body></html>";
++    media.stubFor(
++        get(urlPathEqualTo("/earlier"))
++            .willReturn(aResponse().withHeader("Content-Type", "text/html").withBody(page)));
++    media.stubFor(
++        get(urlPathEqualTo("/earlier.m4a"))
++            .willReturn(aResponse().withHeader("Content-Type", "audio/mp4").withBody(bytes)));
++    w.allowed.add(202L);
++    w.start();
++    w.bot().consume(Updates.privateMessage(202, "http://videos.example/earlier"));
++    assertThat(whisperReceived.await(30, TimeUnit.SECONDS))
++        .as("earlier job reached Whisper")
++        .isTrue();
++  }
++
++  void releaseEarlier() {
++    releaseWhisper.countDown();
++    PipelineWorld.until(() ->
++        assertThat(
++                w.calls("sendMessage").stream()
++                    .anyMatch(c ->
++                        c.json().path("chat_id").asLong() == 202
++                            && c.json().path("text").asText().contains("<b>")))
++            .isTrue());
++    queued = false;
++    awaitDelivery();
++  }
++
++  public void close() {
++    media.stop();
++  }
++
++  final class Models implements ResponseDefinitionTransformerV2 {
++    final boolean whisper;
++
++    Models(boolean whisper) {
++      this.whisper = whisper;
++    }
++
++    public String getName() {
++      return "audio-models-" + whisper;
++    }
++
++    public boolean applyGlobally() {
++      return true;
++    }
++
++    public ResponseDefinition transform(ServeEvent event) {
++      if (whisper) {
++        whisperReceived.countDown();
++        try {
++          if (!releaseWhisper.await(30, TimeUnit.SECONDS))
++            throw new AssertionError("Whisper hold not released");
++        } catch (InterruptedException e) {
++          Thread.currentThread().interrupt();
++          throw new IllegalStateException(e);
++        }
++        return aResponse()
++            .withHeader("Content-Type", "application/json")
++            .withBody("{\"text\":\"Earlier speech\"}")
++            .build();
++      }
++      int count = 32;
++      for (JsonNode msg : PipelineWorld.json(event.getRequest().getBodyAsString()).path("messages"))
++        count += (msg.path("content").asText().length() + 2) / 3;
++      return aResponse()
++          .withHeader("Content-Type", "application/json")
++          .withBody(
++              PipelineWorld.stringify(
++                  Map.of(
++                      "message",
++                      Map.of("content", "- Earlier summary"),
++                      "prompt_eval_count",
++                      count,
++                      "done",
++                      true)))
++          .build();
++    }
++  }
++}
+diff --git a/src/it/java/com/video2podcast/functional/DeliveryScenarios.java b/src/it/java/com/video2podcast/functional/DeliveryScenarios.java
+new file mode 100644
+index 0000000..e554810
+--- /dev/null
++++ b/src/it/java/com/video2podcast/functional/DeliveryScenarios.java
+@@ -0,0 +1,18 @@
++package com.video2podcast.functional;
++
++import static io.cucumber.junit.platform.engine.Constants.*;
++
++import org.junit.platform.suite.api.*;
++
++/**
++ * Focused T12/T13 regression suite: run explicitly with -Dit.test=DeliveryScenarios. The default
++ * *IT run uses CucumberIT, which already selects these features.
++ */
++@Suite
++@IncludeEngines("cucumber")
++@SelectClasspathResource("features")
++@ConfigurationParameter(key = GLUE_PROPERTY_NAME, value = "com.video2podcast.functional")
++@ConfigurationParameter(key = PLUGIN_PROPERTY_NAME, value = "summary")
++@ConfigurationParameter(key = FILTER_TAGS_PROPERTY_NAME, value = "@T12 or @T13")
++@ConfigurationParameter(key = JUNIT_PLATFORM_NAMING_STRATEGY_PROPERTY_NAME, value = "long")
++public class DeliveryScenarios {}
+diff --git a/src/it/java/com/video2podcast/functional/PipelineWorld.java b/src/it/java/com/video2podcast/functional/PipelineWorld.java
+index 1e0c711..7ff2508 100644
+--- a/src/it/java/com/video2podcast/functional/PipelineWorld.java
++++ b/src/it/java/com/video2podcast/functional/PipelineWorld.java
+@@ -41,7 +41,6 @@ public class PipelineWorld implements AutoCloseable {
+   static final ObjectMapper JSON = new ObjectMapper();
+   static final String TAGS = "@T8 or @T9 or @T10 or @T11 or @TD2";
+   static final Duration WAIT = Duration.ofSeconds(30);
+-  static volatile PipelineWorld building;
+   final List<Event> events = new CopyOnWriteArrayList<>();
+   final List<List<String>> commands = new CopyOnWriteArrayList<>();
+   final Map<String, String> properties = new LinkedHashMap<>();
+@@ -114,15 +113,20 @@ public class PipelineWorld implements AutoCloseable {
+   }
+ 
+   void start() {
++    assertThat(active).as("pipeline scenario is active before starting its application").isTrue();
+     if (context != null) return;
+     FunctionalTest.applicationSettings(
+             root, telegram.baseUrl(), whisper.baseUrl(), ollama.baseUrl())
+         .forEach(properties::putIfAbsent);
+     properties.put("spring.main.banner-mode", "off");
+     properties.put("logging.level.root", "WARN");
+-    building = this;
+     context =
+         new SpringApplicationBuilder(Video2PodcastApplication.class, Fixtures.class)
++            .initializers(c -> {
++              c.getBeanFactory().registerSingleton("pipelineFixtureClock", clock);
++              c.getBeanFactory()
++                  .registerSingleton("pipelineFixtureProcesses", (ProcessRunner) this::run);
++            })
+             .run(
+                 properties.entrySet().stream()
+                     .map(e -> "--" + e.getKey() + "=" + e.getValue())
+@@ -132,6 +136,16 @@ public class PipelineWorld implements AutoCloseable {
+ 
+   void allow(long id) {
+     context.getBean(TelegramBot.class).consume(Updates.privateMessage(1, "/allow " + id));
++    assertThat(calls("sendMessage"))
++        .as(
++            "allowlist acknowledgement reached Telegram mock %s for user %s",
++            telegram.baseUrl(), id)
++        .anySatisfy(e -> {
++          assertThat(e.json().path("chat_id").asLong()).isEqualTo(1);
++          assertThat(e.text())
++              .isIn("User " + id + " allowed.", "User " + id + " already has access.");
++          assertThat(responseIds).containsKey(e);
++        });
+     events.removeIf(e -> e.service.equals("telegram"));
+   }
+ 
+@@ -365,16 +379,39 @@ public class PipelineWorld implements AutoCloseable {
+             .isGreaterThanOrEqualTo((long) submissions));
+   }
+ 
+-  void finishOne() {
++  Event latestTerminal() {
++    List<Event> queued =
++        calls("sendMessage").stream()
++            .filter(e -> e.nanos >= lastUpdateNanos && e.text().startsWith("Queued:"))
++            .toList();
++    if (queued.isEmpty()) return null;
++    Event submission = queued.getLast();
++    Integer messageId = responseIds.get(submission);
++    if (messageId == null) return null;
++    long chat = submission.json().path("chat_id").asLong();
++    return calls("editMessageText").stream()
++        .filter(e ->
++            e.nanos >= submission.nanos
++                && e.json().path("chat_id").asLong() == chat
++                && e.json().path("message_id").asInt() == messageId
++                && Set.of("Done.", "Failed.").contains(e.text()))
++        .reduce((previous, current) -> current)
++        .orElse(null);
++  }
++
++  Event finishOne() {
+     until(() ->
+-        assertThat(
+-                calls("editMessageText").stream()
+-                    .anyMatch(e -> e.text().equals("Done.") || e.text().equals("Failed.")))
+-            .isTrue());
++        assertThat(latestTerminal())
++            .as("terminal status for the latest submission %s at %s", lastUrl, telegram.baseUrl())
++            .isNotNull());
++    return latestTerminal();
+   }
+ 
+   void reply(String text) {
+-    until(() -> assertThat(calls("sendMessage").stream().map(Event::text).toList()).contains(text));
++    until(() ->
++        assertThat(calls("sendMessage").stream().map(Event::text).toList())
++            .as("Telegram replies at %s for submission %s", telegram.baseUrl(), lastUrl)
++            .contains(text));
+   }
+ 
+   void transcriptionSettled() {
+@@ -536,6 +573,7 @@ public class PipelineWorld implements AutoCloseable {
+ 
+   @Override
+   public void close() {
++    active = false;
+     holds.forEach(h -> h.release.countDown());
+     if (context != null) {
+       try {
+@@ -578,14 +616,18 @@ public class PipelineWorld implements AutoCloseable {
+   static class Fixtures {
+     @Bean
+     @Primary
+-    Clock testClock() {
+-      return building.clock;
++    Clock testClock(
++        @org.springframework.beans.factory.annotation.Qualifier("pipelineFixtureClock")
++            Clock clock) {
++      return clock;
+     }
+ 
+     @Bean
+     @Primary
+-    ProcessRunner testProcesses() {
+-      return building::run;
++    ProcessRunner testProcesses(
++        @org.springframework.beans.factory.annotation.Qualifier("pipelineFixtureProcesses")
++            ProcessRunner runner) {
++      return runner;
+     }
+   }
+ 
+diff --git a/src/it/java/com/video2podcast/functional/ScenarioFixtureIT.java b/src/it/java/com/video2podcast/functional/ScenarioFixtureIT.java
+new file mode 100644
+index 0000000..511e8ac
+--- /dev/null
++++ b/src/it/java/com/video2podcast/functional/ScenarioFixtureIT.java
+@@ -0,0 +1,62 @@
++package com.video2podcast.functional;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.assertj.core.api.Assertions.assertThatThrownBy;
++
++import org.junit.jupiter.api.Test;
++
++/** Guards scenario setup/teardown rather than silently accepting a broken HTTP fixture. */
++class ScenarioFixtureIT {
++  @Test
++  void startupRequiresTheAllowlistAcknowledgementToReachTelegram() throws Exception {
++    try (PipelineWorld w = new PipelineWorld()) {
++      w.begin();
++      w.reject = n -> n.path("text").asText().equals("User " + w.user + " allowed.");
++      assertThatThrownBy(w::start)
++          .isInstanceOf(AssertionError.class)
++          .hasMessageContaining("allowlist acknowledgement");
++    }
++  }
++
++  @Test
++  void closedRetainedJobWorldCannotRemainActiveInSharedSteps() throws Exception {
++    TranscriptWorld w = new TranscriptWorld();
++    w.begin();
++    assertThat(w.active).isTrue();
++    w.close();
++    assertThat(w.active).isFalse();
++  }
++
++  @Test
++  void terminalStatusMustBelongToTheLatestSubmissionAndStoredChat() {
++    PipelineWorld w = new PipelineWorld();
++    var oldQueued = event("sendmessage", "Queued: position 1", 101, 0, 1);
++    var currentQueued = event("sendmessage", "Queued: position 1", 101, 0, 3);
++    w.events.add(oldQueued);
++    w.responseIds.put(oldQueued, 10);
++    w.events.add(event("editmessagetext", "Done.", 101, 10, 2));
++    w.lastUpdateNanos = 3;
++    w.events.add(currentQueued);
++    w.responseIds.put(currentQueued, 11);
++    // Even a late terminal event for the previous job must not finish this submission.
++    w.events.add(event("editmessagetext", "Done.", 101, 10, 4));
++    w.events.add(event("editmessagetext", "Failed.", 202, 11, 5));
++    assertThat(w.latestTerminal()).isNull();
++    var currentTerminal = event("editmessagetext", "Done.", 101, 11, 6);
++    w.events.add(currentTerminal);
++    assertThat(w.latestTerminal()).isSameAs(currentTerminal);
++  }
++
++  private static PipelineWorld.Event event(
++      String method, String text, long chat, int message, long nanos) {
++    String body =
++        PipelineWorld.stringify(
++            java.util.Map.of("text", text, "chat_id", chat, "message_id", message));
++    return new PipelineWorld.Event(
++        "telegram",
++        "/bot/test/" + method,
++        body.getBytes(java.nio.charset.StandardCharsets.UTF_8),
++        nanos,
++        java.time.Instant.EPOCH);
++  }
++}
+diff --git a/src/it/java/com/video2podcast/functional/SummaryAssertionSteps.java b/src/it/java/com/video2podcast/functional/SummaryAssertionSteps.java
+index 4b95d49..af321f2 100644
+--- a/src/it/java/com/video2podcast/functional/SummaryAssertionSteps.java
++++ b/src/it/java/com/video2podcast/functional/SummaryAssertionSteps.java
+@@ -21,8 +21,15 @@ public class SummaryAssertionSteps {
+ 
+   @Then("the Ollama mock receives exactly {int} POST request(s) to {string}")
+   public void ollamaCount(int n, String path) {
+-    w.finishOne();
+-    assertThat(w.service("ollama")).hasSize(n).allSatisfy(e -> assertThat(e.url()).isEqualTo(path));
++    Event terminal = w.finishOne();
++    assertThat(w.service("ollama"))
++        .as(
++            "Ollama mock %s after latest submission reached %s; Telegram replies: %s",
++            w.ollama.baseUrl(),
++            terminal.text(),
++            w.calls("sendMessage").stream().map(Event::text).toList())
++        .hasSize(n)
++        .allSatisfy(e -> assertThat(e.url()).isEqualTo(path));
+   }
+ 
+   @Then(
+diff --git a/src/it/java/com/video2podcast/functional/TranscriptAssertionSteps.java b/src/it/java/com/video2podcast/functional/TranscriptAssertionSteps.java
+index 9eba51e..3d0ac91 100644
+--- a/src/it/java/com/video2podcast/functional/TranscriptAssertionSteps.java
++++ b/src/it/java/com/video2podcast/functional/TranscriptAssertionSteps.java
+@@ -58,12 +58,14 @@ public class TranscriptAssertionSteps {
+     for (Call c : w.calls("editMessageReplyMarkup")) {
+       assertThat(c.json().path("chat_id").asLong()).isEqualTo(chat);
+       assertThat(c.json().path("message_id").asInt()).isEqualTo(message);
+-      w.labels(
+-          c,
+-          "Download audio",
+-          c == w.calls("editMessageReplyMarkup").getFirst()
+-              ? "Sending transcript…"
+-              : "Transcript sent");
++      boolean first = c == w.calls("editMessageReplyMarkup").getFirst();
++      String audioLabel = "Download audio";
++      String transcriptLabel = first ? "Sending transcript…" : "Transcript sent";
++      if (w.audio != null) {
++        audioLabel = first ? "Preparing audio…" : "Audio sent";
++        transcriptLabel = "Download transcript";
++      }
++      w.labels(c, audioLabel, transcriptLabel);
+     }
+   }
+ 
+@@ -71,7 +73,7 @@ public class TranscriptAssertionSteps {
+   public void keepAudio(String label, String data) {
+     assertThat(w.calls("editMessageReplyMarkup")).hasSize(2);
+     for (Call c : w.calls("editMessageReplyMarkup")) {
+-      JsonNode b = w.keyboard(c).path(0).path(0);
++      JsonNode b = w.keyboard(c).path(0).path(w.audio == null ? 0 : 1);
+       assertThat(b.path("text").asText()).isEqualTo(label);
+       assertThat(b.path("callback_data").asText()).isEqualTo(data);
+     }
+@@ -216,7 +218,10 @@ public class TranscriptAssertionSteps {
+   @Then("the summary keyboard is restored to {string} with {string} unchanged")
+   public void restored(String transcript, String audio) {
+     assertThat(w.calls("editMessageReplyMarkup")).hasSize(2);
+-    w.labels(w.calls("editMessageReplyMarkup").getLast(), audio, transcript);
++    w.labels(
++        w.calls("editMessageReplyMarkup").getLast(),
++        w.audio == null ? audio : transcript,
++        w.audio == null ? transcript : audio);
+   }
+ 
+   @Then("the Telegram mock receives a sendMessage to chat {long} with {string}")
+diff --git a/src/it/java/com/video2podcast/functional/TranscriptWorld.java b/src/it/java/com/video2podcast/functional/TranscriptWorld.java
+index f380786..e887ed1 100644
+--- a/src/it/java/com/video2podcast/functional/TranscriptWorld.java
++++ b/src/it/java/com/video2podcast/functional/TranscriptWorld.java
+@@ -48,13 +48,14 @@ public class TranscriptWorld implements AutoCloseable {
+   WireMockServer telegram, whisper, ollama;
+   ConfigurableApplicationContext context;
+   Path root, dir, sentinel;
++  AudioSupport audio;
+   boolean active, hold, drop, rejectAnswer;
+   int rejectUpload, rejectEdit, tapStart;
+   long user = 101, admin = 999;
+   String originalTitle = "Budget meeting";
+   byte[] transcriptBytes;
+   ObjectNode initial;
+-  Instant uploadSuccess;
++  volatile Instant uploadSuccess;
+   String lastCallback;
+ 
+   @Before(value = "@T12", order = 10)
+@@ -93,7 +94,16 @@ public class TranscriptWorld implements AutoCloseable {
+     Files.write(dir.resolve("transcript.txt"), transcriptBytes);
+   }
+ 
++  @Before(value = "@T13", order = 10)
++  public void beginAudio() throws Exception {
++    begin();
++    audio = new AudioSupport(this);
++  }
++
+   void start() {
++    assertThat(active)
++        .as("retained-job scenario is active before starting its application")
++        .isTrue();
+     if (context != null) return;
+     Map<String, String> props =
+         new LinkedHashMap<>(
+@@ -105,8 +115,17 @@ public class TranscriptWorld implements AutoCloseable {
+     // Initializer registers only boundary fixtures, leaving all delivery wiring real.
+     context =
+         new SpringApplicationBuilder(Video2PodcastApplication.class, Fixtures.class)
+-            .initializers(
+-                c -> c.getBeanFactory().registerSingleton("transcriptFixtureClock", clock))
++            .initializers(c -> {
++              c.getBeanFactory().registerSingleton("transcriptFixtureClock", clock);
++              ProcessRunner runner =
++                  audio == null
++                      ? (command, timeout) -> {
++                        throw new AssertionError(
++                            "Transcript tap invoked a media process: " + command);
++                      }
++                      : audio::run;
++              c.getBeanFactory().registerSingleton("retainedFixtureProcesses", runner);
++            })
+             .run(
+                 props.entrySet().stream()
+                     .map(e -> "--" + e.getKey() + "=" + e.getValue())
+@@ -184,11 +203,13 @@ public class TranscriptWorld implements AutoCloseable {
+           .as("upload reached held HTTP response")
+           .isTrue();
+     } else task.get(WAIT.toMillis(), TimeUnit.MILLISECONDS);
++    if (audio != null) audio.afterTap(data);
+   }
+ 
+   void finishUpload() throws Exception {
+     releaseUpload.countDown();
+     for (Future<?> task : pending) task.get(WAIT.toMillis(), TimeUnit.MILLISECONDS);
++    if (audio != null) audio.awaitDelivery();
+   }
+ 
+   List<Call> calls(String method) {
+@@ -196,7 +217,8 @@ public class TranscriptWorld implements AutoCloseable {
+   }
+ 
+   List<Call> tapCalls() {
+-    return List.copyOf(events.subList(tapStart, events.size()));
++    List<Call> snapshot = List.copyOf(events);
++    return snapshot.subList(tapStart, snapshot.size());
+   }
+ 
+   void refusal(String text) {
+@@ -257,9 +279,11 @@ public class TranscriptWorld implements AutoCloseable {
+     assertThat(r.getPart("caption")).isNull();
+   }
+ 
+-  @After(value = "@T12", order = 100)
++  @After(value = "@T12 or @T13", order = 100)
+   public void close() {
++    active = false;
+     releaseUpload.countDown();
++    if (audio != null) audio.releaseWhisper.countDown();
+     updates.shutdown();
+     try {
+       if (!updates.awaitTermination(20, TimeUnit.SECONDS)) updates.shutdownNow();
+@@ -267,7 +291,11 @@ public class TranscriptWorld implements AutoCloseable {
+       Thread.currentThread().interrupt();
+       updates.shutdownNow();
+     }
+-    if (context != null) context.close();
++    if (context != null) {
++      context.close();
++      context = null;
++    }
++    if (audio != null) audio.close();
+     for (WireMockServer server : Arrays.asList(telegram, whisper, ollama))
+       if (server != null) server.stop();
+   }
+@@ -284,10 +312,10 @@ public class TranscriptWorld implements AutoCloseable {
+ 
+     @Bean
+     @Primary
+-    ProcessRunner noMediaForTranscript() {
+-      return (command, timeout) -> {
+-        throw new AssertionError("Transcript tap invoked a media process: " + command);
+-      };
++    ProcessRunner retainedProcesses(
++        @org.springframework.beans.factory.annotation.Qualifier("retainedFixtureProcesses")
++            ProcessRunner runner) {
++      return runner;
+     }
+   }
+ 
+@@ -320,7 +348,7 @@ public class TranscriptWorld implements AutoCloseable {
+         persisted = null;
+       }
+       events.add(new Call(method, request, persisted));
+-      if (method.equals("senddocument")) {
++      if (method.equals(audio == null ? "senddocument" : "sendaudio")) {
+         int attempt = uploads.incrementAndGet();
+         uploadReceived.countDown();
+         if (hold)
+@@ -334,7 +362,7 @@ public class TranscriptWorld implements AutoCloseable {
+         if (drop) return aResponse().withFault(Fault.EMPTY_RESPONSE).build();
+         if (attempt == rejectUpload) return rejected();
+         // Mark the success boundary with application time, distinct from claim time.
+-        clock.now = clock.instant().plusSeconds(1);
++        if (audio == null) clock.now = clock.instant().plusSeconds(1);
+         uploadSuccess = clock.instant();
+       }
+       if (method.equals("answercallbackquery") && rejectAnswer) return rejected();
