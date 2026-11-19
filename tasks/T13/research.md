@@ -1,0 +1,25 @@
+# T13 research
+
+Researched 2026-11-19. Local files describe agreed project behavior; external documentation verifies capabilities, not missing product decisions. No implementation or live Telegram/model calls were made.
+
+| Source | Fact verified | Consequence for T13 | Date |
+|---|---|---|---|
+| [Telegram sendAudio](https://core.telegram.org/bots/api#sendaudio) | Music-player audio uses MP3/M4A; docs describe an upload ceiling as 50 MB without specifying its byte interpretation. Multipart upload is supported; title, performer and caption are optional API fields. | Keep unchanged valid MP3/M4A; convert other formats. Set product-required metadata explicitly; Architect chooses 52,428,800 bytes locally (not an externally verified byte interpretation). | 2026-11-19 |
+| [FFmpeg stream selection](https://ffmpeg.org/ffmpeg.html#Stream-selection) and [audio options](https://ffmpeg.org/ffmpeg.html#Audio-Options) | Stream mapping selects audio; `-ac` controls channels; an output may contain multiple stream types. | Combined MP4 requires audio-only output, and compression must request one channel. Tests inspect actual output streams, not the filename alone. | 2026-11-19 |
+| [FFmpeg native AAC encoder](https://ffmpeg.org/ffmpeg-codecs.html#aac) | AAC bitrate option is in bits per second; explicit bitrate activates CBR mode. | Convert kbps to the correct process units. Chosen bitrate does not replace a final file-size check. | 2026-11-19 |
+| [SPEC.md](../../SPEC.md), Audio Delivery and Success Criteria | Source threshold is inclusive; 128 kbps for format conversion; oversized source uses mono AAC with 48 MiB duration-derived target and one lower retry; maximum duration is 3 hours. | Requirements R2–R4 retain each branch. 48 MiB is 50,331,648 bytes, so decimal 50 MB versus 50 MiB materially changes target headroom. | 2026-11-19 |
+| [T13 brief](brief.md), [task list](../todo.md) T13 | Reuse T12 one-send/owner/expiry rules, shared queue, real ffmpeg on success; combined source.mp4 is a conversion case; sweeper and real 3-hour smoke deferred. | External acceptance tests exercise real short fixtures and existing callback behavior. | 2026-11-19 |
+| [D11](../../docs/decisions.md), [T12 requirements](../T12/requirements.md), [T12 scenarios](../../src/features/T12-transcript-button.feature) | Claim/complete/release state contract, safe notices, independent buttons, manual retry and persisted SENDING rules already exist. | Mirror external steps and refusal precedence for AUDIO. Do not promise recovery/exactly-once across an ambiguous transport failure. | 2026-11-19 |
+| [JobRecord.java](../../src/main/java/com/video2podcast/job/JobRecord.java), [TelegramGateway.java](../../src/main/java/com/video2podcast/bot/TelegramGateway.java) | At initial analysis, persisted title/duration existed but no performer/uploader; sendAudio had title/performer and no caption. | Resolved by Q-analyst-2: constant Video2Podcast performer, explicit filename/caption gateway parameters; no uploader added. | 2026-11-19 |
+
+## Calculations and test implications
+
+`48 * 1024 * 1024 * 8 / 10800 / 1000 = 37.282702... kbps`; Architect chooses floor then clamp to [8,128], so the first bitrate is 37 kbps and the retry is floor(37 × 0.8) = 29 kbps. One compressed output needs verification even if ffmpeg exits successfully, because the stored file also contains container overhead. Retry compression at most once when its first output is at or above 52,428,800 bytes, provided the new bitrate is lower; at 8 kbps fail without repeating the same bitrate. Do not mistake this preparation retry for permission to retry a Telegram upload automatically.
+
+Real small MP3/M4A, WebM and combined MP4 fixtures cover successful preparation. For oversized input, a real decodable short PCM/container fixture or valid padded media avoids a 3-hour encode. Deterministic too-large encoded results and process timeout/missing-output failures may use the existing test process fault facility; same-Path return identity and exact rounding belong to unit tests. Fixture construction is test infrastructure, not a production-service invocation in a Gherkin step.
+
+## Resolved contract details
+
+[Architect answers Q-analyst-1/2](comms/questions.md) and [api.md](api.md), read 2026-11-19, settle the local choices: source threshold inclusive 50 MiB (52,428,800 bytes), encoded threshold strict; nonpositive duration treated as 1 second; bitrate clamped to 8–128 kbps; retry floor(80%) with 8 kbps minimum. Oversized 128 kbps format conversion falls through to mono compression from the original source. These are project decisions, not claims about what Telegram's public documentation guarantees.
+
+The audio caption carries exact original/converted/compressed wording; performer is `Video2Podcast`, title is stored title capped at 256 UTF-16 units without splitting a surrogate pair. A granted claim survives expiry while queued. The first keyboard uses the claim record's transcript state; the final keyboard uses the completion record. Generated out.m4a is removed best effort, retained source/transcript stay. No open analyst question remains.

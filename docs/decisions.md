@@ -131,3 +131,9 @@ chunks again.
 **Decision:** `job/DeliveryService` owns the rule that a file is sent once: `claim` moves `AVAILABLE` → `SENDING` through `JobStore.transition` (one winner per race), `complete` and `release` finish or undo it. `bot/DeliveryCallbackHandler` does the Telegram calls and never touches `job.json`. The buttons on the summary message are changed with a new `TelegramGateway.editButtons` (`editMessageReplyMarkup`), because `job.json` does not keep the summary text and `editMessage` would need it. A tap is answered once ("Sending transcript…" or a refusal); a failed send is reported with a separate message.
 
 **Consequences:** T13 adds the `audio:` branch and calls the same `claim`/`complete`/`release` and `Keyboards.delivery(jobId, audio, transcript)`. If the bot dies between `claim` and `complete` the file stays `SENDING` until T14's startup recovery.
+
+## D12: Audio preparation rule details (T13, 2026-11-19)
+
+**Decision:** The Telegram limit is taken as 50 MiB (52 428 800 bytes), because the SPEC target of 48 MiB already exceeds 50 000 000 bytes. A source is sent unchanged when it is at most the limit and its extension is `mp3` or `m4a`; an encoded result must be strictly under the limit. Bitrate is `floor(48 MiB × 8 / seconds / 1000)` kbps clamped to 8..128; the retry uses 80% of it. A conversion at 128 kbps that comes out too big falls through to the compression path. `AudioPreparer` uses the duration from `job.json`, with no ffprobe. The compression note is the `sendAudio` caption, so the gateway signature gains `fileName` and `caption`. The performer is the constant `Video2Podcast`: the job stores no uploader.
+
+**Consequences:** audio preparation runs on the shared `JobQueue`; a claim made before expiry finishes after it, so T14's sweeper must skip a job with a `SENDING` file. If the owner wants the real uploader as performer, a later task adds `uploader` to `job.json`.

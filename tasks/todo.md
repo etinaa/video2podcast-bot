@@ -161,7 +161,7 @@ Sizes: S = 1-2 files, M = 3-5 files.
   - Depends on: T11
   - Files: `bot/DeliveryCallbackHandler.java`, `job/DeliveryService.java`, `bot/Keyboards.java`, test
 
-- [ ] **T13: Audio preparation and Download audio button** (M)
+- [~] **T13: Audio preparation and Download audio button** (M)
   - Acceptance:
     - `AudioPreparer` follows the compression rule: a file of 50 MB or less in MP3 or M4A is returned unchanged. A smaller file in another format is converted to M4A at 128 kbps. A file over 50 MB is re-encoded to mono AAC at `48 MiB × 8 / duration`, verified under 50 MB, with one retry at a lower bitrate.
     - Tapping **Download audio** goes through the job queue, shows "Preparing audio…", sends with `sendAudio` (title and performer set), and notes whether and how it was compressed. The same one-send, owner-only, and expired rules as T12 apply.
