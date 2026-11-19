@@ -1,0 +1,1943 @@
+diff --git a/config/spotbugs-exclude.xml b/config/spotbugs-exclude.xml
+index fe94666..a72c93d 100644
+--- a/config/spotbugs-exclude.xml
++++ b/config/spotbugs-exclude.xml
+@@ -8,4 +8,10 @@
+     <Class name="~com\.video2podcast\.media\.DefaultProcessRunner(\$Child)?"/>
+     <Bug pattern="COMMAND_INJECTION"/>
+   </Match>
++  <!-- JobStore is a shared service, not a value object. SpotBugs calls it mutable only because a
++       method is named delete. Raised with the orchestrator in tasks/T11/comms/questions.md. -->
++  <Match>
++    <Class name="com.video2podcast.job.PipelineService"/>
++    <Bug pattern="EI_EXPOSE_REP2"/>
++  </Match>
+ </FindBugsFilter>
+diff --git a/src/main/java/com/video2podcast/bot/BotUpdateHandler.java b/src/main/java/com/video2podcast/bot/BotUpdateHandler.java
+index 9149949..79c9485 100644
+--- a/src/main/java/com/video2podcast/bot/BotUpdateHandler.java
++++ b/src/main/java/com/video2podcast/bot/BotUpdateHandler.java
+@@ -26,12 +26,14 @@ public class BotUpdateHandler {
+ 
+   private final TelegramGateway gateway;
+   private final AccessService access;
++  private final UrlMessageHandler urls;
+   private final AccessAdmin admin;
+   private final UnknownUserHandler unknownUsers;
+ 
+-  public BotUpdateHandler(TelegramGateway gateway, AccessService access) {
++  public BotUpdateHandler(TelegramGateway gateway, AccessService access, UrlMessageHandler urls) {
+     this.gateway = gateway;
+     this.access = access;
++    this.urls = urls;
+     this.admin = new AccessAdmin(gateway, access);
+     this.unknownUsers = new UnknownUserHandler(gateway, access, admin);
+   }
+@@ -65,6 +67,8 @@ public class BotUpdateHandler {
+       gateway.sendMessage(sender.chatId(), HELP, List.of());
+     } else if (ADMIN_COMMANDS.contains(command)) {
+       admin.handleCommand(sender, command, args);
++    } else if (!message.getText().strip().startsWith("/")) {
++      urls.handle(sender, message.getText());
+     }
+   }
+ 
+diff --git a/src/main/java/com/video2podcast/bot/Keyboards.java b/src/main/java/com/video2podcast/bot/Keyboards.java
+index 0cdc9ac..d06f430 100644
+--- a/src/main/java/com/video2podcast/bot/Keyboards.java
++++ b/src/main/java/com/video2podcast/bot/Keyboards.java
+@@ -9,8 +9,18 @@ final class Keyboards {
+   static final String APPROVE = "approve";
+   static final String DENY = "deny";
+ 
++  static final String AUDIO_PREFIX = "audio:";
++  static final String TRANSCRIPT_PREFIX = "transcript:";
++
+   private Keyboards() {}
+ 
++  /** One row, in this order. */
++  static List<InlineButton> delivery(String jobId) {
++    return List.of(
++        new InlineButton("Download audio", AUDIO_PREFIX + jobId),
++        new InlineButton("Download transcript", TRANSCRIPT_PREFIX + jobId));
++  }
++
+   static List<InlineButton> accessRequest(long userId) {
+     return List.of(
+         new InlineButton("Approve", ACCESS_PREFIX + APPROVE + ":" + userId),
+diff --git a/src/main/java/com/video2podcast/bot/StatusReporter.java b/src/main/java/com/video2podcast/bot/StatusReporter.java
+new file mode 100644
+index 0000000..b25b0d9
+--- /dev/null
++++ b/src/main/java/com/video2podcast/bot/StatusReporter.java
+@@ -0,0 +1,53 @@
++package com.video2podcast.bot;
++
++import com.video2podcast.job.JobProgress;
++import java.util.List;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
++/** Edits the status message of one job as it moves through the stages. */
++final class StatusReporter implements JobProgress {
++
++  private static final Logger LOG = LoggerFactory.getLogger(StatusReporter.class);
++
++  private final TelegramGateway gateway;
++  private final long chatId;
++  private final int messageId;
++  private String lastText;
++
++  StatusReporter(TelegramGateway gateway, long chatId, int messageId) {
++    this.gateway = gateway;
++    this.chatId = chatId;
++    this.messageId = messageId;
++  }
++
++  @Override
++  public void downloading() {
++    show("Downloading…");
++  }
++
++  @Override
++  public void transcribing(int n, int total) {
++    show("Transcribing " + n + "/" + total + "…");
++  }
++
++  @Override
++  public void summarizing() {
++    show("Summarizing…");
++  }
++
++  /** Telegram rejects an edit that changes nothing, so an equal text is not sent. */
++  private void show(String text) {
++    if (text.equals(lastText)) {
++      return;
++    }
++    lastText = text;
++    try {
++      gateway.editMessage(chatId, messageId, text, List.of());
++    } catch (RuntimeException e) {
++      if (LOG.isWarnEnabled()) {
++        LOG.warn("Could not edit the status message {}: {}", messageId, e.getMessage());
++      }
++    }
++  }
++}
+diff --git a/src/main/java/com/video2podcast/bot/SummaryMessageFormatter.java b/src/main/java/com/video2podcast/bot/SummaryMessageFormatter.java
+new file mode 100644
+index 0000000..8c1cbf3
+--- /dev/null
++++ b/src/main/java/com/video2podcast/bot/SummaryMessageFormatter.java
+@@ -0,0 +1,53 @@
++package com.video2podcast.bot;
++
++/** Builds the HTML of the summary message. */
++final class SummaryMessageFormatter {
++
++  static final int TITLE_MAX = 200;
++
++  private static final String ELLIPSIS = "…";
++  private static final int SECONDS_PER_MINUTE = 60;
++  private static final int SECONDS_PER_HOUR = 3600;
++
++  private SummaryMessageFormatter() {}
++
++  /** {@code <b>title</b>\nDuration: 1h 42m\n\n• a\n• b} with title and bullets HTML-escaped. */
++  static String format(String title, long durationSeconds, String bullets) {
++    return "<b>"
++        + Html.escape(displayTitle(title))
++        + "</b>\nDuration: "
++        + formatDuration(durationSeconds)
++        + "\n\n"
++        + Html.escape(bullets);
++  }
++
++  /**
++   * Whitespace runs become one space, then strip, then cut to {@link #TITLE_MAX} UTF-16 units. A
++   * cut title ends with an ellipsis and is exactly that long, unless the cut would split a
++   * surrogate pair, in which case it is one unit shorter.
++   */
++  static String displayTitle(String title) {
++    String clean = title.replaceAll("\\s+", " ").strip();
++    if (clean.length() <= TITLE_MAX) {
++      return clean;
++    }
++    int end = TITLE_MAX - ELLIPSIS.length();
++    if (Character.isHighSurrogate(clean.charAt(end - 1))) {
++      end--;
++    }
++    return clean.substring(0, end) + ELLIPSIS;
++  }
++
++  /** {@code 1h 42m}, {@code 5m} or {@code 45s}; minutes are floored. */
++  static String formatDuration(long seconds) {
++    long hours = seconds / SECONDS_PER_HOUR;
++    long minutes = seconds % SECONDS_PER_HOUR / SECONDS_PER_MINUTE;
++    if (hours > 0) {
++      return hours + "h " + minutes + "m";
++    }
++    if (minutes > 0) {
++      return minutes + "m";
++    }
++    return seconds + "s";
++  }
++}
+diff --git a/src/main/java/com/video2podcast/bot/SummaryMessagePublisher.java b/src/main/java/com/video2podcast/bot/SummaryMessagePublisher.java
+new file mode 100644
+index 0000000..8a046e3
+--- /dev/null
++++ b/src/main/java/com/video2podcast/bot/SummaryMessagePublisher.java
+@@ -0,0 +1,39 @@
++package com.video2podcast.bot;
++
++import com.video2podcast.job.JobRecord;
++import com.video2podcast.job.SummaryPublisher;
++import java.util.List;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
++/** Sends the summary of a finished job through Telegram. */
++public class SummaryMessagePublisher implements SummaryPublisher {
++
++  private static final Logger LOG = LoggerFactory.getLogger(SummaryMessagePublisher.class);
++
++  private final TelegramGateway gateway;
++
++  public SummaryMessagePublisher(TelegramGateway gateway) {
++    this.gateway = gateway;
++  }
++
++  @Override
++  public int publish(JobRecord job, String summary) {
++    return gateway.sendMessage(job.chatId(), html(job, summary), Keyboards.delivery(job.jobId()));
++  }
++
++  @Override
++  public void withdraw(JobRecord job, int messageId, String summary) {
++    try {
++      gateway.editMessage(job.chatId(), messageId, html(job, summary), List.of());
++    } catch (RuntimeException e) {
++      if (LOG.isWarnEnabled()) {
++        LOG.warn("Could not take the buttons off the summary of job {}", job.jobId(), e);
++      }
++    }
++  }
++
++  private static String html(JobRecord job, String summary) {
++    return SummaryMessageFormatter.format(job.title(), job.durationSeconds(), summary);
++  }
++}
+diff --git a/src/main/java/com/video2podcast/bot/UrlMessageHandler.java b/src/main/java/com/video2podcast/bot/UrlMessageHandler.java
+new file mode 100644
+index 0000000..3d7390f
+--- /dev/null
++++ b/src/main/java/com/video2podcast/bot/UrlMessageHandler.java
+@@ -0,0 +1,166 @@
++package com.video2podcast.bot;
++
++import com.video2podcast.job.JobFailure;
++import com.video2podcast.job.JobQueue;
++import com.video2podcast.job.JobRequest;
++import com.video2podcast.job.JobStore;
++import com.video2podcast.job.PipelineService;
++import com.video2podcast.media.UrlValidator;
++import java.time.Clock;
++import java.time.Duration;
++import java.util.List;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.ExecutionException;
++import java.util.concurrent.RejectedExecutionException;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.TimeoutException;
++import java.util.concurrent.atomic.AtomicReference;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
++/**
++ * Turns a link message of an allowed user into a queued job. The first message the user gets, which
++ * is also the acknowledgement, shows the queue position and is then edited through the stages.
++ */
++public class UrlMessageHandler {
++
++  private static final Logger LOG = LoggerFactory.getLogger(UrlMessageHandler.class);
++
++  private static final Duration STATUS_WAIT = Duration.ofSeconds(30);
++
++  private final TelegramGateway gateway;
++  private final UrlValidator validator;
++  private final JobQueue queue;
++  private final PipelineService pipeline;
++  private final Clock clock;
++  private final Duration statusWait;
++
++  public UrlMessageHandler(
++      TelegramGateway gateway,
++      UrlValidator validator,
++      JobQueue queue,
++      PipelineService pipeline,
++      Clock clock) {
++    this(gateway, validator, queue, pipeline, clock, STATUS_WAIT);
++  }
++
++  /** {@code statusWait} is how long a started job waits for its status message to exist. */
++  UrlMessageHandler(
++      TelegramGateway gateway,
++      UrlValidator validator,
++      JobQueue queue,
++      PipelineService pipeline,
++      Clock clock,
++      Duration statusWait) {
++    this.gateway = gateway;
++    this.validator = validator;
++    this.queue = queue;
++    this.pipeline = pipeline;
++    this.clock = clock;
++    this.statusWait = statusWait;
++  }
++
++  /** {@code text} is the whole message text; it is stripped here. */
++  void handle(Sender sender, String text) {
++    String url = text.strip();
++    try {
++      validator.validate(url);
++    } catch (JobFailure failure) {
++      tellFailure(sender.chatId(), failure);
++      return;
++    }
++    JobRequest request =
++        new JobRequest(JobStore.newJobId(), sender.userId(), sender.chatId(), url, clock.instant());
++    CompletableFuture<Integer> statusId = new CompletableFuture<>();
++    AtomicReference<JobFailure> failure = new AtomicReference<>();
++    CompletableFuture<Void> future;
++    try {
++      future = queue.submit(() -> runJob(request, statusId, failure));
++    } catch (RejectedExecutionException e) {
++      tellFailure(sender.chatId(), JobFailure.of(JobFailure.Kind.FAILED, e));
++      return;
++    }
++    int id;
++    try {
++      id = gateway.sendMessage(sender.chatId(), "Queued: position " + queue.size(), List.of());
++    } catch (RuntimeException e) {
++      if (LOG.isWarnEnabled()) {
++        LOG.warn("Could not send the queued message to chat {}", sender.chatId(), e);
++      }
++      statusId.completeExceptionally(e);
++      return;
++    }
++    statusId.complete(id);
++    future.whenCompleteAsync(
++        (result, error) -> finish(sender.chatId(), id, failure.get(), error),
++        Thread::startVirtualThread);
++  }
++
++  /** Runs on the worker thread. It never throws for an expected failure. */
++  private void runJob(
++      JobRequest request,
++      CompletableFuture<Integer> statusId,
++      AtomicReference<JobFailure> failure) {
++    int id;
++    try {
++      id = statusId.get(statusWait.toMillis(), TimeUnit.MILLISECONDS);
++    } catch (ExecutionException e) {
++      return;
++    } catch (TimeoutException e) {
++      if (LOG.isWarnEnabled()) {
++        LOG.warn("No status message for job {} within {}", request.jobId(), statusWait);
++      }
++      failure.set(JobFailure.of(JobFailure.Kind.FAILED, e));
++      return;
++    } catch (InterruptedException e) {
++      Thread.currentThread().interrupt();
++      if (LOG.isWarnEnabled()) {
++        LOG.warn("Interrupted while waiting for the status message of job {}", request.jobId());
++      }
++      failure.set(JobFailure.of(JobFailure.Kind.FAILED, e));
++      return;
++    }
++    try {
++      pipeline.run(request, new StatusReporter(gateway, request.chatId(), id));
++    } catch (JobFailure f) {
++      failure.set(f);
++    } catch (RuntimeException e) {
++      if (LOG.isErrorEnabled()) {
++        LOG.error("Job {} failed unexpectedly", request.jobId(), e);
++      }
++      failure.set(JobFailure.of(JobFailure.Kind.FAILED, e));
++    }
++  }
++
++  /** Runs after the job has left the queue. Every Telegram problem is logged and dropped. */
++  private void finish(long chatId, int statusId, JobFailure failure, Throwable error) {
++    JobFailure outcome =
++        failure == null && error != null ? JobFailure.of(JobFailure.Kind.FAILED, error) : failure;
++    if (outcome == null) {
++      editStatus(chatId, statusId, "Done.");
++    } else {
++      tellFailure(chatId, outcome);
++      editStatus(chatId, statusId, "Failed.");
++    }
++  }
++
++  private void tellFailure(long chatId, JobFailure failure) {
++    try {
++      gateway.sendMessage(chatId, Html.escape(failure.getMessage()), List.of());
++    } catch (RuntimeException e) {
++      if (LOG.isWarnEnabled()) {
++        LOG.warn("Could not send a failure message to chat {}", chatId, e);
++      }
++    }
++  }
++
++  private void editStatus(long chatId, int statusId, String text) {
++    try {
++      gateway.editMessage(chatId, statusId, text, List.of());
++    } catch (RuntimeException e) {
++      if (LOG.isWarnEnabled()) {
++        LOG.warn("Could not edit the status message {} in chat {}", statusId, chatId, e);
++      }
++    }
++  }
++}
+diff --git a/src/main/java/com/video2podcast/config/PipelineConfig.java b/src/main/java/com/video2podcast/config/PipelineConfig.java
+new file mode 100644
+index 0000000..a6bdb06
+--- /dev/null
++++ b/src/main/java/com/video2podcast/config/PipelineConfig.java
+@@ -0,0 +1,57 @@
++package com.video2podcast.config;
++
++import com.video2podcast.bot.SummaryMessagePublisher;
++import com.video2podcast.bot.TelegramGateway;
++import com.video2podcast.bot.UrlMessageHandler;
++import com.video2podcast.job.JobQueue;
++import com.video2podcast.job.JobStore;
++import com.video2podcast.job.PipelineService;
++import com.video2podcast.job.SummaryPublisher;
++import com.video2podcast.media.FfmpegRunner;
++import com.video2podcast.media.UrlValidator;
++import com.video2podcast.media.YtDlpClient;
++import com.video2podcast.summary.SummaryService;
++import com.video2podcast.transcript.TranscriptionClient;
++import java.time.Clock;
++import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
++import org.springframework.context.annotation.Bean;
++import org.springframework.context.annotation.Configuration;
++
++/** Wires the link-to-summary flow. It needs the Telegram gateway, so it exists with the bot. */
++@Configuration(proxyBeanMethods = false)
++@ConditionalOnProperty(
++    prefix = "app.telegram",
++    name = "enabled",
++    havingValue = "true",
++    matchIfMissing = true)
++public class PipelineConfig {
++
++  @Bean
++  SummaryPublisher summaryPublisher(TelegramGateway gateway) {
++    return new SummaryMessagePublisher(gateway);
++  }
++
++  @Bean
++  PipelineService pipelineService(
++      YtDlpClient ytDlp,
++      FfmpegRunner ffmpeg,
++      TranscriptionClient transcription,
++      SummaryService summary,
++      JobStore store,
++      SummaryPublisher publisher,
++      Clock clock,
++      AppProperties props) {
++    return new PipelineService(
++        ytDlp, ffmpeg, transcription, summary, store, publisher, clock, props.jobs());
++  }
++
++  @Bean
++  UrlMessageHandler urlMessageHandler(
++      TelegramGateway gateway,
++      UrlValidator validator,
++      JobQueue queue,
++      PipelineService pipeline,
++      Clock clock) {
++    return new UrlMessageHandler(gateway, validator, queue, pipeline, clock);
++  }
++}
+diff --git a/src/main/java/com/video2podcast/config/TelegramConfig.java b/src/main/java/com/video2podcast/config/TelegramConfig.java
+index a4c46a3..27ee70f 100644
+--- a/src/main/java/com/video2podcast/config/TelegramConfig.java
++++ b/src/main/java/com/video2podcast/config/TelegramConfig.java
+@@ -5,6 +5,7 @@ import com.video2podcast.bot.BotUpdateHandler;
+ import com.video2podcast.bot.TelegramBot;
+ import com.video2podcast.bot.TelegramClientGateway;
+ import com.video2podcast.bot.TelegramGateway;
++import com.video2podcast.bot.UrlMessageHandler;
+ import org.springframework.boot.ApplicationRunner;
+ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+ import org.springframework.context.annotation.Bean;
+@@ -33,8 +34,9 @@ public class TelegramConfig {
+   }
+ 
+   @Bean
+-  BotUpdateHandler botUpdateHandler(TelegramGateway gateway, AccessService access) {
+-    return new BotUpdateHandler(gateway, access);
++  BotUpdateHandler botUpdateHandler(
++      TelegramGateway gateway, AccessService access, UrlMessageHandler urls) {
++    return new BotUpdateHandler(gateway, access, urls);
+   }
+ 
+   /** At startup, tell the owner about requests that could not be delivered earlier. */
+diff --git a/src/main/java/com/video2podcast/job/JobProgress.java b/src/main/java/com/video2podcast/job/JobProgress.java
+new file mode 100644
+index 0000000..4153e5b
+--- /dev/null
++++ b/src/main/java/com/video2podcast/job/JobProgress.java
+@@ -0,0 +1,12 @@
++package com.video2podcast.job;
++
++/** Stage reports from the worker thread. Implementations must not throw. */
++public interface JobProgress {
++
++  void downloading();
++
++  /** {@code n} counts from 1; called once per chunk, before the chunk is sent to Whisper. */
++  void transcribing(int n, int total);
++
++  void summarizing();
++}
+diff --git a/src/main/java/com/video2podcast/job/JobRequest.java b/src/main/java/com/video2podcast/job/JobRequest.java
+new file mode 100644
+index 0000000..3a64917
+--- /dev/null
++++ b/src/main/java/com/video2podcast/job/JobRequest.java
+@@ -0,0 +1,7 @@
++package com.video2podcast.job;
++
++import java.time.Instant;
++
++/** What the pipeline needs to know about one accepted link. */
++public record JobRequest(
++    String jobId, long ownerUserId, long chatId, String url, Instant createdAt) {}
+diff --git a/src/main/java/com/video2podcast/job/PipelineService.java b/src/main/java/com/video2podcast/job/PipelineService.java
+new file mode 100644
+index 0000000..995ba8d
+--- /dev/null
++++ b/src/main/java/com/video2podcast/job/PipelineService.java
+@@ -0,0 +1,140 @@
++package com.video2podcast.job;
++
++import com.video2podcast.config.AppProperties;
++import com.video2podcast.media.FfmpegRunner;
++import com.video2podcast.media.VideoMetadata;
++import com.video2podcast.media.YtDlpClient;
++import com.video2podcast.summary.SummaryService;
++import com.video2podcast.transcript.TranscriptionClient;
++import java.io.IOException;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.time.Clock;
++import java.time.Instant;
++import java.util.List;
++import java.util.Map;
++import java.util.Objects;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
++/**
++ * Runs one job from the link to the sent summary message. It knows nothing about Telegram: stage
++ * reports and the summary message go through {@link JobProgress} and {@link SummaryPublisher}.
++ */
++public class PipelineService {
++
++  private static final Logger LOG = LoggerFactory.getLogger(PipelineService.class);
++
++  private static final String TRANSCRIPT_FILE = "transcript.txt";
++
++  private final YtDlpClient ytDlp;
++  private final FfmpegRunner ffmpeg;
++  private final TranscriptionClient transcription;
++  private final SummaryService summary;
++  private final JobStore store;
++  private final SummaryPublisher publisher;
++  private final Clock clock;
++  private final AppProperties.Jobs jobs;
++
++  public PipelineService(
++      YtDlpClient ytDlp,
++      FfmpegRunner ffmpeg,
++      TranscriptionClient transcription,
++      SummaryService summary,
++      JobStore store,
++      SummaryPublisher publisher,
++      Clock clock,
++      AppProperties.Jobs jobs) {
++    this.ytDlp = ytDlp;
++    this.ffmpeg = ffmpeg;
++    this.transcription = transcription;
++    this.summary = summary;
++    this.store = store;
++    this.publisher = publisher;
++    this.clock = clock;
++    this.jobs = jobs;
++  }
++
++  /**
++   * Runs one job to the point where the summary message is sent and its retention has started. On
++   * every failure the job directory is deleted before the exception leaves.
++   *
++   * @throws JobFailure the failure of a stage unchanged, or {@code FAILED} for anything else
++   */
++  public void run(JobRequest request, JobProgress progress) {
++    try {
++      execute(request, progress);
++    } catch (JobFailure failure) {
++      deleteDirectory(request.jobId());
++      throw failure;
++    } catch (RuntimeException e) {
++      if (LOG.isErrorEnabled()) {
++        LOG.error("Job {} failed", request.jobId(), e);
++      }
++      deleteDirectory(request.jobId());
++      throw JobFailure.of(JobFailure.Kind.FAILED, e);
++    }
++  }
++
++  private void execute(JobRequest request, JobProgress progress) {
++    String jobId = request.jobId();
++    Path dir = store.directory(jobId);
++    try {
++      Files.createDirectories(dir);
++    } catch (IOException e) {
++      throw JobFailure.of(JobFailure.Kind.FAILED, e);
++    }
++    progress.downloading();
++    VideoMetadata meta = ytDlp.fetchMetadata(request.url());
++    Path source = ytDlp.downloadAudio(request.url(), dir);
++    Path wav = ffmpeg.toWav(source, dir);
++    List<Path> chunks = ffmpeg.split(wav, dir);
++    Path transcript = transcription.transcribe(dir, chunks, progress::transcribing);
++    progress.summarizing();
++    String bullets = summary.summarize(readTranscript(transcript));
++
++    JobRecord record =
++        new JobRecord(
++            jobId,
++            request.ownerUserId(),
++            request.chatId(),
++            null,
++            meta.title(),
++            meta.duration().toSeconds(),
++            request.createdAt(),
++            Map.of(
++                FileKind.AUDIO,
++                    JobFile.available(Objects.requireNonNull(source.getFileName()).toString()),
++                FileKind.TRANSCRIPT, JobFile.available(TRANSCRIPT_FILE)));
++    store.create(record);
++    int messageId = publisher.publish(record, bullets);
++    Instant expiresAt = clock.instant().plus(jobs.retention());
++    try {
++      store
++          .update(jobId, stored -> stored.published(messageId, expiresAt))
++          .orElseThrow(() -> new JobStoreException("job.json of " + jobId + " is gone", null));
++    } catch (RuntimeException e) {
++      publisher.withdraw(record, messageId, bullets);
++      throw e;
++    }
++  }
++
++  private static String readTranscript(Path transcript) {
++    try {
++      return Files.readString(transcript, StandardCharsets.UTF_8);
++    } catch (IOException e) {
++      throw JobFailure.transcriptionFailed(e);
++    }
++  }
++
++  private void deleteDirectory(String jobId) {
++    try {
++      store.delete(jobId);
++    } catch (RuntimeException e) {
++      if (LOG.isWarnEnabled()) {
++        LOG.warn("Could not delete the directory of job {}", jobId, e);
++      }
++    }
++  }
++}
+diff --git a/src/main/java/com/video2podcast/job/SummaryPublisher.java b/src/main/java/com/video2podcast/job/SummaryPublisher.java
+new file mode 100644
+index 0000000..e39ba31
+--- /dev/null
++++ b/src/main/java/com/video2podcast/job/SummaryPublisher.java
+@@ -0,0 +1,15 @@
++package com.video2podcast.job;
++
++/** Sends the summary message of a finished job, and can take its buttons away again. */
++public interface SummaryPublisher {
++
++  /**
++   * Sends the summary message with the two delivery buttons and returns its Telegram message id.
++   *
++   * @throws com.video2podcast.bot.TelegramGatewayException if Telegram refuses or cannot be reached
++   */
++  int publish(JobRecord job, String summary);
++
++  /** Best effort: replaces the summary message by the same text without buttons. Never throws. */
++  void withdraw(JobRecord job, int messageId, String summary);
++}
+diff --git a/src/test/java/com/video2podcast/bot/AdminCommandsTest.java b/src/test/java/com/video2podcast/bot/AdminCommandsTest.java
+index f13fb4d..2c91fed 100644
+--- a/src/test/java/com/video2podcast/bot/AdminCommandsTest.java
++++ b/src/test/java/com/video2podcast/bot/AdminCommandsTest.java
+@@ -30,6 +30,7 @@ class AdminCommandsTest {
+ 
+   private final RecordingGateway gateway = new RecordingGateway();
+   private final MutableClock clock = new MutableClock(Instant.parse("2026-11-15T10:00:00Z"));
++  private final UrlMessageHandler urls = org.mockito.Mockito.mock(UrlMessageHandler.class);
+   private Path file;
+   private AccessService access;
+   private BotUpdateHandler handler;
+@@ -38,7 +39,7 @@ class AdminCommandsTest {
+   void setUp() {
+     file = dir.resolve("allowed-users.json");
+     access = newAccess();
+-    handler = new BotUpdateHandler(gateway, access);
++    handler = new BotUpdateHandler(gateway, access, urls);
+   }
+ 
+   private AccessService newAccess() {
+@@ -201,7 +202,7 @@ class AdminCommandsTest {
+     gateway.messages.clear();
+ 
+     AccessService restarted = newAccess();
+-    BotUpdateHandler afterRestart = new BotUpdateHandler(gateway, restarted);
++    BotUpdateHandler afterRestart = new BotUpdateHandler(gateway, restarted, urls);
+     afterRestart.handle(tap(OWNER, "cb1", "access:approve:60", 2));
+ 
+     assertThat(restarted.isAllowed(BOB)).isTrue();
+diff --git a/src/test/java/com/video2podcast/bot/BotUpdateHandlerTest.java b/src/test/java/com/video2podcast/bot/BotUpdateHandlerTest.java
+index 2bbcf9c..80d8821 100644
+--- a/src/test/java/com/video2podcast/bot/BotUpdateHandlerTest.java
++++ b/src/test/java/com/video2podcast/bot/BotUpdateHandlerTest.java
+@@ -4,6 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
+ import static org.mockito.ArgumentMatchers.any;
+ import static org.mockito.ArgumentMatchers.eq;
+ import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.never;
++import static org.mockito.Mockito.verify;
+ import static org.mockito.Mockito.when;
+ 
+ import com.video2podcast.access.AccessService;
+@@ -34,6 +36,7 @@ class BotUpdateHandlerTest {
+ 
+   private final RecordingGateway gateway = new RecordingGateway();
+   private final MutableClock clock = new MutableClock(Instant.parse("2026-11-15T10:00:00Z"));
++  private final UrlMessageHandler urls = mock(UrlMessageHandler.class);
+   private AccessService access;
+   private BotUpdateHandler handler;
+ 
+@@ -43,7 +46,7 @@ class BotUpdateHandlerTest {
+         new AccessService(
+             new AccessStore(dir.resolve("allowed-users.json")), OWNER, Duration.ofHours(24), clock);
+     access.allow(ALLOWED, "ann", OWNER);
+-    handler = new BotUpdateHandler(gateway, access);
++    handler = new BotUpdateHandler(gateway, access, urls);
+   }
+ 
+   @ParameterizedTest
+@@ -86,11 +89,34 @@ class BotUpdateHandlerTest {
+   }
+ 
+   @ParameterizedTest
+-  @ValueSource(strings = {"hello", "/whoamix", "whoami"})
+-  void ignoresOtherTextFromAllowedUsers(String text) {
++  @ValueSource(strings = {"/whoamix", "/unknown", "  /unknown arg"})
++  void ignoresUnknownCommandsFromAllowedUsers(String text) {
+     handler.handle(update(message("private", 555L, ALLOWED, text)));
+ 
+     assertThat(gateway.messages).isEmpty();
++    verify(urls, never()).handle(any(), any());
++  }
++
++  @ParameterizedTest
++  @ValueSource(strings = {"hello", "whoami", "https://videos.example/v", "  https://x.example  "})
++  void passesOtherTextFromAllowedUsersToTheUrlHandler(String text) {
++    handler.handle(update(message("private", 555L, ALLOWED, text)));
++
++    verify(urls).handle(new Sender(ALLOWED, 555L, null, "Test"), text);
++  }
++
++  @Test
++  void passesTextFromTheOwnerToTheUrlHandler() {
++    handler.handle(update(message("private", 8L, OWNER, "https://videos.example/v")));
++
++    verify(urls).handle(any(), eq("https://videos.example/v"));
++  }
++
++  @Test
++  void neverPassesTextFromUnknownUsersToTheUrlHandler() {
++    handler.handle(update(message("private", 9L, STRANGER, "https://videos.example/v")));
++
++    verify(urls, never()).handle(any(), any());
+   }
+ 
+   @Test
+@@ -183,7 +209,7 @@ class BotUpdateHandlerTest {
+     AccessService racing = mock(AccessService.class);
+     when(racing.requestAccess(eq(STRANGER), any(), any()))
+         .thenReturn(new AccessService.RequestOutcome.AlreadyAllowed());
+-    new BotUpdateHandler(gateway, racing)
++    new BotUpdateHandler(gateway, racing, urls)
+         .handle(update(message("private", 9L, STRANGER, "/start")));
+ 
+     assertThat(gateway.messages)
+@@ -191,13 +217,6 @@ class BotUpdateHandlerTest {
+         .containsExactly(BotUpdateHandler.HELP);
+   }
+ 
+-  @Test
+-  void allowedUsersGetNoReplyToOtherText() {
+-    handler.handle(update(message("private", 7L, ALLOWED, "hello")));
+-
+-    assertThat(gateway.messages).isEmpty();
+-  }
+-
+   @Test
+   void usernameAndFullNameAreStoredWithTheRequest() {
+     Message message = message("private", 9L, STRANGER, "/start");
+diff --git a/src/test/java/com/video2podcast/bot/KeyboardsTest.java b/src/test/java/com/video2podcast/bot/KeyboardsTest.java
+new file mode 100644
+index 0000000..052fb9b
+--- /dev/null
++++ b/src/test/java/com/video2podcast/bot/KeyboardsTest.java
+@@ -0,0 +1,27 @@
++package com.video2podcast.bot;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++import java.nio.charset.StandardCharsets;
++import org.junit.jupiter.api.Test;
++
++class KeyboardsTest {
++
++  private static final String JOB_ID = "123e4567-e89b-12d3-a456-426614174000";
++
++  @Test
++  void deliveryHasTheAudioAndTranscriptButtonsInOrder() {
++    assertThat(Keyboards.delivery(JOB_ID))
++        .containsExactly(
++            new InlineButton("Download audio", "audio:" + JOB_ID),
++            new InlineButton("Download transcript", "transcript:" + JOB_ID));
++  }
++
++  @Test
++  void callbackDataFitsTelegramsLimit() {
++    assertThat(Keyboards.delivery(JOB_ID))
++        .allSatisfy(button ->
++            assertThat(button.callbackData().getBytes(StandardCharsets.UTF_8).length)
++                .isLessThanOrEqualTo(64));
++  }
++}
+diff --git a/src/test/java/com/video2podcast/bot/StatusReporterTest.java b/src/test/java/com/video2podcast/bot/StatusReporterTest.java
+new file mode 100644
+index 0000000..9714b3c
+--- /dev/null
++++ b/src/test/java/com/video2podcast/bot/StatusReporterTest.java
+@@ -0,0 +1,50 @@
++package com.video2podcast.bot;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.assertj.core.api.Assertions.assertThatCode;
++
++import java.util.List;
++import org.junit.jupiter.api.Test;
++
++class StatusReporterTest {
++
++  private final RecordingGateway gateway = new RecordingGateway();
++  private final StatusReporter reporter = new StatusReporter(gateway, 555, 77);
++
++  @Test
++  void editsTheStatusMessageThroughTheStages() {
++    reporter.downloading();
++    reporter.transcribing(1, 2);
++    reporter.transcribing(2, 2);
++    reporter.summarizing();
++
++    assertThat(gateway.edits)
++        .containsExactly(
++            new RecordingGateway.Edit(555, 77, "Downloading…", List.of()),
++            new RecordingGateway.Edit(555, 77, "Transcribing 1/2…", List.of()),
++            new RecordingGateway.Edit(555, 77, "Transcribing 2/2…", List.of()),
++            new RecordingGateway.Edit(555, 77, "Summarizing…", List.of()));
++    assertThat(gateway.messages).isEmpty();
++  }
++
++  @Test
++  void doesNotEditAgainWithTheSameText() {
++    reporter.transcribing(1, 1);
++    reporter.transcribing(1, 1);
++
++    assertThat(gateway.edits).hasSize(1);
++  }
++
++  @Test
++  void aRejectedEditIsSwallowedAndTheNextOneIsTried() {
++    gateway.failEdits = true;
++    assertThatCode(reporter::downloading).doesNotThrowAnyException();
++
++    gateway.failEdits = false;
++    reporter.summarizing();
++
++    assertThat(gateway.edits)
++        .extracting(RecordingGateway.Edit::html)
++        .containsExactly("Summarizing…");
++  }
++}
+diff --git a/src/test/java/com/video2podcast/bot/SummaryMessageFormatterTest.java b/src/test/java/com/video2podcast/bot/SummaryMessageFormatterTest.java
+new file mode 100644
+index 0000000..6779736
+--- /dev/null
++++ b/src/test/java/com/video2podcast/bot/SummaryMessageFormatterTest.java
+@@ -0,0 +1,79 @@
++package com.video2podcast.bot;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.params.ParameterizedTest;
++import org.junit.jupiter.params.provider.CsvSource;
++
++class SummaryMessageFormatterTest {
++
++  @ParameterizedTest
++  @CsvSource({
++    "0,0s",
++    "45,45s",
++    "59,59s",
++    "60,1m",
++    "119,1m",
++    "300,5m",
++    "3599,59m",
++    "3600,1h 0m",
++    "3659,1h 0m",
++    "6120,1h 42m",
++    "10800,3h 0m"
++  })
++  void formatsTheDuration(long seconds, String expected) {
++    assertThat(SummaryMessageFormatter.formatDuration(seconds)).isEqualTo(expected);
++  }
++
++  @Test
++  void formatsTitleDurationAndBullets() {
++    assertThat(SummaryMessageFormatter.format("A talk", 6120, "• one\n• two"))
++        .isEqualTo("<b>A talk</b>\nDuration: 1h 42m\n\n• one\n• two");
++  }
++
++  @Test
++  void escapesTitleAndBullets() {
++    assertThat(SummaryMessageFormatter.format("<i>A & B</i>", 30, "• x < y & z > w"))
++        .isEqualTo(
++            "<b>&lt;i&gt;A &amp; B&lt;/i&gt;</b>\nDuration: 30s\n\n• x &lt; y &amp; z &gt; w");
++  }
++
++  @Test
++  void collapsesAndStripsWhitespaceInTheTitle() {
++    assertThat(SummaryMessageFormatter.displayTitle("  a \n\t b   c  ")).isEqualTo("a b c");
++  }
++
++  @Test
++  void keepsATitleOfExactlyTheMaximumLength() {
++    String title = "x".repeat(SummaryMessageFormatter.TITLE_MAX);
++
++    assertThat(SummaryMessageFormatter.displayTitle(title)).isEqualTo(title);
++  }
++
++  @Test
++  void cutsALongerTitleToTheMaximumLengthEndingInAnEllipsis() {
++    String shown = SummaryMessageFormatter.displayTitle("x".repeat(201));
++
++    assertThat(shown).hasSize(SummaryMessageFormatter.TITLE_MAX).isEqualTo("x".repeat(199) + "…");
++  }
++
++  @Test
++  void neverSplitsASurrogatePair() {
++    // The pair starts at index 198, so a cut at 199 would leave a lone high surrogate.
++    String title = "x".repeat(198) + "😀" + "tail";
++
++    String shown = SummaryMessageFormatter.displayTitle(title);
++
++    assertThat(shown).isEqualTo("x".repeat(198) + "…");
++  }
++
++  @Test
++  void keepsAWholePairThatEndsRightBeforeTheEllipsis() {
++    String title = "x".repeat(197) + "😀" + "tail";
++
++    assertThat(SummaryMessageFormatter.displayTitle(title))
++        .isEqualTo("x".repeat(197) + "😀" + "…")
++        .hasSize(SummaryMessageFormatter.TITLE_MAX);
++  }
++}
+diff --git a/src/test/java/com/video2podcast/bot/SummaryMessagePublisherTest.java b/src/test/java/com/video2podcast/bot/SummaryMessagePublisherTest.java
+new file mode 100644
+index 0000000..0bf1888
+--- /dev/null
++++ b/src/test/java/com/video2podcast/bot/SummaryMessagePublisherTest.java
+@@ -0,0 +1,54 @@
++package com.video2podcast.bot;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.assertj.core.api.Assertions.assertThatCode;
++
++import com.video2podcast.job.FileKind;
++import com.video2podcast.job.JobFile;
++import com.video2podcast.job.JobRecord;
++import java.time.Instant;
++import java.util.List;
++import java.util.Map;
++import org.junit.jupiter.api.Test;
++
++class SummaryMessagePublisherTest {
++
++  private static final JobRecord JOB =
++      new JobRecord(
++          "job1",
++          7,
++          555,
++          null,
++          "A <talk>",
++          300,
++          Instant.parse("2026-11-19T10:00:00Z"),
++          Map.of(FileKind.AUDIO, JobFile.available("source.m4a")));
++
++  private static final String HTML = "<b>A &lt;talk&gt;</b>\nDuration: 5m\n\n• a";
++
++  private final RecordingGateway gateway = new RecordingGateway();
++  private final SummaryMessagePublisher publisher = new SummaryMessagePublisher(gateway);
++
++  @Test
++  void publishSendsTheSummaryWithTheTwoButtonsAndReturnsItsId() {
++    int id = publisher.publish(JOB, "• a");
++
++    assertThat(id).isEqualTo(1);
++    assertThat(gateway.messages)
++        .containsExactly(new RecordingGateway.Sent(555, HTML, Keyboards.delivery("job1")));
++  }
++
++  @Test
++  void withdrawEditsTheSameTextWithoutButtons() {
++    publisher.withdraw(JOB, 42, "• a");
++
++    assertThat(gateway.edits).containsExactly(new RecordingGateway.Edit(555, 42, HTML, List.of()));
++  }
++
++  @Test
++  void withdrawNeverThrows() {
++    gateway.failEdits = true;
++
++    assertThatCode(() -> publisher.withdraw(JOB, 42, "• a")).doesNotThrowAnyException();
++  }
++}
+diff --git a/src/test/java/com/video2podcast/bot/UrlMessageHandlerTest.java b/src/test/java/com/video2podcast/bot/UrlMessageHandlerTest.java
+new file mode 100644
+index 0000000..0075a25
+--- /dev/null
++++ b/src/test/java/com/video2podcast/bot/UrlMessageHandlerTest.java
+@@ -0,0 +1,371 @@
++package com.video2podcast.bot;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.Mockito.doAnswer;
++import static org.mockito.Mockito.doThrow;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.never;
++import static org.mockito.Mockito.verify;
++
++import com.video2podcast.job.JobFailure;
++import com.video2podcast.job.JobProgress;
++import com.video2podcast.job.JobQueue;
++import com.video2podcast.job.JobRequest;
++import com.video2podcast.job.PipelineService;
++import com.video2podcast.media.UrlValidator;
++import com.video2podcast.support.MutableClock;
++import java.nio.file.Path;
++import java.time.Duration;
++import java.time.Instant;
++import java.util.List;
++import java.util.concurrent.CopyOnWriteArrayList;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicBoolean;
++import java.util.function.BooleanSupplier;
++import org.junit.jupiter.api.AfterEach;
++import org.junit.jupiter.api.Test;
++import org.mockito.ArgumentCaptor;
++
++class UrlMessageHandlerTest {
++
++  private static final String URL = "https://videos.example/v";
++  private static final Sender SENDER = new Sender(7, 555, "ann", "Ann");
++  private static final Instant NOW = Instant.parse("2026-11-19T10:00:00Z");
++  private static final String UNSUPPORTED = "This link is not a supported video.";
++  private static final String FAILED = "Could not process this video. Please try again later.";
++
++  private final ThreadSafeGateway gateway = new ThreadSafeGateway();
++  private final JobQueue queue = new JobQueue(Duration.ofMillis(100));
++  private final PipelineService pipeline = mock(PipelineService.class);
++  private final UrlMessageHandler handler =
++      new UrlMessageHandler(gateway, new UrlValidator(), queue, pipeline, new MutableClock(NOW));
++
++  /** The gateway is called from the worker and from the completion thread. */
++  private static class ThreadSafeGateway implements TelegramGateway {
++    final List<String> calls = new CopyOnWriteArrayList<>();
++    final List<RecordingGateway.Sent> sent = new CopyOnWriteArrayList<>();
++    final List<RecordingGateway.Edit> edits = new CopyOnWriteArrayList<>();
++    volatile boolean failSends;
++    volatile boolean failEdits;
++    volatile CountDownLatch blockSend;
++
++    @Override
++    public int sendMessage(long chatId, String html, List<InlineButton> buttons) {
++      awaitBlock();
++      if (failSends) {
++        throw new TelegramGatewayException("down", null);
++      }
++      calls.add("send " + html);
++      sent.add(new RecordingGateway.Sent(chatId, html, buttons));
++      return 70 + sent.size();
++    }
++
++    @Override
++    public void editMessage(long chatId, int messageId, String html, List<InlineButton> buttons) {
++      if (failEdits) {
++        throw new TelegramGatewayException("cannot edit", null);
++      }
++      calls.add("edit " + html);
++      edits.add(new RecordingGateway.Edit(chatId, messageId, html, buttons));
++    }
++
++    private void awaitBlock() {
++      CountDownLatch latch = blockSend;
++      if (latch != null) {
++        try {
++          latch.await(10, TimeUnit.SECONDS);
++        } catch (InterruptedException e) {
++          Thread.currentThread().interrupt();
++        }
++      }
++    }
++
++    @Override
++    public void sendDocument(long chatId, Path file, String fileName, String caption) {
++      throw new UnsupportedOperationException();
++    }
++
++    @Override
++    public void sendAudio(long chatId, Path file, String title, String performer) {
++      throw new UnsupportedOperationException();
++    }
++
++    @Override
++    public void answerCallback(String callbackQueryId, String text) {
++      throw new UnsupportedOperationException();
++    }
++  }
++
++  @AfterEach
++  void tearDown() {
++    queue.close();
++  }
++
++  private static void await(BooleanSupplier condition) throws InterruptedException {
++    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
++    while (!condition.getAsBoolean()) {
++      if (System.nanoTime() > deadline) {
++        throw new AssertionError("condition not reached in 10 s");
++      }
++      Thread.sleep(5);
++    }
++  }
++
++  @Test
++  void aRejectedLinkGetsOneMessageAndNothingIsQueued() {
++    handler.handle(SENDER, "http://localhost/video");
++
++    assertThat(gateway.sent)
++        .containsExactly(new RecordingGateway.Sent(555, UNSUPPORTED, List.of()));
++    assertThat(gateway.edits).isEmpty();
++    assertThat(queue.size()).isZero();
++    verify(pipeline, never()).run(any(), any());
++  }
++
++  @Test
++  void textThatIsNotALinkIsRejectedToo() {
++    handler.handle(SENDER, "hello there");
++
++    assertThat(gateway.calls).containsExactly("send " + UNSUPPORTED);
++  }
++
++  @Test
++  void aRejectedLinkWhoseReplyCannotBeSentDoesNotThrow() {
++    gateway.failSends = true;
++
++    handler.handle(SENDER, "hello");
++
++    assertThat(gateway.calls).isEmpty();
++  }
++
++  @Test
++  void aSuccessfulJobShowsQueuedThenDone() throws Exception {
++    handler.handle(SENDER, URL);
++
++    await(() -> gateway.edits.size() == 1);
++    assertThat(gateway.calls).containsExactly("send Queued: position 1", "edit Done.");
++    assertThat(gateway.sent.get(0).buttons()).isEmpty();
++    assertThat(gateway.edits.get(0))
++        .isEqualTo(new RecordingGateway.Edit(555, 71, "Done.", List.of()));
++  }
++
++  @Test
++  void theJobGetsTheStrippedLinkTheSenderAndTheAcceptanceTime() throws Exception {
++    handler.handle(SENDER, "  " + URL + " \n");
++
++    await(() -> gateway.edits.size() == 1);
++    ArgumentCaptor<JobRequest> request = ArgumentCaptor.forClass(JobRequest.class);
++    verify(pipeline).run(request.capture(), any());
++    assertThat(request.getValue().url()).isEqualTo(URL);
++    assertThat(request.getValue().ownerUserId()).isEqualTo(7);
++    assertThat(request.getValue().chatId()).isEqualTo(555);
++    assertThat(request.getValue().createdAt()).isEqualTo(NOW);
++    assertThat(request.getValue().jobId()).isNotBlank();
++  }
++
++  @Test
++  void stageReportsEditTheStatusMessageBetweenQueuedAndDone() throws Exception {
++    doAnswer(
++            call -> {
++              JobProgress progress = call.getArgument(1);
++              progress.downloading();
++              progress.transcribing(1, 1);
++              progress.summarizing();
++              return null;
++            })
++        .when(pipeline)
++        .run(any(), any());
++
++    handler.handle(SENDER, URL);
++
++    await(() -> gateway.edits.size() == 4);
++    assertThat(gateway.calls)
++        .containsExactly(
++            "send Queued: position 1",
++            "edit Downloading…",
++            "edit Transcribing 1/1…",
++            "edit Summarizing…",
++            "edit Done.");
++    assertThat(gateway.edits).extracting(RecordingGateway.Edit::messageId).containsOnly(71);
++  }
++
++  @Test
++  void aJobFailureIsSentBeforeTheFailedStatus() throws Exception {
++    doThrow(JobFailure.of(JobFailure.Kind.NO_SPEECH)).when(pipeline).run(any(), any());
++
++    handler.handle(SENDER, URL);
++
++    await(() -> gateway.edits.size() == 1);
++    assertThat(gateway.calls)
++        .containsExactly(
++            "send Queued: position 1", "send No speech was found in this video.", "edit Failed.");
++  }
++
++  @Test
++  void theFailureMessageIsHtmlEscaped() throws Exception {
++    doThrow(new JobFailure(JobFailure.Kind.FAILED, "a <b> & c")).when(pipeline).run(any(), any());
++
++    handler.handle(SENDER, URL);
++
++    await(() -> gateway.edits.size() == 1);
++    assertThat(gateway.sent.get(1).html()).isEqualTo("a &lt;b&gt; &amp; c");
++  }
++
++  @Test
++  void anUnexpectedExceptionIsReportedAsTheGenericFailure() throws Exception {
++    doThrow(new IllegalStateException("secret path /tmp/x")).when(pipeline).run(any(), any());
++
++    handler.handle(SENDER, URL);
++
++    await(() -> gateway.edits.size() == 1);
++    assertThat(gateway.calls)
++        .containsExactly("send Queued: position 1", "send " + FAILED, "edit Failed.");
++  }
++
++  @Test
++  void theJobHasLeftTheQueueWhenTheFinalStatusIsEdited() throws Exception {
++    AtomicBoolean queueEmptyAtDone = new AtomicBoolean();
++    gateway.blockSend = null;
++    TelegramGateway watching =
++        new ThreadSafeGateway() {
++          @Override
++          public void editMessage(long chatId, int id, String html, List<InlineButton> buttons) {
++            queueEmptyAtDone.set(queue.size() == 0);
++            super.editMessage(chatId, id, html, buttons);
++          }
++        };
++    UrlMessageHandler other =
++        new UrlMessageHandler(watching, new UrlValidator(), queue, pipeline, new MutableClock(NOW));
++
++    other.handle(SENDER, URL);
++
++    await(() -> !((ThreadSafeGateway) watching).edits.isEmpty());
++    assertThat(queueEmptyAtDone).isTrue();
++  }
++
++  @Test
++  void aSecondLinkWhileTheFirstRunsShowsPosition2() throws Exception {
++    CountDownLatch release = new CountDownLatch(1);
++    doAnswer(
++            call -> {
++              release.await(10, TimeUnit.SECONDS);
++              return null;
++            })
++        .when(pipeline)
++        .run(any(), any());
++
++    handler.handle(SENDER, URL);
++    handler.handle(SENDER, URL + "2");
++    release.countDown();
++
++    await(() -> gateway.edits.size() == 2);
++    assertThat(gateway.sent)
++        .extracting(RecordingGateway.Sent::html)
++        .containsExactly("Queued: position 1", "Queued: position 2");
++  }
++
++  @Test
++  void aFailedQueuedMessageStopsTheJobWithoutRunningItOrSayingAnything() throws Exception {
++    gateway.failSends = true;
++
++    handler.handle(SENDER, URL);
++
++    await(() -> queue.size() == 0);
++    verify(pipeline, never()).run(any(), any());
++    assertThat(gateway.calls).isEmpty();
++  }
++
++  @Test
++  void theNextJobStillRunsAfterAFailedQueuedMessage() throws Exception {
++    gateway.failSends = true;
++    handler.handle(SENDER, URL);
++    await(() -> queue.size() == 0);
++    gateway.failSends = false;
++
++    handler.handle(SENDER, URL);
++
++    await(() -> gateway.edits.size() == 1);
++    verify(pipeline).run(any(), any());
++  }
++
++  @Test
++  void aFailedFinalEditIsSwallowedAndTheQueueIsFree() throws Exception {
++    gateway.failEdits = true;
++
++    handler.handle(SENDER, URL);
++
++    await(() -> queue.size() == 0);
++    verify(pipeline).run(any(), any());
++    gateway.failEdits = false;
++    handler.handle(SENDER, URL);
++    await(() -> gateway.edits.size() == 1);
++  }
++
++  @Test
++  void aFailedFailureMessageIsSwallowedToo() throws Exception {
++    doThrow(JobFailure.of(JobFailure.Kind.FAILED)).when(pipeline).run(any(), any());
++    gateway.failEdits = true;
++
++    handler.handle(SENDER, URL);
++
++    await(() -> gateway.sent.size() == 2);
++    assertThat(gateway.edits).isEmpty();
++  }
++
++  @Test
++  void aClosedQueueGetsTheGenericFailureAndNoStatusMessage() {
++    queue.close();
++
++    handler.handle(SENDER, URL);
++
++    assertThat(gateway.calls).containsExactly("send " + FAILED);
++  }
++
++  @Test
++  void aStatusMessageThatNeverArrivesStopsTheJobAndReportsAFailure() throws Exception {
++    JobQueue shortQueue = new JobQueue(Duration.ofMillis(100));
++    UrlMessageHandler impatient =
++        new UrlMessageHandler(
++            gateway,
++            new UrlValidator(),
++            shortQueue,
++            pipeline,
++            new MutableClock(NOW),
++            Duration.ofMillis(50));
++    CountDownLatch slowSend = new CountDownLatch(1);
++    gateway.blockSend = slowSend;
++    Thread sender = Thread.ofVirtual().start(() -> impatient.handle(SENDER, URL));
++    Thread.sleep(300);
++    gateway.blockSend = null;
++    slowSend.countDown();
++    sender.join(10_000);
++
++    await(() -> gateway.edits.size() == 1);
++    verify(pipeline, never()).run(any(), any());
++    assertThat(gateway.calls).contains("send " + FAILED, "edit Failed.");
++    shortQueue.close();
++  }
++
++  @Test
++  void aWorkerStoppedWhileWaitingForTheStatusMessageDoesNotRunTheJob() throws Exception {
++    JobQueue closing = new JobQueue(Duration.ofMillis(100));
++    UrlMessageHandler other =
++        new UrlMessageHandler(
++            gateway, new UrlValidator(), closing, pipeline, new MutableClock(NOW));
++    CountDownLatch slowSend = new CountDownLatch(1);
++    gateway.blockSend = slowSend;
++    Thread sender = Thread.ofVirtual().start(() -> other.handle(SENDER, URL));
++    await(() -> closing.size() == 1);
++    Thread.sleep(100);
++    closing.close();
++    gateway.blockSend = null;
++    slowSend.countDown();
++    sender.join(10_000);
++
++    await(() -> gateway.edits.size() == 1);
++    verify(pipeline, never()).run(any(), any());
++    assertThat(gateway.calls).contains("send " + FAILED, "edit Failed.");
++  }
++}
+diff --git a/src/test/java/com/video2podcast/config/PipelineConfigTest.java b/src/test/java/com/video2podcast/config/PipelineConfigTest.java
+new file mode 100644
+index 0000000..0385a9f
+--- /dev/null
++++ b/src/test/java/com/video2podcast/config/PipelineConfigTest.java
+@@ -0,0 +1,75 @@
++package com.video2podcast.config;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.mockito.Mockito.mock;
++
++import com.video2podcast.bot.TelegramGateway;
++import com.video2podcast.bot.UrlMessageHandler;
++import com.video2podcast.job.JobQueue;
++import com.video2podcast.job.JobStore;
++import com.video2podcast.job.PipelineService;
++import com.video2podcast.job.SummaryPublisher;
++import com.video2podcast.media.FfmpegRunner;
++import com.video2podcast.media.UrlValidator;
++import com.video2podcast.media.YtDlpClient;
++import com.video2podcast.summary.SummaryService;
++import com.video2podcast.transcript.TranscriptionClient;
++import java.nio.file.Path;
++import java.time.Clock;
++import java.time.Duration;
++import org.junit.jupiter.api.Test;
++import org.springframework.boot.test.context.runner.ApplicationContextRunner;
++
++class PipelineConfigTest {
++
++  private static AppProperties props() {
++    return new AppProperties(
++        new AppProperties.Telegram("123:abc", 1L, true, ""),
++        new AppProperties.Access(Path.of("a.json"), Duration.ofHours(24)),
++        new AppProperties.Ollama("http://localhost:11434", "m", 8192, Duration.ofMinutes(10)),
++        new AppProperties.Whisper("http://localhost:8081", Duration.ofMinutes(10)),
++        new AppProperties.Jobs(
++            Path.of("w"),
++            Duration.ofHours(3),
++            Duration.ofHours(1),
++            Duration.ofMinutes(1),
++            Duration.ofMinutes(30),
++            Duration.ofMinutes(30)));
++  }
++
++  private ApplicationContextRunner runner(boolean enabled) {
++    return new ApplicationContextRunner()
++        .withUserConfiguration(PipelineConfig.class)
++        .withBean(AppProperties.class, PipelineConfigTest::props)
++        .withBean(TelegramGateway.class, () -> mock(TelegramGateway.class))
++        .withBean(YtDlpClient.class, () -> mock(YtDlpClient.class))
++        .withBean(FfmpegRunner.class, () -> mock(FfmpegRunner.class))
++        .withBean(TranscriptionClient.class, () -> mock(TranscriptionClient.class))
++        .withBean(SummaryService.class, () -> mock(SummaryService.class))
++        .withBean(JobStore.class, () -> mock(JobStore.class))
++        .withBean(JobQueue.class, () -> mock(JobQueue.class))
++        .withBean(UrlValidator.class, UrlValidator::new)
++        .withBean(Clock.class, Clock::systemUTC)
++        .withPropertyValues("app.telegram.enabled=" + enabled);
++  }
++
++  @Test
++  void createsThePipelineBeansWhenTheBotIsEnabled() {
++    runner(true)
++        .run(context -> {
++          assertThat(context).hasSingleBean(SummaryPublisher.class);
++          assertThat(context).hasSingleBean(PipelineService.class);
++          assertThat(context).hasSingleBean(UrlMessageHandler.class);
++        });
++  }
++
++  @Test
++  void createsNothingWhenTheBotIsDisabled() {
++    runner(false)
++        .run(context -> {
++          assertThat(context).doesNotHaveBean(SummaryPublisher.class);
++          assertThat(context).doesNotHaveBean(PipelineService.class);
++          assertThat(context).doesNotHaveBean(UrlMessageHandler.class);
++        });
++  }
++}
+diff --git a/src/test/java/com/video2podcast/config/TelegramConfigTest.java b/src/test/java/com/video2podcast/config/TelegramConfigTest.java
+index b5295e4..f81607c 100644
+--- a/src/test/java/com/video2podcast/config/TelegramConfigTest.java
++++ b/src/test/java/com/video2podcast/config/TelegramConfigTest.java
+@@ -8,6 +8,7 @@ import com.video2podcast.access.AccessService;
+ import com.video2podcast.bot.BotUpdateHandler;
+ import com.video2podcast.bot.TelegramBot;
+ import com.video2podcast.bot.TelegramGateway;
++import com.video2podcast.bot.UrlMessageHandler;
+ import java.nio.file.Path;
+ import java.time.Duration;
+ import org.junit.jupiter.api.Test;
+@@ -36,6 +37,7 @@ class TelegramConfigTest {
+         .withUserConfiguration(TelegramConfig.class)
+         .withBean(AppProperties.class, () -> props(token, admin, enabled))
+         .withBean(AccessService.class, () -> mock(AccessService.class))
++        .withBean(UrlMessageHandler.class, () -> mock(UrlMessageHandler.class))
+         .withPropertyValues("app.telegram.enabled=" + enabled);
+   }
+ 
+diff --git a/src/test/java/com/video2podcast/job/PipelineServiceTest.java b/src/test/java/com/video2podcast/job/PipelineServiceTest.java
+new file mode 100644
+index 0000000..ea45bba
+--- /dev/null
++++ b/src/test/java/com/video2podcast/job/PipelineServiceTest.java
+@@ -0,0 +1,389 @@
++package com.video2podcast.job;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.assertj.core.api.Assertions.assertThatThrownBy;
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.ArgumentMatchers.eq;
++import static org.mockito.Mockito.doAnswer;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.never;
++import static org.mockito.Mockito.verify;
++import static org.mockito.Mockito.when;
++
++import com.video2podcast.bot.TelegramGatewayException;
++import com.video2podcast.config.AppProperties;
++import com.video2podcast.media.FfmpegRunner;
++import com.video2podcast.media.VideoMetadata;
++import com.video2podcast.media.YtDlpClient;
++import com.video2podcast.summary.SummaryService;
++import com.video2podcast.support.MutableClock;
++import com.video2podcast.transcript.TranscriptionClient;
++import java.io.IOException;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.time.Duration;
++import java.time.Instant;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.function.UnaryOperator;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.io.TempDir;
++
++class PipelineServiceTest {
++
++  private static final String URL = "https://videos.example/v";
++  private static final String JOB_ID = "job-1";
++  private static final Instant CREATED = Instant.parse("2026-11-19T10:00:00Z");
++  private static final Duration RETENTION = Duration.ofMinutes(45);
++  private static final AppProperties.Jobs JOBS =
++      new AppProperties.Jobs(
++          Path.of("w"),
++          Duration.ofHours(3),
++          RETENTION,
++          Duration.ofMinutes(1),
++          Duration.ofMinutes(30),
++          Duration.ofMinutes(20));
++  private static final JobRequest REQUEST = new JobRequest(JOB_ID, 7, 555, URL, CREATED);
++
++  @TempDir Path work;
++
++  private final YtDlpClient ytDlp = mock(YtDlpClient.class);
++  private final FfmpegRunner ffmpeg = mock(FfmpegRunner.class);
++  private final TranscriptionClient transcription = mock(TranscriptionClient.class);
++  private final SummaryService summary = mock(SummaryService.class);
++  private final MutableClock clock = new MutableClock(Instant.parse("2026-11-19T10:05:00Z"));
++  private final List<String> events = new ArrayList<>();
++  private final FakePublisher publisher = new FakePublisher();
++  private JobStore store;
++  private PipelineService pipeline;
++  private Path dir;
++
++  /** Records the stage reports and the order of the calls. */
++  private final JobProgress progress =
++      new JobProgress() {
++        @Override
++        public void downloading() {
++          events.add("downloading");
++        }
++
++        @Override
++        public void transcribing(int n, int total) {
++          events.add("transcribing " + n + "/" + total);
++        }
++
++        @Override
++        public void summarizing() {
++          events.add("summarizing");
++        }
++      };
++
++  private final class FakePublisher implements SummaryPublisher {
++    int sent;
++    JobRecord published;
++    String text;
++    RuntimeException failure;
++    final List<Integer> withdrawn = new ArrayList<>();
++
++    @Override
++    public int publish(JobRecord job, String summaryText) {
++      events.add("publish");
++      if (failure != null) {
++        throw failure;
++      }
++      published = job;
++      text = summaryText;
++      return 900 + ++sent;
++    }
++
++    @Override
++    public void withdraw(JobRecord job, int messageId, String summaryText) {
++      events.add("withdraw");
++      withdrawn.add(messageId);
++    }
++  }
++
++  @BeforeEach
++  void setUp() throws IOException {
++    store = new JobStore(work, clock);
++    pipeline =
++        new PipelineService(ytDlp, ffmpeg, transcription, summary, store, publisher, clock, JOBS);
++    dir = store.directory(JOB_ID);
++    Path source = dir.resolve("source.m4a");
++    Path wav = dir.resolve("audio.wav");
++    List<Path> chunks =
++        List.of(dir.resolve("chunks/chunk-000.wav"), dir.resolve("chunks/chunk-001.wav"));
++    when(ytDlp.fetchMetadata(URL)).thenReturn(new VideoMetadata("A talk", Duration.ofSeconds(300)));
++    when(ytDlp.downloadAudio(URL, dir))
++        .thenAnswer(call -> {
++          events.add("download");
++          Files.writeString(source, "audio");
++          return source;
++        });
++    when(ffmpeg.toWav(source, dir)).thenReturn(wav);
++    when(ffmpeg.split(wav, dir)).thenReturn(chunks);
++    when(transcription.transcribe(eq(dir), eq(chunks), any()))
++        .thenAnswer(call -> {
++          TranscriptionClient.ProgressListener listener = call.getArgument(2);
++          listener.accept(1, 2);
++          listener.accept(2, 2);
++          Path transcript = dir.resolve("transcript.txt");
++          Files.writeString(transcript, "héllo transcript", StandardCharsets.UTF_8);
++          return transcript;
++        });
++    when(summary.summarize("héllo transcript")).thenReturn("• point");
++  }
++
++  @Test
++  void runsTheStagesInOrderAndPublishesTheSummary() {
++    pipeline.run(REQUEST, progress);
++
++    assertThat(events)
++        .containsExactly(
++            "downloading",
++            "download",
++            "transcribing 1/2",
++            "transcribing 2/2",
++            "summarizing",
++            "publish");
++    assertThat(publisher.text).isEqualTo("• point");
++  }
++
++  @Test
++  void storesTheRecordWithRetentionStartingAtTheSendTime() {
++    pipeline.run(REQUEST, progress);
++
++    JobRecord stored = store.load(JOB_ID).orElseThrow();
++    Instant expiresAt = clock.instant().plus(RETENTION);
++    assertThat(stored.jobId()).isEqualTo(JOB_ID);
++    assertThat(stored.ownerUserId()).isEqualTo(7);
++    assertThat(stored.chatId()).isEqualTo(555);
++    assertThat(stored.title()).isEqualTo("A talk");
++    assertThat(stored.durationSeconds()).isEqualTo(300);
++    assertThat(stored.createdAt()).isEqualTo(CREATED);
++    assertThat(stored.summaryMessageId()).isEqualTo(901);
++    assertThat(stored.files())
++        .containsOnly(
++            org.assertj.core.api.Assertions.entry(
++                FileKind.AUDIO, new JobFile("source.m4a", FileState.AVAILABLE, expiresAt, null)),
++            org.assertj.core.api.Assertions.entry(
++                FileKind.TRANSCRIPT,
++                new JobFile("transcript.txt", FileState.AVAILABLE, expiresAt, null)));
++  }
++
++  @Test
++  void thePublisherSeesTheRecordBeforeRetentionStarts() {
++    pipeline.run(REQUEST, progress);
++
++    assertThat(publisher.published.summaryMessageId()).isNull();
++    assertThat(publisher.published.files().values())
++        .allSatisfy(file -> assertThat(file.expiresAt()).isNull());
++  }
++
++  @Test
++  void aSlowSummaryDoesNotUseUpTheRetention() {
++    when(summary.summarize(any()))
++        .thenAnswer(call -> {
++          clock.advance(Duration.ofHours(2));
++          return "• late";
++        });
++
++    pipeline.run(REQUEST, progress);
++
++    assertThat(store.load(JOB_ID).orElseThrow().files().get(FileKind.AUDIO).expiresAt())
++        .isEqualTo(clock.instant().plus(RETENTION));
++  }
++
++  @Test
++  void keepsTheSourceTranscriptAndJobFileOnSuccess() {
++    pipeline.run(REQUEST, progress);
++
++    assertThat(dir.resolve("source.m4a")).exists();
++    assertThat(dir.resolve("transcript.txt")).exists();
++    assertThat(dir.resolve("job.json")).exists();
++  }
++
++  @Test
++  void usesTheNameOfTheDownloadedFileForTheAudioEntry() throws IOException {
++    Path mp4 = dir.resolve("source.mp4");
++    doAnswer(
++            call -> {
++              Files.writeString(mp4, "video");
++              return mp4;
++            })
++        .when(ytDlp)
++        .downloadAudio(URL, dir);
++    when(ffmpeg.toWav(mp4, dir)).thenReturn(dir.resolve("audio.wav"));
++
++    pipeline.run(REQUEST, progress);
++
++    assertThat(store.load(JOB_ID).orElseThrow().files().get(FileKind.AUDIO).path())
++        .isEqualTo("source.mp4");
++  }
++
++  @Test
++  void aJobFailureIsRethrownUnchangedAndTheDirectoryIsDeleted() {
++    JobFailure failure = JobFailure.of(JobFailure.Kind.PRIVATE);
++    when(ytDlp.fetchMetadata(URL)).thenThrow(failure);
++
++    assertThatThrownBy(() -> pipeline.run(REQUEST, progress)).isSameAs(failure);
++
++    assertThat(dir).doesNotExist();
++    assertThat(events).containsExactly("downloading");
++  }
++
++  @Test
++  void aFailureAfterTheTranscriptDeletesTheWholeDirectory() {
++    JobFailure failure = JobFailure.of(JobFailure.Kind.SUMMARY_UNREACHABLE);
++    when(summary.summarize(any())).thenThrow(failure);
++
++    assertThatThrownBy(() -> pipeline.run(REQUEST, progress)).isSameAs(failure);
++
++    assertThat(dir).doesNotExist();
++    assertThat(events).doesNotContain("publish");
++  }
++
++  @Test
++  void anUnexpectedExceptionBecomesAFailedJobWithTheCauseKept() {
++    IllegalStateException cause = new IllegalStateException("boom");
++    when(ffmpeg.toWav(any(), any())).thenThrow(cause);
++
++    assertThatThrownBy(() -> pipeline.run(REQUEST, progress))
++        .isInstanceOfSatisfying(
++            JobFailure.class,
++            failure -> {
++              assertThat(failure.kind()).isEqualTo(JobFailure.Kind.FAILED);
++              assertThat(failure.getCause()).isSameAs(cause);
++              assertThat(failure.getMessage()).doesNotContain("boom");
++            });
++
++    assertThat(dir).doesNotExist();
++  }
++
++  @Test
++  void anUnreadableTranscriptIsATranscriptionFailure() {
++    when(transcription.transcribe(any(), any(), any())).thenReturn(dir.resolve("missing.txt"));
++
++    assertThatThrownBy(() -> pipeline.run(REQUEST, progress))
++        .isInstanceOfSatisfying(
++            JobFailure.class,
++            failure -> {
++              assertThat(failure.kind()).isEqualTo(JobFailure.Kind.FAILED);
++              assertThat(failure.getMessage())
++                  .isEqualTo("Transcription failed. Please try again later.");
++            });
++
++    assertThat(dir).doesNotExist();
++  }
++
++  @Test
++  void aWorkDirectoryThatCannotBeCreatedFailsTheJob() throws IOException {
++    Files.writeString(dir, "a file where the directory should be");
++
++    assertThatThrownBy(() -> pipeline.run(REQUEST, progress))
++        .isInstanceOfSatisfying(
++            JobFailure.class,
++            failure -> assertThat(failure.kind()).isEqualTo(JobFailure.Kind.FAILED));
++
++    assertThat(events).isEmpty();
++    verify(ytDlp, never()).fetchMetadata(any());
++  }
++
++  @Test
++  void aFailedSummarySendFailsTheJobWithoutWithdrawing() {
++    publisher.failure = new TelegramGatewayException("down", null);
++
++    assertThatThrownBy(() -> pipeline.run(REQUEST, progress))
++        .isInstanceOfSatisfying(
++            JobFailure.class,
++            failure -> {
++              assertThat(failure.kind()).isEqualTo(JobFailure.Kind.FAILED);
++              assertThat(failure.getMessage())
++                  .isEqualTo("Could not process this video. Please try again later.");
++            });
++
++    assertThat(publisher.withdrawn).isEmpty();
++    assertThat(dir).doesNotExist();
++  }
++
++  @Test
++  void aFailedJobJsonWriteFailsTheJobBeforeAnythingIsSent() throws IOException {
++    when(summary.summarize(any()))
++        .thenAnswer(call -> {
++          Files.createDirectory(dir.resolve("job.json"));
++          return "• point";
++        });
++
++    assertThatThrownBy(() -> pipeline.run(REQUEST, progress))
++        .isInstanceOfSatisfying(
++            JobFailure.class,
++            failure -> assertThat(failure.kind()).isEqualTo(JobFailure.Kind.FAILED));
++
++    assertThat(events).doesNotContain("publish");
++    assertThat(dir).doesNotExist();
++  }
++
++  @Test
++  void aFailedPublicationUpdateWithdrawsTheSummaryAndDeletesTheDirectory() {
++    JobStore failing =
++        new JobStore(work, clock) {
++          @Override
++          public java.util.Optional<JobRecord> update(
++              String jobId, UnaryOperator<JobRecord> change) {
++            throw new JobStoreException("disk full", null);
++          }
++        };
++    pipeline =
++        new PipelineService(ytDlp, ffmpeg, transcription, summary, failing, publisher, clock, JOBS);
++
++    assertThatThrownBy(() -> pipeline.run(REQUEST, progress))
++        .isInstanceOfSatisfying(
++            JobFailure.class,
++            failure -> assertThat(failure.kind()).isEqualTo(JobFailure.Kind.FAILED));
++
++    assertThat(publisher.withdrawn).containsExactly(901);
++    assertThat(dir).doesNotExist();
++  }
++
++  @Test
++  void aVanishedJobFileDuringPublicationCountsAsAFailure() {
++    JobStore vanishing =
++        new JobStore(work, clock) {
++          @Override
++          public java.util.Optional<JobRecord> update(
++              String jobId, UnaryOperator<JobRecord> change) {
++            return java.util.Optional.empty();
++          }
++        };
++    pipeline =
++        new PipelineService(
++            ytDlp, ffmpeg, transcription, summary, vanishing, publisher, clock, JOBS);
++
++    assertThatThrownBy(() -> pipeline.run(REQUEST, progress)).isInstanceOf(JobFailure.class);
++
++    assertThat(publisher.withdrawn).containsExactly(901);
++    assertThat(dir).doesNotExist();
++  }
++
++  @Test
++  void aDeletionErrorDoesNotReplaceTheOriginalFailure() {
++    JobFailure failure = JobFailure.of(JobFailure.Kind.TIMEOUT);
++    when(ytDlp.fetchMetadata(URL)).thenThrow(failure);
++    JobStore stubborn = mock(JobStore.class);
++    when(stubborn.directory(JOB_ID)).thenReturn(dir);
++    doAnswer(
++            call -> {
++              throw new JobStoreException("cannot delete", null);
++            })
++        .when(stubborn)
++        .delete(JOB_ID);
++    pipeline =
++        new PipelineService(
++            ytDlp, ffmpeg, transcription, summary, stubborn, publisher, clock, JOBS);
++
++    assertThatThrownBy(() -> pipeline.run(REQUEST, progress)).isSameAs(failure);
++
++    verify(stubborn).delete(JOB_ID);
++  }
++}
+diff --git a/src/test/java/com/video2podcast/transcript/TranscriptionClientTest.java b/src/test/java/com/video2podcast/transcript/TranscriptionClientTest.java
+index b394b4e..aad4bf6 100644
+--- a/src/test/java/com/video2podcast/transcript/TranscriptionClientTest.java
++++ b/src/test/java/com/video2podcast/transcript/TranscriptionClientTest.java
+@@ -86,6 +86,24 @@ class TranscriptionClientTest {
+     order.verify(whisper).transcribe(c1);
+   }
+ 
++  @Test
++  void aConnectionErrorThenSuccessKeepsEarlierChunksAndOrderWithOneProgressEventPerChunk()
++      throws Exception {
++    when(whisper.transcribe(c0)).thenReturn("A");
++    when(whisper.transcribe(c1)).thenThrow(connection()).thenReturn("B");
++    when(whisper.transcribe(c2)).thenReturn("C");
++
++    run(c0, c1, c2);
++
++    assertThat(Files.readString(jobDir.resolve("transcript.txt"))).isEqualTo("A B C\n");
++    assertThat(events).containsExactly("1/3", "2/3", "3/3");
++    InOrder order = Mockito.inOrder(whisper);
++    order.verify(whisper).transcribe(c0);
++    order.verify(whisper, times(2)).transcribe(c1);
++    order.verify(whisper).transcribe(c2);
++    Mockito.verifyNoMoreInteractions(whisper);
++  }
++
+   @Test
+   void emptyAnswerOnRetryIsValid() throws Exception {
+     when(whisper.transcribe(c0)).thenThrow(other()).thenReturn(" ");

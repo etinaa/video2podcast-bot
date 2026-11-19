@@ -3,6 +3,8 @@ Feature: Transcribe a video link into a plain-text transcript
   Drive the bot through Telegram; observe Whisper HTTP requests, status edits and files.
   Media fixtures are served by WireMock without external DNS; no process mocks are used.
   JSON escapes denote decoded response characters; transcript doc strings omit the final LF.
+  HTTP attempt assertions cover requests received by WireMock, never refused TCP connections.
+  Mixed connection-error retry sequences remain unit contracts; see tasks/T11/requirements.md.
 
   Background:
     Given an allowed Telegram user
@@ -153,7 +155,6 @@ Feature: Transcribe a video link into a plain-text transcript
 
     Examples:
       | failure                                                      |
-      | a connection refusal                                         |
       | status 400 with T3 fixture whisper-inference-bad-request.txt |
       | status 302 without a usable transcription response           |
       | status 500 with body {"text":"not speech"}                   |
@@ -187,9 +188,6 @@ Feature: Transcribe a video link into a plain-text transcript
 
     Examples:
       | first_failure      | retry_failure      | message                                       |
-      | connection refusal | connection refusal | The transcription server is unreachable.      |
-      | status 400         | connection refusal | The transcription server is unreachable.      |
-      | connection refusal | status 400         | Transcription failed. Please try again later. |
       | status 400         | status 400         | Transcription failed. Please try again later. |
       | status 503         | status 503         | Transcription failed. Please try again later. |
       | malformed JSON     | missing text field | Transcription failed. Please try again later. |
@@ -261,3 +259,12 @@ Feature: Transcribe a video link into a plain-text transcript
       """
       First part.
       """
+
+  @R4 @R7 @R8
+  Scenario: Report an unreachable transcription server without inventing received requests
+    Given the Whisper base URL points to a local port that refuses connections
+    When the user sends "http://videos.example/video" in a private chat
+    Then the bot replies with "The transcription server is unreachable."
+    And the Whisper mock receives no POST request to "/inference"
+    And the Ollama mock receives no request
+    And after this submission finishes no working directory for it remains

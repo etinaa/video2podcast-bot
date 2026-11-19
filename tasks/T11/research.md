@@ -50,3 +50,12 @@ Source: A: Q-analyst-1 and A: Q-architect-check in [comms/questions.md](comms/qu
 Progress edit errors do not abort processing. Initial queued-send failure prevents media/disk work. Storage/publication failures clean the job; persistence failure after a successful summary send also attempts removal of its buttons. Final notifications and withdrawal are best effort without application retries. New scenarios observe Telegram rejection responses and filesystem obstacles at job.json, without calling internal services. Permission-denied cleanup/logging and shutdown branches remain unit-test concerns where portable external setup is unavailable. The initial draft's separate-ack wording and open-contract notes are superseded by this revision.
 
 Revision validation (2026-11-19): T11 now has 25 scenarios/outlines; both T11 and TD2 features parsed successfully with installed Cucumber. Requirement tags, local Markdown targets and whitespace checks pass. TD2's success example now explicitly waits for Telegram status `Done.`. No Maven tests were run for this artifact revision.
+
+
+## Q-tester-1 resolution — 2026-11-19
+
+Repository evidence: [WhisperClientTest](../../src/test/java/com/video2podcast/transcript/WhisperClientTest.java) distinguishes refusedConnectionIsAConnectionError and twoConnectTimeoutsGiveServiceUnreachable. [TranscriptionClientTest](../../src/test/java/com/video2podcast/transcript/TranscriptionClientTest.java) covers mixed terminal outcomes in secondFailureDecidesTheKind and connectionFailureOnRetryIsServiceUnreachable. Its retriesOnceAndKeepsGoing currently uses a nonconnection failure, so a connection-error-then-success unit case is explicitly requested from Developer, not claimed as existing coverage.
+
+Tester correctly identified that a refused connection never enters the HTTP journal and an immediate retry makes a listener stop/start fixture nondeterministic. T9 now keeps mixed connection-error sequences in the unit mapping in [requirements.md](requirements.md) and adds a genuine closed-port Telegram acceptance scenario without a refused-attempt HTTP count. HTTP 503 is not a substitute for connection refusal. No production retry/error policy changes.
+
+Q-tester-1 revision validation: installed Cucumber parser accepts T9-transcription.feature; all 20 scenarios/outlines retain requirement tags, no refused-connection example remains in an HTTP-journal matrix, and changed analyst artifacts have no trailing whitespace. Production/unit tests were not run by Analyst; Q-analyst-2 remains Developer-owned.

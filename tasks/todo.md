@@ -134,7 +134,7 @@ Sizes: S = 1-2 files, M = 3-5 files.
   - Depends on: T3
   - Files: `summary/LlmClient.java`, `summary/OllamaClient.java`, `summary/SummaryService.java`, `summary/Prompts.java`, `job/JobFailure.java` (kind `SUMMARY_UNREACHABLE`), `config/AppProperties.java`, `application.yml`, `SPEC.md`, tests
 
-- [~] **T11: Link to summary message with buttons (end-to-end)** (M)
+- [x] **T11: Link to summary message with buttons (end-to-end)** (M)
   - Acceptance:
     - An allowed user's URL message gets an acknowledgement within 5 seconds, then one status message that is edited through the stages (queued, downloading, transcribing n/N, summarizing). On the queued stage the status text shows the queue position, `JobQueue.size()` counted when the job is added (the first job in an empty queue shows position 1).
     - On success the bot sends the HTML message (title, duration, bullets) with **Download audio** and **Download transcript** buttons (`audio:<jobId>`, `transcript:<jobId>`) and saves `job.json` with `expiresAt` = send time + 1 hour. **No audio or transcript file is sent.**

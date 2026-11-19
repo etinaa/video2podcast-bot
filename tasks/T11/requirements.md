@@ -110,3 +110,19 @@ T12 transcript sending; T13 audio delivery/compression; T14 expiry sweeper/start
 ## Questions and handoff
 
 [Q-analyst-1 and Q-architect-check](comms/questions.md) are answered by the Architect in [api.md](api.md) and [flows.md](flows.md). This revision incorporates the single queued acknowledgement, exact copy, title/duration rules and failure recovery. No owner product choice remains open. Tester should report automation conflicts through the append-only question log; internal mechanics stay unit-tested rather than introducing service calls in steps.
+
+
+## T9 connection-refusal acceptance clarification — A: Q-tester-1
+
+A refused TCP connection cannot appear in WireMock's HTTP request journal. Do not substitute HTTP 503 or a connection reset for a connection refusal. T9's HTTP retry matrices now cover only requests that reach the HTTP mock. A separate Telegram-driven scenario uses a genuinely closed local Whisper port and asserts the safe unreachable message, no Whisper/Ollama HTTP requests and failed-directory cleanup. It does not claim to count refused attempts through WireMock.
+
+The immediate-retry policy and all mixed-outcome requirements remain unchanged. Deterministic mixed connection-error sequences belong to unit tests, with this explicit mapping:
+
+| Removed HTTP-matrix example | Unit evidence / required addition |
+|---|---|
+| First attempt refuses, retry succeeds, later chunks continue without resending earlier chunks | **Developer addition required:** connection-error-then-success case in TranscriptionClientTest; existing retriesOnceAndKeepsGoing covers a nonconnection failure only and is not claimed to prove this variant. |
+| Connection error then nonconnection failure | TranscriptionClientTest#secondFailureDecidesTheKind |
+| Nonconnection failure then connection error | TranscriptionClientTest#connectionFailureOnRetryIsServiceUnreachable |
+| Both attempts cannot connect | WhisperClientTest#twoConnectTimeoutsGiveServiceUnreachable; refusedConnectionIsAConnectionError verifies genuine refusal classification; separate closed-port acceptance checks the Telegram outcome. |
+
+Exact retry counts, per-attempt payload preparation and connection-error mapping remain unit contracts; wire-level multipart bytes are asserted only for HTTP requests actually received. This resolves an unobservable assertion without weakening the required behavior or introducing an internal service invocation into Gherkin. The Developer owns the missing unit case; this analyst revision does not claim it already exists or passes.
