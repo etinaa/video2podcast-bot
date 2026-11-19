@@ -130,7 +130,7 @@ public class PipelineService {
 
   private void deleteDirectory(String jobId) {
     try {
-      store.delete(jobId);
+      store.discard(jobId);
     } catch (RuntimeException e) {
       if (LOG.isWarnEnabled()) {
         LOG.warn("Could not delete the directory of job {}", jobId, e);

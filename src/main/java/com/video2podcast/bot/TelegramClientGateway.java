@@ -7,6 +7,7 @@ import org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery;
 import org.telegram.telegrambots.meta.api.methods.send.SendAudio;
 import org.telegram.telegrambots.meta.api.methods.send.SendDocument;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
+import org.telegram.telegrambots.meta.api.methods.updatingmessages.EditMessageReplyMarkup;
 import org.telegram.telegrambots.meta.api.methods.updatingmessages.EditMessageText;
 import org.telegram.telegrambots.meta.api.objects.InputFile;
 import org.telegram.telegrambots.meta.api.objects.LinkPreviewOptions;
@@ -49,6 +50,19 @@ public class TelegramClientGateway implements TelegramGateway {
             .parseMode(HTML)
             .linkPreviewOptions(noLinkPreview())
             .replyMarkup(keyboard(buttons))
+            .build();
+    call(() -> client.execute(request));
+  }
+
+  @Override
+  public void editButtons(long chatId, int messageId, List<InlineButton> buttons) {
+    InlineKeyboardMarkup markup =
+        buttons.isEmpty() ? new InlineKeyboardMarkup(List.of()) : keyboard(buttons);
+    EditMessageReplyMarkup request =
+        EditMessageReplyMarkup.builder()
+            .chatId(chatId)
+            .messageId(messageId)
+            .replyMarkup(markup)
             .build();
     call(() -> client.execute(request));
   }

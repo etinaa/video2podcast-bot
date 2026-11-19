@@ -117,6 +117,52 @@ class TelegramClientGatewayTest {
   }
 
   @Test
+  void editButtonsReplacesOnlyTheKeyboard() {
+    telegram.stubFor(
+        post(urlPathEqualTo(path("editMessageReplyMarkup")))
+            .willReturn(
+                aResponse().withBody(MESSAGE_OK).withHeader("Content-Type", "application/json")));
+
+    gateway.editButtons(5L, 9, List.of(new InlineButton("Sent", "noop")));
+
+    telegram.verify(
+        postRequestedFor(urlPathEqualTo(path("editMessageReplyMarkup")))
+            .withRequestBody(matchingJsonPath("$.chat_id", equalTo("5")))
+            .withRequestBody(matchingJsonPath("$.message_id", equalTo("9")))
+            .withRequestBody(
+                matchingJsonPath("$.reply_markup.inline_keyboard[0][0].text", equalTo("Sent"))));
+  }
+
+  @Test
+  void editButtonsWithAnEmptyListRemovesTheKeyboard() {
+    telegram.stubFor(
+        post(urlPathEqualTo(path("editMessageReplyMarkup")))
+            .willReturn(
+                aResponse().withBody(MESSAGE_OK).withHeader("Content-Type", "application/json")));
+
+    gateway.editButtons(5L, 9, List.of());
+
+    telegram.verify(
+        postRequestedFor(urlPathEqualTo(path("editMessageReplyMarkup")))
+            .withRequestBody(
+                matchingJsonPath("$.reply_markup.inline_keyboard", equalToJson("[]"))));
+  }
+
+  @Test
+  void editButtonsReportsATelegramRefusal() {
+    telegram.stubFor(
+        post(urlPathEqualTo(path("editMessageReplyMarkup")))
+            .willReturn(
+                aResponse()
+                    .withStatus(400)
+                    .withBody("{\"ok\":false,\"error_code\":400,\"description\":\"bad\"}")
+                    .withHeader("Content-Type", "application/json")));
+
+    assertThatThrownBy(() -> gateway.editButtons(5L, 9, List.of()))
+        .isInstanceOf(TelegramGatewayException.class);
+  }
+
+  @Test
   void sendDocumentUploadsTheFileUnderTheGivenName() throws Exception {
     Path file = Files.writeString(tempDir.resolve("source.tmp"), "transcript text");
     telegram.stubFor(

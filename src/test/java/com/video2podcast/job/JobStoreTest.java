@@ -156,7 +156,7 @@ class JobStoreTest {
   void jobIdsThatCouldEscapeTheWorkDirectoryAreRefused(String id) {
     assertThatThrownBy(() -> store.directory(id)).isInstanceOf(IllegalArgumentException.class);
     assertThatThrownBy(() -> store.load(id)).isInstanceOf(IllegalArgumentException.class);
-    assertThatThrownBy(() -> store.delete(id)).isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> store.discard(id)).isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
@@ -240,7 +240,7 @@ class JobStoreTest {
         runs.add(
             pool.submit(() -> {
               for (int n = 0; n < 200; n++) {
-                store.delete(ID);
+                store.discard(ID);
                 try {
                   store.create(job(ID));
                 } catch (IllegalStateException alreadyRecreated) {
@@ -389,7 +389,7 @@ class JobStoreTest {
       Assumptions.assumeFalse(
           jobDir.toFile().canWrite(), "running as a user that ignores permissions");
 
-      assertThatThrownBy(() -> store.delete(ID)).isInstanceOf(JobStoreException.class);
+      assertThatThrownBy(() -> store.discard(ID)).isInstanceOf(JobStoreException.class);
     } finally {
       Files.setPosixFilePermissions(jobDir, PosixFilePermissions.fromString("rwxr-xr-x"));
     }
@@ -415,8 +415,8 @@ class JobStoreTest {
     Files.createDirectories(store.directory(ID).resolve("chunks"));
     Files.writeString(store.directory(ID).resolve("chunks/1.wav"), "wav");
 
-    store.delete(ID);
-    store.delete(ID);
+    store.discard(ID);
+    store.discard(ID);
 
     assertThat(store.directory(ID)).doesNotExist();
     assertThat(store.load(ID)).isEmpty();

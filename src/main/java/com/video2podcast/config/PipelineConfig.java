@@ -1,8 +1,10 @@
 package com.video2podcast.config;
 
+import com.video2podcast.bot.DeliveryCallbackHandler;
 import com.video2podcast.bot.SummaryMessagePublisher;
 import com.video2podcast.bot.TelegramGateway;
 import com.video2podcast.bot.UrlMessageHandler;
+import com.video2podcast.job.DeliveryService;
 import com.video2podcast.job.JobQueue;
 import com.video2podcast.job.JobStore;
 import com.video2podcast.job.PipelineService;
@@ -53,5 +55,16 @@ public class PipelineConfig {
       PipelineService pipeline,
       Clock clock) {
     return new UrlMessageHandler(gateway, validator, queue, pipeline, clock);
+  }
+
+  @Bean
+  DeliveryService deliveryService(JobStore store, Clock clock) {
+    return new DeliveryService(store, clock);
+  }
+
+  @Bean
+  DeliveryCallbackHandler deliveryCallbackHandler(
+      TelegramGateway gateway, DeliveryService delivery) {
+    return new DeliveryCallbackHandler(gateway, delivery);
   }
 }

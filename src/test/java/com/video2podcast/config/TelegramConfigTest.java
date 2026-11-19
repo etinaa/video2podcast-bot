@@ -6,6 +6,7 @@ import static org.mockito.Mockito.mock;
 
 import com.video2podcast.access.AccessService;
 import com.video2podcast.bot.BotUpdateHandler;
+import com.video2podcast.bot.DeliveryCallbackHandler;
 import com.video2podcast.bot.TelegramBot;
 import com.video2podcast.bot.TelegramGateway;
 import com.video2podcast.bot.UrlMessageHandler;
@@ -38,6 +39,7 @@ class TelegramConfigTest {
         .withBean(AppProperties.class, () -> props(token, admin, enabled))
         .withBean(AccessService.class, () -> mock(AccessService.class))
         .withBean(UrlMessageHandler.class, () -> mock(UrlMessageHandler.class))
+        .withBean(DeliveryCallbackHandler.class, () -> mock(DeliveryCallbackHandler.class))
         .withPropertyValues("app.telegram.enabled=" + enabled);
   }
 
@@ -87,5 +89,43 @@ class TelegramConfigTest {
                 .rootCause()
                 .hasMessageContaining("app.telegram.admin-user-id (ADMIN_USER_ID) is required")
                 .hasMessageContaining("/whoami"));
+  }
+
+  @org.junit.jupiter.api.Test
+  void theClientDoesNotResendARequestWhoseConnectionDropped() {
+    com.github.tomakehurst.wiremock.WireMockServer server =
+        new com.github.tomakehurst.wiremock.WireMockServer(
+            com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig()
+                .dynamicPort());
+    server.start();
+    try {
+      server.stubFor(
+          com.github.tomakehurst.wiremock.client.WireMock.post(
+                  com.github.tomakehurst.wiremock.client.WireMock.anyUrl())
+              .willReturn(
+                  com.github.tomakehurst.wiremock.client.WireMock.aResponse()
+                      .withFault(com.github.tomakehurst.wiremock.http.Fault.EMPTY_RESPONSE)));
+      AppProperties props =
+          new AppProperties(
+              new AppProperties.Telegram("123:abc", 1L, true, "http://localhost:" + server.port()),
+              props("123:abc", 1L, true).access(),
+              props("123:abc", 1L, true).ollama(),
+              props("123:abc", 1L, true).whisper(),
+              props("123:abc", 1L, true).jobs());
+
+      org.telegram.telegrambots.meta.generics.TelegramClient client =
+          new TelegramConfig().telegramClient(props);
+      org.assertj.core.api.Assertions.assertThatThrownBy(() ->
+              client.execute(
+                  org.telegram.telegrambots.meta.api.methods.send.SendMessage.builder()
+                      .chatId(1L)
+                      .text("x")
+                      .build()))
+          .isInstanceOf(org.telegram.telegrambots.meta.exceptions.TelegramApiException.class);
+
+      assertThat(server.getAllServeEvents()).hasSize(1);
+    } finally {
+      server.stop();
+    }
   }
 }

@@ -3,8 +3,10 @@ package com.video2podcast.config;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 
+import com.video2podcast.bot.DeliveryCallbackHandler;
 import com.video2podcast.bot.TelegramGateway;
 import com.video2podcast.bot.UrlMessageHandler;
+import com.video2podcast.job.DeliveryService;
 import com.video2podcast.job.JobQueue;
 import com.video2podcast.job.JobStore;
 import com.video2podcast.job.PipelineService;
@@ -60,6 +62,8 @@ class PipelineConfigTest {
           assertThat(context).hasSingleBean(SummaryPublisher.class);
           assertThat(context).hasSingleBean(PipelineService.class);
           assertThat(context).hasSingleBean(UrlMessageHandler.class);
+          assertThat(context).hasSingleBean(DeliveryService.class);
+          assertThat(context).hasSingleBean(DeliveryCallbackHandler.class);
           assertThat(context.getBean(SummaryPublisher.class)).isNotNull();
           assertThat(context.getBean(PipelineService.class)).isNotNull();
           assertThat(context.getBean(UrlMessageHandler.class)).isNotNull();
@@ -73,6 +77,8 @@ class PipelineConfigTest {
           assertThat(context).doesNotHaveBean(SummaryPublisher.class);
           assertThat(context).doesNotHaveBean(PipelineService.class);
           assertThat(context).doesNotHaveBean(UrlMessageHandler.class);
+          assertThat(context).doesNotHaveBean(DeliveryService.class);
+          assertThat(context).doesNotHaveBean(DeliveryCallbackHandler.class);
         });
   }
 }

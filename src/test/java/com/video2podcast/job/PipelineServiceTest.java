@@ -377,13 +377,13 @@ class PipelineServiceTest {
               throw new JobStoreException("cannot delete", null);
             })
         .when(stubborn)
-        .delete(JOB_ID);
+        .discard(JOB_ID);
     pipeline =
         new PipelineService(
             ytDlp, ffmpeg, transcription, summary, stubborn, publisher, clock, JOBS);
 
     assertThatThrownBy(() -> pipeline.run(REQUEST, progress)).isSameAs(failure);
 
-    verify(stubborn).delete(JOB_ID);
+    verify(stubborn).discard(JOB_ID);
   }
 }

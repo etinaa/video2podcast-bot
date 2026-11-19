@@ -187,7 +187,7 @@ public class JobStore {
   }
 
   /** Deletes the job directory with everything in it. Deleting a missing job does nothing. */
-  public void delete(String jobId) {
+  public void discard(String jobId) {
     Path dir = directory(jobId);
     withLock(jobId, () -> deleteRecursively(dir));
   }

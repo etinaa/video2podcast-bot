@@ -8,11 +8,4 @@
     <Class name="~com\.video2podcast\.media\.DefaultProcessRunner(\$Child)?"/>
     <Bug pattern="COMMAND_INJECTION"/>
   </Match>
-  <!-- Approved by the owner (D10 in docs/decisions.md; A: Q-developer-1 in
-       tasks/T11/comms/questions.md). PipelineService keeps a JobStore, a shared service and not a
-       value object. SpotBugs calls JobStore mutable only because a method is named delete. -->
-  <Match>
-    <Class name="com.video2podcast.job.PipelineService"/>
-    <Bug pattern="EI_EXPOSE_REP2"/>
-  </Match>
 </FindBugsFilter>

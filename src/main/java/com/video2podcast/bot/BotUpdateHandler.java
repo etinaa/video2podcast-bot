@@ -29,11 +29,17 @@ public class BotUpdateHandler {
   private final UrlMessageHandler urls;
   private final AccessAdmin admin;
   private final UnknownUserHandler unknownUsers;
+  private final DeliveryCallbackHandler delivery;
 
-  public BotUpdateHandler(TelegramGateway gateway, AccessService access, UrlMessageHandler urls) {
+  public BotUpdateHandler(
+      TelegramGateway gateway,
+      AccessService access,
+      UrlMessageHandler urls,
+      DeliveryCallbackHandler delivery) {
     this.gateway = gateway;
     this.access = access;
     this.urls = urls;
+    this.delivery = delivery;
     this.admin = new AccessAdmin(gateway, access);
     this.unknownUsers = new UnknownUserHandler(gateway, access, admin);
   }
@@ -82,6 +88,9 @@ public class BotUpdateHandler {
     } else if (callback.getData() != null
         && callback.getData().startsWith(Keyboards.ACCESS_PREFIX)) {
       admin.handleCallback(callback);
+    } else if (callback.getData() != null
+        && callback.getData().startsWith(Keyboards.TRANSCRIPT_PREFIX)) {
+      delivery.handle(callback);
     }
   }
 

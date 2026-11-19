@@ -1,5 +1,6 @@
 package com.video2podcast.bot;
 
+import com.video2podcast.job.FileState;
 import java.util.List;
 
 /** Inline keyboards and the callback data they carry. */
@@ -16,9 +17,32 @@ final class Keyboards {
 
   /** One row, in this order. */
   static List<InlineButton> delivery(String jobId) {
+    return delivery(jobId, FileState.AVAILABLE, FileState.AVAILABLE);
+  }
+
+  /** One row, audio first. Each label follows the state of its file; the callback data does not. */
+  static List<InlineButton> delivery(String jobId, FileState audio, FileState transcript) {
     return List.of(
-        new InlineButton("Download audio", AUDIO_PREFIX + jobId),
-        new InlineButton("Download transcript", TRANSCRIPT_PREFIX + jobId));
+        new InlineButton(audioLabel(audio), AUDIO_PREFIX + jobId),
+        new InlineButton(transcriptLabel(transcript), TRANSCRIPT_PREFIX + jobId));
+  }
+
+  private static String audioLabel(FileState state) {
+    return switch (state) {
+      case AVAILABLE -> "Download audio";
+      case SENDING -> "Preparing audio…";
+      case SENT -> "Audio sent";
+      case EXPIRED -> "Audio expired";
+    };
+  }
+
+  private static String transcriptLabel(FileState state) {
+    return switch (state) {
+      case AVAILABLE -> "Download transcript";
+      case SENDING -> "Sending transcript…";
+      case SENT -> "Transcript sent";
+      case EXPIRED -> "Transcript expired";
+    };
   }
 
   static List<InlineButton> accessRequest(long userId) {

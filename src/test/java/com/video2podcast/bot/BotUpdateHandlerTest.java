@@ -37,6 +37,7 @@ class BotUpdateHandlerTest {
   private final RecordingGateway gateway = new RecordingGateway();
   private final MutableClock clock = new MutableClock(Instant.parse("2026-11-15T10:00:00Z"));
   private final UrlMessageHandler urls = mock(UrlMessageHandler.class);
+  private final DeliveryCallbackHandler deliveries = mock(DeliveryCallbackHandler.class);
   private AccessService access;
   private BotUpdateHandler handler;
 
@@ -46,7 +47,7 @@ class BotUpdateHandlerTest {
         new AccessService(
             new AccessStore(dir.resolve("allowed-users.json")), OWNER, Duration.ofHours(24), clock);
     access.allow(ALLOWED, "ann", OWNER);
-    handler = new BotUpdateHandler(gateway, access, urls);
+    handler = new BotUpdateHandler(gateway, access, urls, deliveries);
   }
 
   @ParameterizedTest
@@ -209,7 +210,7 @@ class BotUpdateHandlerTest {
     AccessService racing = mock(AccessService.class);
     when(racing.requestAccess(eq(STRANGER), any(), any()))
         .thenReturn(new AccessService.RequestOutcome.AlreadyAllowed());
-    new BotUpdateHandler(gateway, racing, urls)
+    new BotUpdateHandler(gateway, racing, urls, deliveries)
         .handle(update(message("private", 9L, STRANGER, "/start")));
 
     assertThat(gateway.messages)
@@ -252,6 +253,38 @@ class BotUpdateHandlerTest {
   void callbackFromAnAllowedUserPassesTheGate() {
     handler.handle(callbackUpdate("cb2", ALLOWED, "private"));
 
+    assertThat(gateway.answers).isEmpty();
+  }
+
+  @Test
+  void transcriptCallbackFromAnAllowedUserGoesToTheDeliveryHandler() {
+    Update update = callbackUpdate("cb4", ALLOWED, "private");
+    update.getCallbackQuery().setData("transcript:job-1");
+
+    handler.handle(update);
+
+    verify(deliveries).handle(update.getCallbackQuery());
+  }
+
+  @Test
+  void transcriptCallbackFromAnUnknownUserNeverReachesTheDeliveryHandler() {
+    Update update = callbackUpdate("cb5", STRANGER, "private");
+    update.getCallbackQuery().setData("transcript:job-1");
+
+    handler.handle(update);
+
+    verify(deliveries, never()).handle(any());
+    assertThat(gateway.answers).containsExactly(new RecordingGateway.Answer("cb5", "No access."));
+  }
+
+  @Test
+  void audioCallbackIsStillIgnored() {
+    Update update = callbackUpdate("cb6", ALLOWED, "private");
+    update.getCallbackQuery().setData("audio:job-1");
+
+    handler.handle(update);
+
+    verify(deliveries, never()).handle(any());
     assertThat(gateway.answers).isEmpty();
   }
 

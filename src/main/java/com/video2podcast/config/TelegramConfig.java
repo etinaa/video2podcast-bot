@@ -2,10 +2,12 @@ package com.video2podcast.config;
 
 import com.video2podcast.access.AccessService;
 import com.video2podcast.bot.BotUpdateHandler;
+import com.video2podcast.bot.DeliveryCallbackHandler;
 import com.video2podcast.bot.TelegramBot;
 import com.video2podcast.bot.TelegramClientGateway;
 import com.video2podcast.bot.TelegramGateway;
 import com.video2podcast.bot.UrlMessageHandler;
+import okhttp3.OkHttpClient;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
@@ -24,8 +26,11 @@ public class TelegramConfig {
   @Bean
   TelegramClient telegramClient(AppProperties props) {
     requireAdmin(props);
+    // OkHttp resends a request whose connection dropped before a response. For an upload that
+    // could deliver a file twice behind the one-send guard, so the retry is switched off.
+    OkHttpClient http = new OkHttpClient.Builder().retryOnConnectionFailure(false).build();
     return new OkHttpTelegramClient(
-        requireToken(props), TelegramApiUrl.parse(props.telegram().apiUrl()));
+        http, requireToken(props), TelegramApiUrl.parse(props.telegram().apiUrl()));
   }
 
   @Bean
@@ -35,8 +40,11 @@ public class TelegramConfig {
 
   @Bean
   BotUpdateHandler botUpdateHandler(
-      TelegramGateway gateway, AccessService access, UrlMessageHandler urls) {
-    return new BotUpdateHandler(gateway, access, urls);
+      TelegramGateway gateway,
+      AccessService access,
+      UrlMessageHandler urls,
+      DeliveryCallbackHandler delivery) {
+    return new BotUpdateHandler(gateway, access, urls, delivery);
   }
 
   /** At startup, tell the owner about requests that could not be delivered earlier. */

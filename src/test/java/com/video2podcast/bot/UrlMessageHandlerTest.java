@@ -84,6 +84,11 @@ class UrlMessageHandlerTest {
     }
 
     @Override
+    public void editButtons(long chatId, int messageId, List<InlineButton> buttons) {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
     public void sendDocument(long chatId, Path file, String fileName, String caption) {
       throw new UnsupportedOperationException();
     }
