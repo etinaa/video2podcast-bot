@@ -1,0 +1,2134 @@
+diff --git a/src/main/java/com/video2podcast/config/AppProperties.java b/src/main/java/com/video2podcast/config/AppProperties.java
+index b64768b..d019ca4 100644
+--- a/src/main/java/com/video2podcast/config/AppProperties.java
++++ b/src/main/java/com/video2podcast/config/AppProperties.java
+@@ -13,7 +13,11 @@ public record AppProperties(
+ 
+   public record Access(Path file, Duration requestCooldown) {}
+ 
+-  public record Ollama(String baseUrl, String model) {}
++  /**
++   * {@code numCtx} is sent as {@code options.num_ctx} on every request; {@code timeout} is how long
++   * one request may wait for its answer.
++   */
++  public record Ollama(String baseUrl, String model, int numCtx, Duration timeout) {}
+ 
+   /** {@code timeout} is how long one chunk may wait for its answer. */
+   public record Whisper(String baseUrl, Duration timeout) {}
+diff --git a/src/main/java/com/video2podcast/config/SummaryConfig.java b/src/main/java/com/video2podcast/config/SummaryConfig.java
+new file mode 100644
+index 0000000..7dd8390
+--- /dev/null
++++ b/src/main/java/com/video2podcast/config/SummaryConfig.java
+@@ -0,0 +1,21 @@
++package com.video2podcast.config;
++
++import com.video2podcast.summary.LlmClient;
++import com.video2podcast.summary.OllamaClient;
++import com.video2podcast.summary.SummaryService;
++import org.springframework.context.annotation.Bean;
++import org.springframework.context.annotation.Configuration;
++
++@Configuration(proxyBeanMethods = false)
++public class SummaryConfig {
++
++  @Bean
++  LlmClient llmClient(AppProperties props) {
++    return new OllamaClient(props.ollama());
++  }
++
++  @Bean
++  SummaryService summaryService(LlmClient llm, AppProperties props) {
++    return new SummaryService(llm, props.ollama());
++  }
++}
+diff --git a/src/main/java/com/video2podcast/job/JobFailure.java b/src/main/java/com/video2podcast/job/JobFailure.java
+index 799943d..f73925a 100644
+--- a/src/main/java/com/video2podcast/job/JobFailure.java
++++ b/src/main/java/com/video2podcast/job/JobFailure.java
+@@ -18,7 +18,8 @@ public class JobFailure extends RuntimeException {
+     FAILED,
+     TIMEOUT,
+     NO_SPEECH,
+-    SERVICE_UNREACHABLE
++    SERVICE_UNREACHABLE,
++    SUMMARY_UNREACHABLE
+   }
+ 
+   private final Kind kind;
+@@ -60,6 +61,11 @@ public class JobFailure extends RuntimeException {
+     return new JobFailure(Kind.FAILED, "Transcription failed. Please try again later.", cause);
+   }
+ 
++  /** A {@code FAILED} with the summary message; {@code cause} may be null. */
++  public static JobFailure summaryFailed(Throwable cause) {
++    return new JobFailure(Kind.FAILED, "Summary failed. Please try again later.", cause);
++  }
++
+   private static String messageOf(Kind kind) {
+     return switch (kind) {
+       case PRIVATE -> "This video is private or needs a sign-in.";
+@@ -69,6 +75,7 @@ public class JobFailure extends RuntimeException {
+       case TIMEOUT -> "Processing took too long and was stopped.";
+       case NO_SPEECH -> "No speech was found in this video.";
+       case SERVICE_UNREACHABLE -> "The transcription server is unreachable.";
++      case SUMMARY_UNREACHABLE -> "The summary server is unreachable.";
+     };
+   }
+ 
+diff --git a/src/main/java/com/video2podcast/summary/LlmClient.java b/src/main/java/com/video2podcast/summary/LlmClient.java
+new file mode 100644
+index 0000000..4a66f08
+--- /dev/null
++++ b/src/main/java/com/video2podcast/summary/LlmClient.java
+@@ -0,0 +1,14 @@
++package com.video2podcast.summary;
++
++/** A chat backend that answers one prompt at a time. */
++public interface LlmClient {
++
++  /**
++   * One chat completion. Returns the non-blank answer text and the number of prompt tokens the
++   * backend says it evaluated.
++   *
++   * @param maxOutputTokens upper bound for the answer
++   * @throws LlmException connection, timeout or any invalid answer
++   */
++  LlmReply complete(String system, String user, int maxOutputTokens) throws LlmException;
++}
+diff --git a/src/main/java/com/video2podcast/summary/LlmException.java b/src/main/java/com/video2podcast/summary/LlmException.java
+new file mode 100644
+index 0000000..27f2273
+--- /dev/null
++++ b/src/main/java/com/video2podcast/summary/LlmException.java
+@@ -0,0 +1,25 @@
++package com.video2podcast.summary;
++
++/** One call to the language model failed. The message is for logs only. */
++public class LlmException extends Exception {
++
++  private static final long serialVersionUID = 1L;
++
++  /** What kind of failure it was. */
++  public enum Reason {
++    CONNECTION,
++    TIMEOUT,
++    OTHER
++  }
++
++  private final Reason reason;
++
++  public LlmException(String message, Reason reason, Throwable cause) {
++    super(message, cause);
++    this.reason = reason;
++  }
++
++  public Reason reason() {
++    return reason;
++  }
++}
+diff --git a/src/main/java/com/video2podcast/summary/LlmReply.java b/src/main/java/com/video2podcast/summary/LlmReply.java
+new file mode 100644
+index 0000000..6061bf0
+--- /dev/null
++++ b/src/main/java/com/video2podcast/summary/LlmReply.java
+@@ -0,0 +1,4 @@
++package com.video2podcast.summary;
++
++/** A valid answer: non-blank {@code content} and the prompt tokens the backend evaluated. */
++public record LlmReply(String content, long promptTokens) {}
+diff --git a/src/main/java/com/video2podcast/summary/OllamaClient.java b/src/main/java/com/video2podcast/summary/OllamaClient.java
+new file mode 100644
+index 0000000..eaba593
+--- /dev/null
++++ b/src/main/java/com/video2podcast/summary/OllamaClient.java
+@@ -0,0 +1,153 @@
++package com.video2podcast.summary;
++
++import com.fasterxml.jackson.databind.JsonNode;
++import com.fasterxml.jackson.databind.node.ArrayNode;
++import com.fasterxml.jackson.databind.node.ObjectNode;
++import com.video2podcast.config.AppProperties;
++import com.video2podcast.storage.Json;
++import java.io.IOException;
++import java.net.ConnectException;
++import java.net.URI;
++import java.net.http.HttpClient;
++import java.net.http.HttpConnectTimeoutException;
++import java.net.http.HttpRequest;
++import java.net.http.HttpRequest.BodyPublishers;
++import java.net.http.HttpResponse;
++import java.net.http.HttpResponse.BodyHandlers;
++import java.net.http.HttpTimeoutException;
++import java.nio.channels.UnresolvedAddressException;
++import java.nio.charset.StandardCharsets;
++import java.time.Duration;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
++/** {@link LlmClient} for Ollama's {@code POST /api/chat}. */
++public final class OllamaClient implements LlmClient {
++
++  private static final Logger LOG = LoggerFactory.getLogger(OllamaClient.class);
++  private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(5);
++  private static final int LOGGED_BODY_CHARS = 200;
++  private static final double TEMPERATURE = 0.2;
++
++  private final HttpClient http;
++  private final URI endpoint;
++  private final AppProperties.Ollama config;
++
++  public OllamaClient(AppProperties.Ollama config) {
++    this(
++        config,
++        HttpClient.newBuilder()
++            .connectTimeout(CONNECT_TIMEOUT)
++            .followRedirects(HttpClient.Redirect.NEVER)
++            .build());
++  }
++
++  /** For tests: the transport is supplied. */
++  OllamaClient(AppProperties.Ollama config, HttpClient http) {
++    if (config.model() == null || config.model().isBlank()) {
++      throw new IllegalArgumentException("app.ollama.model must not be blank");
++    }
++    if (config.timeout() == null || config.timeout().isZero() || config.timeout().isNegative()) {
++      throw new IllegalArgumentException("app.ollama.timeout must be positive");
++    }
++    String base = config.baseUrl();
++    String trimmed = base.endsWith("/") ? base.substring(0, base.length() - 1) : base;
++    this.endpoint = URI.create(trimmed + "/api/chat");
++    this.config = config;
++    this.http = http;
++  }
++
++  /** For tests: the transport the requests go through. */
++  HttpClient httpClient() {
++    return http;
++  }
++
++  @Override
++  public LlmReply complete(String system, String user, int maxOutputTokens) throws LlmException {
++    HttpResponse<String> response = send(system, user, maxOutputTokens);
++    int status = response.statusCode();
++    if (status < 200 || status > 299) {
++      if (LOG.isWarnEnabled()) {
++        LOG.warn("Ollama answered {}: {}", status, abbreviate(response.body()));
++      }
++      throw new LlmException("Ollama answered status " + status, LlmException.Reason.OTHER, null);
++    }
++    return replyOf(response.body());
++  }
++
++  private HttpResponse<String> send(String system, String user, int maxOutputTokens)
++      throws LlmException {
++    try {
++      HttpRequest request =
++          HttpRequest.newBuilder(endpoint)
++              .timeout(config.timeout())
++              .header("Content-Type", "application/json")
++              .POST(BodyPublishers.ofString(body(system, user, maxOutputTokens)))
++              .build();
++      return http.send(request, BodyHandlers.ofString(StandardCharsets.UTF_8));
++    } catch (HttpConnectTimeoutException | ConnectException | UnresolvedAddressException e) {
++      throw new LlmException("No connection to Ollama", LlmException.Reason.CONNECTION, e);
++    } catch (HttpTimeoutException e) {
++      throw new LlmException("Ollama did not answer in time", LlmException.Reason.TIMEOUT, e);
++    } catch (IOException e) {
++      throw new LlmException("Ollama request failed", LlmException.Reason.OTHER, e);
++    } catch (InterruptedException e) {
++      Thread.currentThread().interrupt();
++      throw new LlmException("Ollama request interrupted", LlmException.Reason.OTHER, e);
++    }
++  }
++
++  private String body(String system, String user, int maxOutputTokens) {
++    ObjectNode root = Json.MAPPER.createObjectNode();
++    root.put("model", config.model());
++    root.put("stream", false);
++    root.put("think", false);
++    root.put("keep_alive", "10m");
++    ObjectNode options = root.putObject("options");
++    options.put("num_ctx", config.numCtx());
++    options.put("num_predict", maxOutputTokens);
++    options.put("temperature", TEMPERATURE);
++    ArrayNode messages = root.putArray("messages");
++    messages.addObject().put("role", "system").put("content", system);
++    messages.addObject().put("role", "user").put("content", user);
++    return root.toString();
++  }
++
++  private static LlmReply replyOf(String body) throws LlmException {
++    if (body == null || body.isBlank()) {
++      throw other("Ollama answered with an empty body", null);
++    }
++    JsonNode root;
++    try {
++      root = Json.MAPPER.readTree(body);
++    } catch (IOException e) {
++      throw other("Ollama answer is not JSON", e);
++    }
++    if (root == null || !root.isObject()) {
++      throw other("Ollama answer is not a JSON object", null);
++    }
++    JsonNode content = root.path("message").path("content");
++    if (!content.isTextual() || content.textValue().isBlank()) {
++      throw other("Ollama answer has no content", null);
++    }
++    JsonNode count = root.path("prompt_eval_count");
++    if (!count.isIntegralNumber() || !count.canConvertToLong() || count.longValue() < 1) {
++      throw other("Ollama answer has no valid prompt_eval_count", null);
++    }
++    if ("length".equals(root.path("done_reason").asText()) && LOG.isWarnEnabled()) {
++      LOG.warn("Ollama stopped at the output limit");
++    }
++    return new LlmReply(content.textValue().strip(), count.longValue());
++  }
++
++  private static LlmException other(String message, Throwable cause) {
++    return new LlmException(message, LlmException.Reason.OTHER, cause);
++  }
++
++  private static String abbreviate(String body) {
++    if (body == null) {
++      return "";
++    }
++    return body.length() <= LOGGED_BODY_CHARS ? body : body.substring(0, LOGGED_BODY_CHARS);
++  }
++}
+diff --git a/src/main/java/com/video2podcast/summary/Prompts.java b/src/main/java/com/video2podcast/summary/Prompts.java
+new file mode 100644
+index 0000000..fb40f4c
+--- /dev/null
++++ b/src/main/java/com/video2podcast/summary/Prompts.java
+@@ -0,0 +1,31 @@
++package com.video2podcast.summary;
++
++/** The system prompts. Every one asks for English, whatever the language of the input. */
++final class Prompts {
++
++  static final String SHORT =
++      "You summarize a video transcript. Write the final summary as English bullet points, even if"
++          + " the transcript is not in English. Start every line with \"- \". Use at most 8"
++          + " bullets and keep each bullet short. Answer with the bullet points only, without a"
++          + " preamble.";
++
++  static final String MAP =
++      "You summarize one part of a longer video transcript. List the key points of this part as"
++          + " English bullet points, even if the text is not in English. Start every line with"
++          + " \"- \". Use 3 to 8 bullets. Answer with the bullet points only, without a"
++          + " preamble.";
++
++  static final String REDUCE_FINAL =
++      "You are given bullet-point summaries of consecutive parts of one video transcript. Write"
++          + " the final summary of the whole video as English bullet points, even if the input is"
++          + " not in English. Start every line with \"- \". Use at most 8 bullets and keep each"
++          + " bullet short. Answer with the bullet points only, without a preamble.";
++
++  static final String REDUCE_ROUND =
++      "You are given bullet-point summaries of consecutive parts of one video transcript. Merge"
++          + " them into one shorter English bullet list that keeps the important points, even if"
++          + " the input is not in English. Start every line with \"- \". Answer with the bullet"
++          + " points only, without a preamble.";
++
++  private Prompts() {}
++}
+diff --git a/src/main/java/com/video2podcast/summary/SummaryFormatter.java b/src/main/java/com/video2podcast/summary/SummaryFormatter.java
+new file mode 100644
+index 0000000..19db8a8
+--- /dev/null
++++ b/src/main/java/com/video2podcast/summary/SummaryFormatter.java
+@@ -0,0 +1,71 @@
++package com.video2podcast.summary;
++
++import com.video2podcast.job.JobFailure;
++import java.util.ArrayList;
++import java.util.List;
++
++/** Shapes model answers: bounds intermediate ones and turns the final one into capped bullets. */
++final class SummaryFormatter {
++
++  static final int SUMMARY_CAP = 1500;
++  private static final String MARKERS = "-*•–";
++  private static final String ELLIPSIS = "…";
++
++  private SummaryFormatter() {}
++
++  /**
++   * Keeps {@code content} within {@code maxChars}: whole trailing lines are dropped, then a single
++   * remaining line is cut. Nothing else is changed.
++   */
++  static String clip(String content, int maxChars) {
++    if (content.length() <= maxChars) {
++      return content;
++    }
++    List<String> lines = new ArrayList<>(List.of(content.split("\\R")));
++    String joined = String.join("\n", lines);
++    while (joined.length() > maxChars && lines.size() > 1) {
++      lines.remove(lines.size() - 1);
++      joined = String.join("\n", lines);
++    }
++    return joined.length() > maxChars ? cut(joined, maxChars) : joined;
++  }
++
++  /** The final answer: {@code "• "} lines, at most {@link #SUMMARY_CAP} UTF-16 units. */
++  static String format(String content) {
++    List<String> bullets = new ArrayList<>();
++    for (String raw : content.split("\\R")) {
++      String line = withoutMarker(raw.strip());
++      if (!line.isEmpty()) {
++        bullets.add("• " + line);
++      }
++    }
++    if (bullets.isEmpty()) {
++      throw JobFailure.summaryFailed(null);
++    }
++    String joined = String.join("\n", bullets);
++    while (joined.length() > SUMMARY_CAP && bullets.size() > 1) {
++      bullets.remove(bullets.size() - 1);
++      joined = String.join("\n", bullets);
++    }
++    return joined.length() > SUMMARY_CAP ? cut(joined, SUMMARY_CAP - 1) + ELLIPSIS : joined;
++  }
++
++  /** A line of just one marker is empty; a marker is only a marker before whitespace. */
++  private static String withoutMarker(String line) {
++    if (line.isEmpty() || MARKERS.indexOf(line.charAt(0)) < 0) {
++      return line;
++    }
++    if (line.length() == 1) {
++      return "";
++    }
++    return Character.isWhitespace(line.charAt(1)) ? line.substring(1).strip() : line;
++  }
++
++  /** The first {@code max} chars, one less when the cut would split a surrogate pair. */
++  private static String cut(String text, int max) {
++    boolean splitsPair =
++        Character.isHighSurrogate(text.charAt(max - 1))
++            && Character.isLowSurrogate(text.charAt(max));
++    return text.substring(0, splitsPair ? max - 1 : max);
++  }
++}
+diff --git a/src/main/java/com/video2podcast/summary/SummaryService.java b/src/main/java/com/video2podcast/summary/SummaryService.java
+new file mode 100644
+index 0000000..ae5b586
+--- /dev/null
++++ b/src/main/java/com/video2podcast/summary/SummaryService.java
+@@ -0,0 +1,158 @@
++package com.video2podcast.summary;
++
++import com.video2podcast.config.AppProperties;
++import com.video2podcast.job.JobFailure;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Objects;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
++/** Summarizes a transcript: one request when it fits the context, otherwise map and reduce. */
++public final class SummaryService {
++
++  private static final Logger LOG = LoggerFactory.getLogger(SummaryService.class);
++
++  static final int OUTPUT_RESERVE = 1024;
++  static final double MIN_RATIO = 0.5;
++  static final int MAX_ROUNDS = 8;
++
++  private static final String SEPARATOR = "\n\n";
++
++  private final LlmClient llm;
++  private final int maxChunkChars;
++  private final int partialMaxChars;
++  private final int maxRounds;
++
++  public SummaryService(LlmClient llm, AppProperties.Ollama config) {
++    this(llm, config, MAX_ROUNDS);
++  }
++
++  /** For tests: the round limit is supplied. */
++  SummaryService(LlmClient llm, AppProperties.Ollama config, int maxRounds) {
++    if (config.numCtx() <= 0) {
++      throw new IllegalArgumentException("app.ollama.num-ctx must be positive");
++    }
++    int promptTokens =
++        Math.max(
++            Math.max(TokenEstimator.estimate(Prompts.SHORT), TokenEstimator.estimate(Prompts.MAP)),
++            Math.max(
++                TokenEstimator.estimate(Prompts.REDUCE_FINAL),
++                TokenEstimator.estimate(Prompts.REDUCE_ROUND)));
++    long textBudget =
++        (long) config.numCtx() - OUTPUT_RESERVE - promptTokens - TokenEstimator.TEMPLATE_OVERHEAD;
++    if (textBudget < 2L * OUTPUT_RESERVE) {
++      throw new IllegalArgumentException("app.ollama.num-ctx is too small: " + config.numCtx());
++    }
++    if (textBudget > Integer.MAX_VALUE / TokenEstimator.CHARS_PER_TOKEN) {
++      throw new IllegalArgumentException("app.ollama.num-ctx is too large: " + config.numCtx());
++    }
++    this.llm = llm;
++    this.maxRounds = maxRounds;
++    this.maxChunkChars = (int) (textBudget * TokenEstimator.CHARS_PER_TOKEN);
++    this.partialMaxChars = (maxChunkChars - 3 * SEPARATOR.length()) / 4;
++  }
++
++  /** Characters of user text that fit one request. */
++  int maxChunkChars() {
++    return maxChunkChars;
++  }
++
++  /** The bound for every intermediate answer. */
++  int partialMaxChars() {
++    return partialMaxChars;
++  }
++
++  /**
++   * Returns English bullet text, {@code "• "} per line, at most 1,500 UTF-16 chars, never blank.
++   *
++   * @throws NullPointerException if {@code transcript} is null
++   * @throws JobFailure when the summary server is unreachable, too slow, or its answer is unusable
++   */
++  public String summarize(String transcript) {
++    String text = Objects.requireNonNull(transcript, "transcript").strip();
++    if (text.isEmpty()) {
++      throw JobFailure.summaryFailed(null);
++    }
++    if (text.length() <= maxChunkChars) {
++      return SummaryFormatter.format(call(Prompts.SHORT, text));
++    }
++    List<String> partials = new ArrayList<>();
++    for (String chunk : TextChunker.split(text, maxChunkChars)) {
++      partials.add(clipped(call(Prompts.MAP, chunk)));
++    }
++    int round = 0;
++    while (true) {
++      String joined = String.join(SEPARATOR, partials);
++      if (joined.length() <= maxChunkChars) {
++        return SummaryFormatter.format(call(Prompts.REDUCE_FINAL, joined));
++      }
++      round++;
++      if (round > maxRounds) {
++        throw JobFailure.summaryFailed(null);
++      }
++      List<String> next = new ArrayList<>();
++      for (String group : groups(partials)) {
++        next.add(clipped(call(Prompts.REDUCE_ROUND, group)));
++      }
++      partials = next;
++    }
++  }
++
++  /** Greedy, in order; each group is the partials joined by blank lines, within one request. */
++  private List<String> groups(List<String> partials) {
++    List<String> groups = new ArrayList<>();
++    StringBuilder current = new StringBuilder();
++    for (String partial : partials) {
++      if (!current.isEmpty()
++          && current.length() + SEPARATOR.length() + partial.length() > maxChunkChars) {
++        groups.add(current.toString());
++        current.setLength(0);
++      }
++      if (!current.isEmpty()) {
++        current.append(SEPARATOR);
++      }
++      current.append(partial);
++    }
++    groups.add(current.toString());
++    return groups;
++  }
++
++  private String clipped(String content) {
++    String clipped = SummaryFormatter.clip(content, partialMaxChars);
++    if (clipped.length() < content.length() && LOG.isWarnEnabled()) {
++      LOG.warn(
++          "Clipped an intermediate answer from {} to {} chars", content.length(), clipped.length());
++    }
++    return clipped;
++  }
++
++  private static JobFailure failureOf(LlmException e) {
++    return switch (e.reason()) {
++      case CONNECTION -> JobFailure.of(JobFailure.Kind.SUMMARY_UNREACHABLE, e);
++      case TIMEOUT -> JobFailure.of(JobFailure.Kind.TIMEOUT, e);
++      case OTHER -> JobFailure.summaryFailed(e);
++    };
++  }
++
++  private String call(String system, String user) {
++    LlmReply reply;
++    try {
++      reply = llm.complete(system, user, OUTPUT_RESERVE);
++    } catch (LlmException e) {
++      throw failureOf(e);
++    }
++    long expected = TokenEstimator.requestEstimate(system, user);
++    long threshold = (long) Math.ceil(expected * MIN_RATIO);
++    if (reply.promptTokens() < threshold) {
++      if (LOG.isWarnEnabled()) {
++        LOG.warn(
++            "Prompt looks truncated: {} tokens evaluated, at least {} expected",
++            reply.promptTokens(),
++            threshold);
++      }
++      throw JobFailure.summaryFailed(null);
++    }
++    return reply.content();
++  }
++}
+diff --git a/src/main/java/com/video2podcast/summary/TextChunker.java b/src/main/java/com/video2podcast/summary/TextChunker.java
+new file mode 100644
+index 0000000..690c3aa
+--- /dev/null
++++ b/src/main/java/com/video2podcast/summary/TextChunker.java
+@@ -0,0 +1,45 @@
++package com.video2podcast.summary;
++
++import java.util.ArrayList;
++import java.util.List;
++
++/** Splits text into ordered chunks of at most a given length, preferring to cut at whitespace. */
++final class TextChunker {
++
++  private TextChunker() {}
++
++  /**
++   * Text of at most {@code maxChars} is returned unchanged as one chunk. Otherwise every chunk is
++   * stripped and has at most {@code maxChars} chars; together they hold the text minus whitespace.
++   */
++  static List<String> split(String text, int maxChars) {
++    if (text.length() <= maxChars) {
++      return List.of(text);
++    }
++    List<String> chunks = new ArrayList<>();
++    int start = 0;
++    while (start < text.length()) {
++      int cut = text.length() - start <= maxChars ? text.length() : cutAfter(text, start, maxChars);
++      String chunk = text.substring(start, cut).strip();
++      if (!chunk.isEmpty()) {
++        chunks.add(chunk);
++      }
++      start = cut;
++    }
++    return chunks;
++  }
++
++  /** The end of the chunk that starts at {@code start}; the rest of the text is longer than it. */
++  private static int cutAfter(String text, int start, int maxChars) {
++    int limit = start + maxChars;
++    for (int i = limit; i >= start + maxChars / 2; i--) {
++      if (Character.isWhitespace(text.charAt(i))) {
++        return i + 1;
++      }
++    }
++    boolean splitsPair =
++        Character.isHighSurrogate(text.charAt(limit - 1))
++            && Character.isLowSurrogate(text.charAt(limit));
++    return splitsPair && limit - 1 > start ? limit - 1 : limit;
++  }
++}
+diff --git a/src/main/java/com/video2podcast/summary/TokenEstimator.java b/src/main/java/com/video2podcast/summary/TokenEstimator.java
+new file mode 100644
+index 0000000..1bdd9cb
+--- /dev/null
++++ b/src/main/java/com/video2podcast/summary/TokenEstimator.java
+@@ -0,0 +1,19 @@
++package com.video2podcast.summary;
++
++/** The one size formula, used for the budget and for the truncation check. */
++final class TokenEstimator {
++
++  static final int CHARS_PER_TOKEN = 3;
++  static final int TEMPLATE_OVERHEAD = 32;
++
++  private TokenEstimator() {}
++
++  /** Deliberately high for English: UTF-16 units divided by three, rounded up. */
++  static int estimate(String text) {
++    return (text.length() + CHARS_PER_TOKEN - 1) / CHARS_PER_TOKEN;
++  }
++
++  static long requestEstimate(String system, String user) {
++    return (long) estimate(system) + estimate(user) + TEMPLATE_OVERHEAD;
++  }
++}
+diff --git a/src/main/resources/application.yml b/src/main/resources/application.yml
+index e97b070..b421bc5 100644
+--- a/src/main/resources/application.yml
++++ b/src/main/resources/application.yml
+@@ -14,6 +14,8 @@ app:
+   ollama:
+     base-url: ${OLLAMA_BASE_URL:http://host.containers.internal:11434}
+     model: ${OLLAMA_MODEL:qwen3:32b}
++    num-ctx: ${OLLAMA_NUM_CTX:8192}
++    timeout: ${OLLAMA_TIMEOUT:PT10M}
+   whisper:
+     base-url: ${WHISPER_BASE_URL:http://host.containers.internal:8081}
+     timeout: ${WHISPER_TIMEOUT:PT10M}
+diff --git a/src/test/java/com/video2podcast/config/AppPropertiesTest.java b/src/test/java/com/video2podcast/config/AppPropertiesTest.java
+index 8d8ce09..ddf9562 100644
+--- a/src/test/java/com/video2podcast/config/AppPropertiesTest.java
++++ b/src/test/java/com/video2podcast/config/AppPropertiesTest.java
+@@ -25,6 +25,8 @@ class AppPropertiesTest {
+   void usesSpecDefaults() {
+     assertThat(props.ollama().model()).isEqualTo("qwen3:32b");
+     assertThat(props.ollama().baseUrl()).isEqualTo("http://host.containers.internal:11434");
++    assertThat(props.ollama().numCtx()).isEqualTo(8192);
++    assertThat(props.ollama().timeout()).isEqualTo(Duration.ofMinutes(10));
+     assertThat(props.whisper().baseUrl()).isEqualTo("http://host.containers.internal:8081");
+     assertThat(props.whisper().timeout()).isEqualTo(Duration.ofMinutes(10));
+     assertThat(props.access().file()).isEqualTo(Path.of("/data/allowed-users.json"));
+diff --git a/src/test/java/com/video2podcast/config/OllamaBindingTest.java b/src/test/java/com/video2podcast/config/OllamaBindingTest.java
+new file mode 100644
+index 0000000..2ee2b6c
+--- /dev/null
++++ b/src/test/java/com/video2podcast/config/OllamaBindingTest.java
+@@ -0,0 +1,26 @@
++package com.video2podcast.config;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++import java.time.Duration;
++import org.junit.jupiter.api.Test;
++import org.springframework.beans.factory.annotation.Autowired;
++import org.springframework.boot.test.context.SpringBootTest;
++
++@SpringBootTest(
++    properties = {
++      "app.telegram.bot-token=test-token",
++      "app.telegram.admin-user-id=42",
++      "OLLAMA_NUM_CTX=4096",
++      "OLLAMA_TIMEOUT=PT3S"
++    })
++class OllamaBindingTest {
++
++  @Autowired AppProperties props;
++
++  @Test
++  void contextAndTimeoutAreReadFromTheEnvironment() {
++    assertThat(props.ollama().numCtx()).isEqualTo(4096);
++    assertThat(props.ollama().timeout()).isEqualTo(Duration.ofSeconds(3));
++  }
++}
+diff --git a/src/test/java/com/video2podcast/config/SummaryConfigTest.java b/src/test/java/com/video2podcast/config/SummaryConfigTest.java
+new file mode 100644
+index 0000000..0f9aedd
+--- /dev/null
++++ b/src/test/java/com/video2podcast/config/SummaryConfigTest.java
+@@ -0,0 +1,48 @@
++package com.video2podcast.config;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++import com.video2podcast.summary.LlmClient;
++import com.video2podcast.summary.OllamaClient;
++import com.video2podcast.summary.SummaryService;
++import java.time.Duration;
++import org.junit.jupiter.api.Test;
++import org.springframework.boot.test.context.runner.ApplicationContextRunner;
++
++class SummaryConfigTest {
++
++  private static AppProperties props() {
++    return new AppProperties(
++        null,
++        null,
++        new AppProperties.Ollama("http://localhost:11434", "m", 8192, Duration.ofMinutes(10)),
++        null,
++        null);
++  }
++
++  @Test
++  void createsTheSummaryBeans() {
++    new ApplicationContextRunner()
++        .withBean(AppProperties.class, SummaryConfigTest::props)
++        .withUserConfiguration(SummaryConfig.class)
++        .run(context -> {
++          assertThat(context).hasSingleBean(SummaryService.class);
++          assertThat(context.getBean(LlmClient.class)).isInstanceOf(OllamaClient.class);
++        });
++  }
++
++  @Test
++  void startupFailsForABlankModelOrANonPositiveTimeout() {
++    for (AppProperties.Ollama bad :
++        new AppProperties.Ollama[] {
++          new AppProperties.Ollama("http://localhost:11434", " ", 8192, Duration.ofMinutes(10)),
++          new AppProperties.Ollama("http://localhost:11434", "m", 8192, Duration.ZERO),
++          new AppProperties.Ollama("http://localhost:11434", "m", 8192, Duration.ofSeconds(-1))
++        }) {
++      new ApplicationContextRunner()
++          .withBean(AppProperties.class, () -> new AppProperties(null, null, bad, null, null))
++          .withUserConfiguration(SummaryConfig.class)
++          .run(context -> assertThat(context).hasFailed());
++    }
++  }
++}
+diff --git a/src/test/java/com/video2podcast/config/TelegramConfigTest.java b/src/test/java/com/video2podcast/config/TelegramConfigTest.java
+index a0469d7..b5295e4 100644
+--- a/src/test/java/com/video2podcast/config/TelegramConfigTest.java
++++ b/src/test/java/com/video2podcast/config/TelegramConfigTest.java
+@@ -20,7 +20,7 @@ class TelegramConfigTest {
+     return new AppProperties(
+         new AppProperties.Telegram(token, admin, enabled, ""),
+         new AppProperties.Access(Path.of("a.json"), Duration.ofHours(24)),
+-        new AppProperties.Ollama("http://localhost:11434", "m"),
++        new AppProperties.Ollama("http://localhost:11434", "m", 8192, Duration.ofMinutes(10)),
+         new AppProperties.Whisper("http://localhost:8081", Duration.ofMinutes(10)),
+         new AppProperties.Jobs(
+             Path.of("w"),
+diff --git a/src/test/java/com/video2podcast/job/JobFailureTest.java b/src/test/java/com/video2podcast/job/JobFailureTest.java
+index 2ab9a3f..13e3fdb 100644
+--- a/src/test/java/com/video2podcast/job/JobFailureTest.java
++++ b/src/test/java/com/video2podcast/job/JobFailureTest.java
+@@ -51,6 +51,18 @@ class JobFailureTest {
+         .isEqualTo("The video is longer than 0 minutes.");
+   }
+ 
++  @Test
++  void summaryFailuresHaveTheirOwnMessages() {
++    assertThat(JobFailure.of(JobFailure.Kind.SUMMARY_UNREACHABLE).getMessage())
++        .isEqualTo("The summary server is unreachable.");
++    Exception cause = new java.io.IOException("/secret/path");
++    JobFailure failure = JobFailure.summaryFailed(cause);
++    assertThat(failure.kind()).isEqualTo(JobFailure.Kind.FAILED);
++    assertThat(failure.getMessage()).isEqualTo("Summary failed. Please try again later.");
++    assertThat(failure.getCause()).isSameAs(cause);
++    assertThat(JobFailure.summaryFailed(null).getCause()).isNull();
++  }
++
+   @Test
+   void causeIsKeptForLogsButNotInTheMessage() {
+     Exception cause = new java.io.IOException("/secret/path");
+diff --git a/src/test/java/com/video2podcast/summary/OllamaClientTest.java b/src/test/java/com/video2podcast/summary/OllamaClientTest.java
+new file mode 100644
+index 0000000..e025d85
+--- /dev/null
++++ b/src/test/java/com/video2podcast/summary/OllamaClientTest.java
+@@ -0,0 +1,404 @@
++package com.video2podcast.summary;
++
++import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
++import static com.github.tomakehurst.wiremock.client.WireMock.post;
++import static com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor;
++import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.assertj.core.api.Assertions.assertThatThrownBy;
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.when;
++
++import com.fasterxml.jackson.databind.JsonNode;
++import com.github.tomakehurst.wiremock.WireMockServer;
++import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
++import com.github.tomakehurst.wiremock.http.Fault;
++import com.video2podcast.config.AppProperties;
++import com.video2podcast.storage.Json;
++import java.io.IOException;
++import java.net.ServerSocket;
++import java.net.http.HttpClient;
++import java.net.http.HttpConnectTimeoutException;
++import java.net.http.HttpTimeoutException;
++import java.nio.channels.UnresolvedAddressException;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.time.Duration;
++import org.junit.jupiter.api.AfterEach;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.params.ParameterizedTest;
++import org.junit.jupiter.params.provider.ValueSource;
++
++class OllamaClientTest {
++
++  private WireMockServer server;
++
++  @BeforeEach
++  void setUp() {
++    server = new WireMockServer(WireMockConfiguration.options().dynamicPort());
++    server.start();
++  }
++
++  @AfterEach
++  void tearDown() {
++    server.stop();
++  }
++
++  private static AppProperties.Ollama config(String baseUrl, Duration timeout) {
++    return new AppProperties.Ollama(baseUrl, "qwen3:32b", 8192, timeout);
++  }
++
++  private OllamaClient client() {
++    return new OllamaClient(config("http://localhost:" + server.port(), Duration.ofSeconds(5)));
++  }
++
++  private void stub(int status, String body) {
++    server.stubFor(
++        post(urlEqualTo("/api/chat")).willReturn(aResponse().withStatus(status).withBody(body)));
++  }
++
++  private static String fixture(String name) throws IOException {
++    return Files.readString(Path.of("src/test/resources/fixtures", name), StandardCharsets.UTF_8);
++  }
++
++  private static LlmException failure(OllamaClient client) {
++    try {
++      client.complete("system", "user", 1024);
++    } catch (LlmException e) {
++      return e;
++    }
++    throw new AssertionError("no LlmException");
++  }
++
++  private LlmException failureOf(int status, String body) {
++    stub(status, body);
++    return failure(client());
++  }
++
++  private static LlmException failureWith(Throwable thrown) throws Exception {
++    HttpClient http = mock(HttpClient.class);
++    when(http.send(any(), any())).thenThrow(thrown);
++    return failure(new OllamaClient(config("http://localhost:1", Duration.ofSeconds(5)), http));
++  }
++
++  @Test
++  void sendsEveryFieldOfTheContract() throws Exception {
++    stub(200, fixture("ollama-chat-ok.json"));
++
++    client().complete("the system", "the user text", 777);
++
++    server.verify(
++        1,
++        postRequestedFor(urlEqualTo("/api/chat"))
++            .withHeader(
++                "Content-Type",
++                com.github.tomakehurst.wiremock.client.WireMock.equalTo("application/json")));
++    JsonNode body =
++        Json.MAPPER.readTree(server.getAllServeEvents().get(0).getRequest().getBodyAsString());
++    assertThat(body.size()).isEqualTo(6);
++    assertThat(body.path("model").asText()).isEqualTo("qwen3:32b");
++    assertThat(body.path("stream").isBoolean()).isTrue();
++    assertThat(body.path("stream").asBoolean()).isFalse();
++    assertThat(body.path("think").isBoolean()).isTrue();
++    assertThat(body.path("think").asBoolean()).isFalse();
++    assertThat(body.path("keep_alive").asText()).isEqualTo("10m");
++    JsonNode options = body.path("options");
++    assertThat(options.size()).isEqualTo(3);
++    assertThat(options.path("num_ctx").asInt()).isEqualTo(8192);
++    assertThat(options.path("num_predict").asInt()).isEqualTo(777);
++    assertThat(options.path("temperature").asDouble()).isEqualTo(0.2);
++    JsonNode messages = body.path("messages");
++    assertThat(messages.size()).isEqualTo(2);
++    assertThat(messages.get(0).path("role").asText()).isEqualTo("system");
++    assertThat(messages.get(0).path("content").asText()).isEqualTo("the system");
++    assertThat(messages.get(1).path("role").asText()).isEqualTo("user");
++    assertThat(messages.get(1).path("content").asText()).isEqualTo("the user text");
++  }
++
++  @Test
++  void theConfiguredModelAndContextAreSent() throws Exception {
++    stub(200, fixture("ollama-chat-ok.json"));
++    OllamaClient other =
++        new OllamaClient(
++            new AppProperties.Ollama(
++                "http://localhost:" + server.port(), "qwen3:14b", 4096, Duration.ofSeconds(5)));
++
++    other.complete("s", "u", 10);
++
++    JsonNode body =
++        Json.MAPPER.readTree(server.getAllServeEvents().get(0).getRequest().getBodyAsString());
++    assertThat(body.path("model").asText()).isEqualTo("qwen3:14b");
++    assertThat(body.path("options").path("num_ctx").asInt()).isEqualTo(4096);
++  }
++
++  @Test
++  void aTrailingSlashOfTheBaseUrlIsDropped() throws Exception {
++    stub(200, fixture("ollama-chat-ok.json"));
++    OllamaClient slash =
++        new OllamaClient(config("http://localhost:" + server.port() + "/", Duration.ofSeconds(5)));
++
++    slash.complete("s", "u", 10);
++
++    server.verify(1, postRequestedFor(urlEqualTo("/api/chat")));
++  }
++
++  @Test
++  void returnsTheStrippedContentAndThePromptTokens() throws Exception {
++    stub(200, fixture("ollama-chat-ok.json"));
++
++    LlmReply reply = client().complete("s", "u", 10);
++
++    assertThat(reply.content())
++        .isEqualTo(
++            "- The user is testing the video to podcast bot.  \n"
++                + "- A meeting is scheduled for Tuesday at 10 o'clock to discuss the budget.");
++    assertThat(reply.promptTokens()).isEqualTo(71);
++  }
++
++  @Test
++  void contentIsStripped() throws Exception {
++    stub(200, "{\"message\":{\"content\":\" \\n- a \\n\"},\"prompt_eval_count\":5}");
++
++    assertThat(client().complete("s", "u", 10).content()).isEqualTo("- a");
++  }
++
++  @Test
++  void theCachedCountIsIgnored() throws Exception {
++    stub(
++        200,
++        "{\"message\":{\"content\":\"- a\"},\"prompt_eval_count\":1,\"prompt_eval_cached_count\":100000}");
++
++    assertThat(client().complete("s", "u", 10).promptTokens()).isEqualTo(1);
++  }
++
++  @Test
++  void thinkingAndOtherFieldsAreNotUsed() throws Exception {
++    stub(
++        200,
++        "{\"message\":{\"content\":\"- real\",\"thinking\":\"secret\"},\"response\":\"x\","
++            + "\"prompt_eval_count\":9}");
++
++    assertThat(client().complete("s", "u", 10).content()).isEqualTo("- real");
++  }
++
++  @Test
++  void anAnswerStoppedAtTheLengthLimitIsAccepted() throws Exception {
++    stub(
++        200,
++        "{\"message\":{\"content\":\"- cut\"},\"done_reason\":\"length\",\"prompt_eval_count\":9}");
++
++    assertThat(client().complete("s", "u", 10).content()).isEqualTo("- cut");
++  }
++
++  @Test
++  void theThinkingOnlyAnswerIsAFailure() throws Exception {
++    assertThat(failureOf(200, fixture("ollama-chat-thinking-default.json")).reason())
++        .isEqualTo(LlmException.Reason.OTHER);
++  }
++
++  @Test
++  void aMissingModelIsAFailure() throws Exception {
++    LlmException e = failureOf(404, fixture("ollama-model-not-found.json"));
++
++    assertThat(e.reason()).isEqualTo(LlmException.Reason.OTHER);
++    assertThat(e.getMessage()).contains("404");
++  }
++
++  @ParameterizedTest
++  @ValueSource(ints = {300, 302, 400, 500, 503})
++  void aStatusOutsideTwoHundredIsAFailure(int status) {
++    assertThat(
++            failureOf(status, "{\"message\":{\"content\":\"- a\"},\"prompt_eval_count\":9}")
++                .reason())
++        .isEqualTo(LlmException.Reason.OTHER);
++  }
++
++  @ParameterizedTest
++  @ValueSource(ints = {200, 201, 299})
++  void anyTwoHundredStatusWithAValidBodyIsAccepted(int status) throws Exception {
++    stub(status, "{\"message\":{\"content\":\"- a\"},\"prompt_eval_count\":9}");
++
++    assertThat(client().complete("s", "u", 10).content()).isEqualTo("- a");
++  }
++
++  @ParameterizedTest
++  @ValueSource(
++      strings = {
++        "",
++        "   ",
++        "{broken",
++        "[]",
++        "42",
++        "null",
++        "\"text\"",
++        "{}",
++        "{\"prompt_eval_count\":9}",
++        "{\"message\":null,\"prompt_eval_count\":9}",
++        "{\"message\":{},\"prompt_eval_count\":9}",
++        "{\"message\":{\"content\":null},\"prompt_eval_count\":9}",
++        "{\"message\":{\"content\":42},\"prompt_eval_count\":9}",
++        "{\"message\":{\"content\":[\"a\"]},\"prompt_eval_count\":9}",
++        "{\"message\":{\"content\":\"\"},\"prompt_eval_count\":9}",
++        "{\"message\":{\"content\":\" \\t\\n \"},\"prompt_eval_count\":9}",
++        "{\"message\":{\"content\":\"- a\"}}",
++        "{\"message\":{\"content\":\"- a\"},\"prompt_eval_count\":null}",
++        "{\"message\":{\"content\":\"- a\"},\"prompt_eval_count\":0}",
++        "{\"message\":{\"content\":\"- a\"},\"prompt_eval_count\":-5}",
++        "{\"message\":{\"content\":\"- a\"},\"prompt_eval_count\":71.5}",
++        "{\"message\":{\"content\":\"- a\"},\"prompt_eval_count\":71.0}",
++        "{\"message\":{\"content\":\"- a\"},\"prompt_eval_count\":\"71\"}",
++        "{\"message\":{\"content\":\"- a\"},\"prompt_eval_count\":true}",
++        "{\"message\":{\"content\":\"- a\"},\"prompt_eval_count\":99999999999999999999}",
++        "{\"message\":{\"content\":\"- a\"},\"prompt_eval_count\":9} trailing"
++      })
++  void anInvalidSuccessfulAnswerIsAFailure(String body) {
++    assertThat(failureOf(200, body).reason()).isEqualTo(LlmException.Reason.OTHER);
++  }
++
++  @Test
++  void aRefusedConnectionIsAConnectionError() throws IOException {
++    int port;
++    try (ServerSocket socket = new ServerSocket(0)) {
++      port = socket.getLocalPort();
++    }
++    OllamaClient refused =
++        new OllamaClient(config("http://localhost:" + port, Duration.ofSeconds(5)));
++
++    assertThat(failure(refused).reason()).isEqualTo(LlmException.Reason.CONNECTION);
++  }
++
++  @Test
++  void aConnectTimeoutIsAConnectionError() throws Exception {
++    assertThat(failureWith(new HttpConnectTimeoutException("connect timed out")).reason())
++        .isEqualTo(LlmException.Reason.CONNECTION);
++  }
++
++  @Test
++  void anUnresolvedAddressIsAConnectionError() throws Exception {
++    assertThat(failureWith(new UnresolvedAddressException()).reason())
++        .isEqualTo(LlmException.Reason.CONNECTION);
++  }
++
++  @Test
++  void aConnectExceptionIsAConnectionError() throws Exception {
++    assertThat(failureWith(new java.net.ConnectException("refused")).reason())
++        .isEqualTo(LlmException.Reason.CONNECTION);
++  }
++
++  @Test
++  void aRequestTimeoutIsATimeout() throws Exception {
++    assertThat(failureWith(new HttpTimeoutException("request timed out")).reason())
++        .isEqualTo(LlmException.Reason.TIMEOUT);
++  }
++
++  @Test
++  void aSlowAnswerTimesOut() {
++    server.stubFor(
++        post(urlEqualTo("/api/chat"))
++            .willReturn(aResponse().withStatus(200).withBody("{}").withFixedDelay(2000)));
++    OllamaClient slow =
++        new OllamaClient(config("http://localhost:" + server.port(), Duration.ofMillis(200)));
++
++    LlmException e = failure(slow);
++
++    assertThat(e.reason()).isEqualTo(LlmException.Reason.TIMEOUT);
++    assertThat(e.getCause()).isInstanceOf(HttpTimeoutException.class);
++  }
++
++  @Test
++  void otherIoErrorsAreOtherFailures() throws Exception {
++    assertThat(failureWith(new IOException("broken pipe")).reason())
++        .isEqualTo(LlmException.Reason.OTHER);
++  }
++
++  @Test
++  void aConnectionResetIsAnOtherFailure() {
++    server.stubFor(
++        post(urlEqualTo("/api/chat"))
++            .willReturn(aResponse().withFault(Fault.CONNECTION_RESET_BY_PEER)));
++
++    assertThat(failure(client()).reason()).isEqualTo(LlmException.Reason.OTHER);
++  }
++
++  @Test
++  void anInterruptionIsAnOtherFailureAndKeepsTheFlag() throws Exception {
++    try {
++      LlmException e = failureWith(new InterruptedException("stop"));
++
++      assertThat(e.reason()).isEqualTo(LlmException.Reason.OTHER);
++      assertThat(Thread.currentThread().isInterrupted()).isTrue();
++    } finally {
++      Thread.interrupted();
++    }
++  }
++
++  @Test
++  void theCauseIsKept() throws Exception {
++    IOException cause = new IOException("broken pipe");
++
++    assertThat(failureWith(cause).getCause()).isSameAs(cause);
++  }
++
++  @Test
++  void theHttpClientHasAFiveSecondConnectTimeoutAndNeverFollowsRedirects() {
++    HttpClient http = client().httpClient();
++
++    assertThat(http.connectTimeout()).contains(Duration.ofSeconds(5));
++    assertThat(http.followRedirects()).isEqualTo(HttpClient.Redirect.NEVER);
++  }
++
++  @Test
++  void aRedirectIsNotFollowed() {
++    server.stubFor(
++        post(urlEqualTo("/api/chat"))
++            .willReturn(aResponse().withStatus(302).withHeader("Location", "/elsewhere")));
++
++    assertThat(failure(client()).reason()).isEqualTo(LlmException.Reason.OTHER);
++    server.verify(0, postRequestedFor(urlEqualTo("/elsewhere")));
++  }
++
++  @Test
++  void aLongErrorBodyDoesNotBreakTheFailure() {
++    assertThat(failureOf(500, "x".repeat(5000)).getMessage()).doesNotContain("xxx");
++  }
++
++  @ParameterizedTest
++  @ValueSource(strings = {"", " ", " \t\n"})
++  void aBlankModelIsRejectedAtConstruction(String model) {
++    AppProperties.Ollama config =
++        new AppProperties.Ollama("http://localhost:1", model, 8192, Duration.ofSeconds(5));
++
++    assertThatThrownBy(() -> new OllamaClient(config))
++        .isInstanceOf(IllegalArgumentException.class)
++        .hasMessageContaining("model");
++  }
++
++  @Test
++  void aNullModelIsRejectedAtConstruction() {
++    AppProperties.Ollama config =
++        new AppProperties.Ollama("http://localhost:1", null, 8192, Duration.ofSeconds(5));
++
++    assertThatThrownBy(() -> new OllamaClient(config)).isInstanceOf(IllegalArgumentException.class);
++  }
++
++  @Test
++  void aNonPositiveOrMissingTimeoutIsRejectedAtConstruction() {
++    for (Duration timeout : new Duration[] {Duration.ZERO, Duration.ofMillis(-1), null}) {
++      AppProperties.Ollama config =
++          new AppProperties.Ollama("http://localhost:1", "m", 8192, timeout);
++
++      assertThatThrownBy(() -> new OllamaClient(config))
++          .isInstanceOf(IllegalArgumentException.class)
++          .hasMessageContaining("timeout");
++    }
++  }
++
++  @Test
++  void theSmallestPositiveTimeoutIsAccepted() {
++    new OllamaClient(
++        new AppProperties.Ollama("http://localhost:1", "m", 8192, Duration.ofNanos(1)));
++  }
++}
+diff --git a/src/test/java/com/video2podcast/summary/SummaryFormatterTest.java b/src/test/java/com/video2podcast/summary/SummaryFormatterTest.java
+new file mode 100644
+index 0000000..3dd184c
+--- /dev/null
++++ b/src/test/java/com/video2podcast/summary/SummaryFormatterTest.java
+@@ -0,0 +1,161 @@
++package com.video2podcast.summary;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.assertj.core.api.Assertions.assertThatThrownBy;
++
++import com.video2podcast.job.JobFailure;
++import org.junit.jupiter.api.Test;
++
++class SummaryFormatterTest {
++
++  private static void assertSummaryFailed(String content) {
++    assertThatThrownBy(() -> SummaryFormatter.format(content))
++        .isInstanceOfSatisfying(
++            JobFailure.class,
++            f -> {
++              assertThat(f.kind()).isEqualTo(JobFailure.Kind.FAILED);
++              assertThat(f.getMessage()).isEqualTo("Summary failed. Please try again later.");
++            });
++  }
++
++  @Test
++  void everyLineBecomesABulletAndMarkersAreRemoved() {
++    String content = "- one\n* two\n• three\n– four\nfive";
++
++    assertThat(SummaryFormatter.format(content)).isEqualTo("• one\n• two\n• three\n• four\n• five");
++  }
++
++  @Test
++  void blankLinesAreDroppedAndLinesAreStripped() {
++    assertThat(SummaryFormatter.format("  - one  \n\n \t\n   two\r\n")).isEqualTo("• one\n• two");
++  }
++
++  @Test
++  void onlyOneMarkerIsRemoved() {
++    assertThat(SummaryFormatter.format("- - nested")).isEqualTo("• - nested");
++  }
++
++  @Test
++  void aMarkerWithoutWhitespaceAfterItStays() {
++    assertThat(SummaryFormatter.format("-5 degrees\n*bold*\n–x"))
++        .isEqualTo("• -5 degrees\n• *bold*\n• –x");
++  }
++
++  @Test
++  void aMarkerFollowedByATabIsRemoved() {
++    assertThat(SummaryFormatter.format("-\tone")).isEqualTo("• one");
++  }
++
++  @Test
++  void aLineOfOnlyAMarkerIsEmpty() {
++    assertThat(SummaryFormatter.format("-\n*\n•\n–\nx")).isEqualTo("• x");
++  }
++
++  @Test
++  void aMarkerOnlyLineIsDroppedAndNoLineFails() {
++    assertThat(SummaryFormatter.format("- \n- one")).isEqualTo("• one");
++    assertSummaryFailed("- \n*  \n");
++    assertSummaryFailed(" \n\t");
++  }
++
++  @Test
++  void exactlyTheCapIsKeptUnchanged() {
++    String line = "x".repeat(SummaryFormatter.SUMMARY_CAP - 2);
++
++    String result = SummaryFormatter.format(line);
++
++    assertThat(result).hasSize(1500).isEqualTo("• " + line);
++  }
++
++  @Test
++  void trailingBulletsAreDroppedWhenOverTheCap() {
++    String first = "a".repeat(700);
++    String second = "b".repeat(700);
++    String third = "c".repeat(700);
++
++    String result = SummaryFormatter.format(first + "\n" + second + "\n" + third);
++
++    assertThat(result).isEqualTo("• " + first + "\n• " + second);
++    assertThat(result.length()).isLessThanOrEqualTo(1500);
++  }
++
++  @Test
++  void twoBulletsExactlyAtTheCapAreKept() {
++    String first = "a".repeat(748);
++    String second = "b".repeat(747);
++
++    String result = SummaryFormatter.format(first + "\n" + second);
++
++    assertThat(result).hasSize(1500);
++  }
++
++  @Test
++  void oneOverTheCapDropsTheLastBullet() {
++    String first = "a".repeat(748);
++    String second = "b".repeat(748);
++
++    assertThat(SummaryFormatter.format(first + "\n" + second)).isEqualTo("• " + first);
++  }
++
++  @Test
++  void aSingleOversizedBulletIsCutWithAnEllipsis() {
++    String result = SummaryFormatter.format("x".repeat(2000));
++
++    assertThat(result).hasSize(1500).startsWith("• xxx").endsWith("x…");
++    assertThat(result.substring(0, 1499)).isEqualTo("• " + "x".repeat(1497));
++  }
++
++  @Test
++  void aSingleBulletOneOverTheCapIsCut() {
++    String result = SummaryFormatter.format("x".repeat(1499));
++
++    assertThat(result).hasSize(1500).endsWith("x…");
++  }
++
++  @Test
++  void theCutNeverSplitsASurrogatePair() {
++    // "• " + 1496 chars + pair: the pair would start at index 1498 and end at 1499
++    String content = "a".repeat(1496) + "😀" + "b".repeat(10);
++
++    String result = SummaryFormatter.format(content);
++
++    assertThat(result).hasSize(1499).endsWith("a…").doesNotContain("😀");
++  }
++
++  @Test
++  void aPairEndingExactlyAtTheCutIsKept() {
++    String content = "a".repeat(1495) + "😀" + "b".repeat(10);
++
++    String result = SummaryFormatter.format(content);
++
++    assertThat(result).hasSize(1500).endsWith("😀…");
++  }
++
++  @Test
++  void clipKeepsAnAnswerThatFits() {
++    assertThat(SummaryFormatter.clip("- a\n- b", 7)).isEqualTo("- a\n- b");
++  }
++
++  @Test
++  void clipDropsWholeTrailingLines() {
++    assertThat(SummaryFormatter.clip("- a\n- b\n- c", 7)).isEqualTo("- a\n- b");
++    assertThat(SummaryFormatter.clip("- a\n- b\n- c", 6)).isEqualTo("- a");
++  }
++
++  @Test
++  void clipCutsASingleLongLineWithoutAMarker() {
++    assertThat(SummaryFormatter.clip("x".repeat(50), 10)).isEqualTo("x".repeat(10));
++    assertThat(SummaryFormatter.clip("- a\n" + "y".repeat(50), 2)).isEqualTo("- ");
++  }
++
++  @Test
++  void clipDoesNotSplitASurrogatePair() {
++    assertThat(SummaryFormatter.clip("a".repeat(9) + "😀😀", 10)).isEqualTo("a".repeat(9));
++    assertThat(SummaryFormatter.clip("a".repeat(8) + "😀😀", 10)).isEqualTo("a".repeat(8) + "😀");
++  }
++
++  @Test
++  void clipDoesNotNormalizeMarkersOrAppendAnEllipsis() {
++    assertThat(SummaryFormatter.clip("* a\n* b", 3)).isEqualTo("* a");
++  }
++}
+diff --git a/src/test/java/com/video2podcast/summary/SummaryServiceTest.java b/src/test/java/com/video2podcast/summary/SummaryServiceTest.java
+new file mode 100644
+index 0000000..9999eb5
+--- /dev/null
++++ b/src/test/java/com/video2podcast/summary/SummaryServiceTest.java
+@@ -0,0 +1,584 @@
++package com.video2podcast.summary;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.assertj.core.api.Assertions.assertThatThrownBy;
++
++import com.video2podcast.config.AppProperties;
++import com.video2podcast.job.JobFailure;
++import java.io.IOException;
++import java.time.Duration;
++import java.util.ArrayList;
++import java.util.List;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.params.ParameterizedTest;
++import org.junit.jupiter.params.provider.ValueSource;
++
++class SummaryServiceTest {
++
++  private static final int NUM_CTX = 8192;
++  private static final String FAILED_MESSAGE = "Summary failed. Please try again later.";
++
++  record Call(String system, String user, int maxOutputTokens) {}
++
++  /** Records every request and answers through a function of the call index. */
++  static final class ScriptedLlm implements LlmClient {
++
++    interface Answer {
++      LlmReply reply(int index, String system, String user) throws LlmException;
++    }
++
++    final List<Call> calls = new ArrayList<>();
++    private final Answer answer;
++
++    ScriptedLlm(Answer answer) {
++      this.answer = answer;
++    }
++
++    @Override
++    public LlmReply complete(String system, String user, int maxOutputTokens) throws LlmException {
++      calls.add(new Call(system, user, maxOutputTokens));
++      return answer.reply(calls.size() - 1, system, user);
++    }
++  }
++
++  private static LlmReply valid(String content, String system, String user) {
++    return new LlmReply(content, TokenEstimator.requestEstimate(system, user) * 4 / 5);
++  }
++
++  private static ScriptedLlm always(String content) {
++    return new ScriptedLlm((i, s, u) -> valid(content, s, u));
++  }
++
++  private static AppProperties.Ollama config(int numCtx) {
++    return new AppProperties.Ollama("http://localhost:1", "m", numCtx, Duration.ofMinutes(1));
++  }
++
++  private static SummaryService service(LlmClient llm) {
++    return new SummaryService(llm, config(NUM_CTX));
++  }
++
++  private static int promptTokens() {
++    return Math.max(
++        Math.max(TokenEstimator.estimate(Prompts.SHORT), TokenEstimator.estimate(Prompts.MAP)),
++        Math.max(
++            TokenEstimator.estimate(Prompts.REDUCE_FINAL),
++            TokenEstimator.estimate(Prompts.REDUCE_ROUND)));
++  }
++
++  private static String words(int chars) {
++    return "lorem ipsum dolor sit amet ".repeat(chars / 27 + 1).substring(0, chars).strip();
++  }
++
++  private static JobFailure failureOf(SummaryService service, String transcript) {
++    try {
++      service.summarize(transcript);
++    } catch (JobFailure e) {
++      return e;
++    }
++    throw new AssertionError("no JobFailure");
++  }
++
++  private static void assertFits(Call call, int numCtx) {
++    assertThat(TokenEstimator.requestEstimate(call.system(), call.user()) + call.maxOutputTokens())
++        .isLessThanOrEqualTo(numCtx);
++  }
++
++  // ---- budget ----
++
++  @Test
++  void budgetFollowsTheFormula() {
++    SummaryService service = service(always("- a"));
++
++    int budget = NUM_CTX - 1024 - promptTokens() - 32;
++    assertThat(service.maxChunkChars()).isEqualTo(budget * 3);
++    assertThat(service.partialMaxChars()).isEqualTo((budget * 3 - 6) / 4);
++  }
++
++  @Test
++  void theLongestOfTheFourPromptsDefinesTheBudget() {
++    assertThat(promptTokens())
++        .isEqualTo(
++            Math.max(
++                TokenEstimator.estimate(Prompts.SHORT),
++                Math.max(
++                    TokenEstimator.estimate(Prompts.MAP),
++                    Math.max(
++                        TokenEstimator.estimate(Prompts.REDUCE_FINAL),
++                        TokenEstimator.estimate(Prompts.REDUCE_ROUND)))));
++    assertThat(Prompts.REDUCE_FINAL.length()).isGreaterThan(Prompts.REDUCE_ROUND.length());
++    assertThat(Prompts.REDUCE_FINAL.length()).isGreaterThan(Prompts.MAP.length());
++  }
++
++  @Test
++  void aDifferentContextChangesTheBudgetByThreePerToken() {
++    SummaryService base = new SummaryService(always("- a"), config(8192));
++    SummaryService larger = new SummaryService(always("- a"), config(8192 + 100));
++
++    assertThat(larger.maxChunkChars() - base.maxChunkChars()).isEqualTo(300);
++  }
++
++  @Test
++  void aContextBelowTheMinimumBudgetIsRejected() {
++    int minimum = 2 * 1024 + 1024 + promptTokens() + 32;
++
++    assertThat(new SummaryService(always("- a"), config(minimum)).partialMaxChars())
++        .isGreaterThanOrEqualTo(1500);
++    assertThatThrownBy(() -> new SummaryService(always("- a"), config(minimum - 1)))
++        .isInstanceOf(IllegalArgumentException.class);
++  }
++
++  @ParameterizedTest
++  @ValueSource(ints = {0, -1, Integer.MIN_VALUE})
++  void aNonPositiveContextIsRejected(int numCtx) {
++    assertThatThrownBy(() -> new SummaryService(always("- a"), config(numCtx)))
++        .isInstanceOf(IllegalArgumentException.class)
++        .hasMessageContaining("num-ctx");
++  }
++
++  @Test
++  void aHugeContextDoesNotOverflow() {
++    SummaryService huge = new SummaryService(always("- a"), config(Integer.MAX_VALUE / 4));
++
++    assertThat(huge.maxChunkChars()).isPositive();
++  }
++
++  @Test
++  void aContextWhoseCharacterBudgetOverflowsAnIntIsRejected() {
++    int largest = Integer.MAX_VALUE / 3 + 1024 + promptTokens() + 32;
++
++    assertThat(new SummaryService(always("- a"), config(largest)).maxChunkChars()).isPositive();
++    assertThatThrownBy(() -> new SummaryService(always("- a"), config(largest + 1)))
++        .isInstanceOf(IllegalArgumentException.class)
++        .hasMessageContaining("too large");
++    assertThatThrownBy(() -> new SummaryService(always("- a"), config(Integer.MAX_VALUE)))
++        .isInstanceOf(IllegalArgumentException.class);
++  }
++
++  // ---- short path ----
++
++  @Test
++  void aShortTranscriptIsOneRequest() {
++    ScriptedLlm llm = always("- Tuesday meeting\n- Budget");
++
++    String summary = service(llm).summarize("  The budget meeting is on Tuesday.  \n");
++
++    assertThat(llm.calls).hasSize(1);
++    Call call = llm.calls.get(0);
++    assertThat(call.system()).isEqualTo(Prompts.SHORT);
++    assertThat(call.user()).isEqualTo("The budget meeting is on Tuesday.");
++    assertThat(call.maxOutputTokens()).isEqualTo(1024);
++    assertThat(summary).isEqualTo("• Tuesday meeting\n• Budget");
++  }
++
++  @Test
++  void aTranscriptOfExactlyTheBudgetIsStillOneRequest() {
++    ScriptedLlm llm = always("- a");
++    SummaryService service = service(llm);
++    String text = "a".repeat(service.maxChunkChars());
++
++    service.summarize(text);
++
++    assertThat(llm.calls).hasSize(1);
++    assertThat(llm.calls.get(0).user()).isEqualTo(text);
++    assertFits(llm.calls.get(0), NUM_CTX);
++  }
++
++  @Test
++  void aTranscriptOneBelowTheBudgetIsOneRequest() {
++    ScriptedLlm llm = always("- a");
++    SummaryService service = service(llm);
++
++    service.summarize("a".repeat(service.maxChunkChars() - 1));
++
++    assertThat(llm.calls).hasSize(1);
++  }
++
++  @Test
++  void aTranscriptOneOverTheBudgetIsSplitAndReduced() {
++    ScriptedLlm llm = always("- a");
++    SummaryService service = service(llm);
++    int max = service.maxChunkChars();
++
++    service.summarize("a".repeat(max + 1));
++
++    assertThat(llm.calls).hasSize(3);
++    assertThat(llm.calls.get(0).system()).isEqualTo(Prompts.MAP);
++    assertThat(llm.calls.get(0).user()).isEqualTo("a".repeat(max));
++    assertThat(llm.calls.get(1).user()).isEqualTo("a");
++    assertThat(llm.calls.get(2).system()).isEqualTo(Prompts.REDUCE_FINAL);
++  }
++
++  @Test
++  void whitespaceAroundTheTranscriptDoesNotCountTowardTheBudget() {
++    ScriptedLlm llm = always("- a");
++    SummaryService service = service(llm);
++
++    service.summarize("  " + "a".repeat(service.maxChunkChars()) + "\n\n");
++
++    assertThat(llm.calls).hasSize(1);
++  }
++
++  // ---- map and reduce ----
++
++  @Test
++  void everyChunkIsSummarizedInOrderThenAllPartialsAreReduced() {
++    ScriptedLlm llm =
++        new ScriptedLlm((i, s, u) -> valid(i < 3 ? "- part " + (i + 1) : "- final", s, u));
++    SummaryService service = service(llm);
++    String text = words(service.maxChunkChars() * 5 / 2);
++    List<String> chunks = TextChunker.split(text, service.maxChunkChars());
++    assertThat(chunks).hasSize(3);
++
++    String summary = service.summarize(text);
++
++    assertThat(llm.calls).hasSize(4);
++    for (int i = 0; i < 3; i++) {
++      assertThat(llm.calls.get(i).system()).isEqualTo(Prompts.MAP);
++      assertThat(llm.calls.get(i).user()).isEqualTo(chunks.get(i));
++    }
++    assertThat(llm.calls.get(3).system()).isEqualTo(Prompts.REDUCE_FINAL);
++    assertThat(llm.calls.get(3).user()).isEqualTo("- part 1\n\n- part 2\n\n- part 3");
++    assertThat(summary).isEqualTo("• final");
++    assertThat(llm.calls).allSatisfy(call -> assertThat(call.maxOutputTokens()).isEqualTo(1024));
++    assertThat(llm.calls).allSatisfy(call -> assertFits(call, NUM_CTX));
++  }
++
++  @Test
++  void onlyTheFinalAnswerIsFormatted() {
++    ScriptedLlm llm = new ScriptedLlm((i, s, u) -> valid(i < 2 ? "* mapped" : "* final", s, u));
++    SummaryService service = service(llm);
++
++    String summary = service.summarize("a".repeat(service.maxChunkChars() + 1));
++
++    assertThat(llm.calls.get(2).user()).isEqualTo("* mapped\n\n* mapped");
++    assertThat(summary).isEqualTo("• final");
++  }
++
++  @Test
++  void partialsThatDoNotFitAreReducedInRoundsInOrder() {
++    SummaryService probe = service(always("- a"));
++    int max = probe.maxChunkChars();
++    int partialMax = probe.partialMaxChars();
++    int chunks = 9;
++    String text = "a".repeat(max * (chunks - 1) + 1);
++    ScriptedLlm llm =
++        new ScriptedLlm((i, s, u) -> {
++          if (s.equals(Prompts.MAP)) {
++            return valid(i + "-" + "x".repeat(partialMax * 3), s, u);
++          }
++          return valid(s.equals(Prompts.REDUCE_FINAL) ? "- final" : "- group " + i, s, u);
++        });
++
++    String summary = service(llm).summarize(text);
++
++    // 9 maps, groups of 4, 4 and 1, then one final reduction of the 3 group answers
++    assertThat(llm.calls).hasSize(9 + 3 + 1);
++    assertThat(llm.calls.subList(0, 9))
++        .allSatisfy(c -> assertThat(c.system()).isEqualTo(Prompts.MAP));
++    List<Call> round = llm.calls.subList(9, 12);
++    assertThat(round).allSatisfy(c -> assertThat(c.system()).isEqualTo(Prompts.REDUCE_ROUND));
++    assertThat(round.get(0).user()).startsWith("0-x").contains("\n\n1-x", "\n\n2-x", "\n\n3-x");
++    assertThat(round.get(1).user()).startsWith("4-x").contains("\n\n5-x", "\n\n6-x", "\n\n7-x");
++    assertThat(round.get(2).user()).startsWith("8-x").doesNotContain("\n\n");
++    assertThat(round.get(0).user().length()).isLessThanOrEqualTo(max);
++    assertThat(round.get(0).user().length()).isEqualTo(4 * partialMax + 6);
++    assertThat(llm.calls.get(12).system()).isEqualTo(Prompts.REDUCE_FINAL);
++    assertThat(llm.calls.get(12).user()).isEqualTo("- group 9\n\n- group 10\n\n- group 11");
++    assertThat(summary).isEqualTo("• final");
++    assertThat(llm.calls)
++        .allSatisfy(c -> assertThat(c.user().length()).isLessThanOrEqualTo(max))
++        .allSatisfy(c -> assertFits(c, NUM_CTX));
++  }
++
++  @Test
++  void aGroupStartsANewOneWhenTheNextPartialWouldNotFit() {
++    SummaryService probe = service(always("- a"));
++    int max = probe.maxChunkChars();
++    int partialMax = probe.partialMaxChars();
++    // partials of partialMax + 1 chars cannot be clipped, but 4 of them plus separators exceed max
++    String text = "a".repeat(max * 4 + 1);
++    ScriptedLlm llm =
++        new ScriptedLlm((i, s, u) -> {
++          if (s.equals(Prompts.MAP)) {
++            return valid("y".repeat(partialMax), s, u);
++          }
++          return valid("- ok", s, u);
++        });
++
++    service(llm).summarize(text);
++
++    List<Call> round =
++        llm.calls.stream().filter(c -> c.system().equals(Prompts.REDUCE_ROUND)).toList();
++    assertThat(round).hasSize(2);
++    assertThat(round.get(0).user()).hasSize(4 * partialMax + 6);
++    assertThat(round.get(1).user()).hasSize(partialMax);
++  }
++
++  @Test
++  void anOverlongAnswerIsClippedToTheBoundBeforeItIsUsed() {
++    SummaryService probe = service(always("- a"));
++    int partialMax = probe.partialMaxChars();
++    String line = "z".repeat(partialMax * 2 / 5);
++    ScriptedLlm llm =
++        new ScriptedLlm((i, s, u) ->
++            valid(s.equals(Prompts.MAP) ? line + "\n" + line + "\n" + line : "- done", s, u));
++
++    service(llm).summarize("a".repeat(probe.maxChunkChars() + 1));
++
++    // three lines of two fifths of the bound: the third is dropped
++    assertThat(llm.calls.get(2).user()).isEqualTo(line + "\n" + line + "\n\n" + line + "\n" + line);
++  }
++
++  /** Every map and round answer is as long as an intermediate answer may be. */
++  private static ScriptedLlm bigAnswers(SummaryService probe) {
++    String big = "y".repeat(probe.partialMaxChars());
++    return new ScriptedLlm(
++        (i, s, u) -> valid(s.equals(Prompts.REDUCE_FINAL) ? "- final" : big, s, u));
++  }
++
++  @Test
++  void seventeenPartialsNeedTwoRoundsOfReduction() {
++    SummaryService probe = service(always("- a"));
++    ScriptedLlm llm = bigAnswers(probe);
++
++    String summary = service(llm).summarize("a".repeat(probe.maxChunkChars() * 16 + 1));
++
++    // 17 maps, round one: 5 groups, round two: 2 groups, then the final reduction
++    assertThat(llm.calls).hasSize(17 + 5 + 2 + 1);
++    assertThat(llm.calls.get(llm.calls.size() - 1).system()).isEqualTo(Prompts.REDUCE_FINAL);
++    assertThat(summary).isEqualTo("• final");
++    assertThat(llm.calls).allSatisfy(c -> assertFits(c, NUM_CTX));
++  }
++
++  @Test
++  void furtherRoundsAreBounded() {
++    SummaryService probe = service(always("- a"));
++    ScriptedLlm llm = bigAnswers(probe);
++
++    JobFailure failure =
++        failureOf(
++            new SummaryService(llm, config(NUM_CTX), 1),
++            "a".repeat(probe.maxChunkChars() * 16 + 1));
++
++    assertThat(failure.kind()).isEqualTo(JobFailure.Kind.FAILED);
++    assertThat(failure.getMessage()).isEqualTo(FAILED_MESSAGE);
++    assertThat(failure.getCause()).isNull();
++    // 17 maps and the 5 groups of round one, nothing after the limit
++    assertThat(llm.calls).hasSize(17 + 5);
++  }
++
++  @Test
++  void theRoundLimitIsInclusive() {
++    SummaryService probe = service(always("- a"));
++    ScriptedLlm llm = bigAnswers(probe);
++
++    String summary =
++        new SummaryService(llm, config(NUM_CTX), 1)
++            .summarize("a".repeat(probe.maxChunkChars() * 4 + 1));
++
++    // 5 maps, one round of 2 groups, then the final reduction
++    assertThat(llm.calls).hasSize(5 + 2 + 1);
++    assertThat(summary).isEqualTo("• final");
++  }
++
++  // ---- input ----
++
++  @Test
++  void aNullTranscriptIsAProgrammingError() {
++    ScriptedLlm llm = always("- a");
++
++    assertThatThrownBy(() -> service(llm).summarize(null)).isInstanceOf(NullPointerException.class);
++    assertThat(llm.calls).isEmpty();
++  }
++
++  @ParameterizedTest
++  @ValueSource(strings = {"", " ", " \n\t "})
++  void aBlankTranscriptFailsWithoutARequest(String transcript) {
++    ScriptedLlm llm = always("- a");
++
++    JobFailure failure = failureOf(service(llm), transcript);
++
++    assertThat(failure.kind()).isEqualTo(JobFailure.Kind.FAILED);
++    assertThat(failure.getMessage()).isEqualTo(FAILED_MESSAGE);
++    assertThat(llm.calls).isEmpty();
++  }
++
++  // ---- failures ----
++
++  private static ScriptedLlm failing(int failAt, LlmException.Reason reason, Throwable cause) {
++    return new ScriptedLlm((i, s, u) -> {
++      if (i == failAt) {
++        throw new LlmException("boom", reason, cause);
++      }
++      return valid("- a", s, u);
++    });
++  }
++
++  private static String threeChunks() {
++    return "a".repeat(service(always("- a")).maxChunkChars() * 2 + 1);
++  }
++
++  @ParameterizedTest
++  @ValueSource(ints = {0, 1, 2, 3})
++  void aConnectionErrorAtAnyStageIsSummaryUnreachable(int stage) {
++    IOException cause = new IOException("refused");
++    ScriptedLlm llm = failing(stage, LlmException.Reason.CONNECTION, cause);
++
++    JobFailure failure = failureOf(service(llm), threeChunks());
++
++    assertThat(failure.kind()).isEqualTo(JobFailure.Kind.SUMMARY_UNREACHABLE);
++    assertThat(failure.getMessage()).isEqualTo("The summary server is unreachable.");
++    assertThat(failure.getCause()).isInstanceOf(LlmException.class);
++    assertThat(failure.getCause().getCause()).isSameAs(cause);
++    assertThat(llm.calls).hasSize(stage + 1);
++  }
++
++  @ParameterizedTest
++  @ValueSource(ints = {0, 1, 2, 3})
++  void aTimeoutAtAnyStageIsATimeout(int stage) {
++    ScriptedLlm llm = failing(stage, LlmException.Reason.TIMEOUT, null);
++
++    JobFailure failure = failureOf(service(llm), threeChunks());
++
++    assertThat(failure.kind()).isEqualTo(JobFailure.Kind.TIMEOUT);
++    assertThat(failure.getMessage()).isEqualTo("Processing took too long and was stopped.");
++    assertThat(llm.calls).hasSize(stage + 1);
++  }
++
++  @ParameterizedTest
++  @ValueSource(ints = {0, 1, 2, 3})
++  void anInvalidAnswerAtAnyStageIsASummaryFailureAndStopsEverything(int stage) {
++    ScriptedLlm llm = failing(stage, LlmException.Reason.OTHER, null);
++
++    JobFailure failure = failureOf(service(llm), threeChunks());
++
++    assertThat(failure.kind()).isEqualTo(JobFailure.Kind.FAILED);
++    assertThat(failure.getMessage()).isEqualTo(FAILED_MESSAGE);
++    assertThat(failure.getCause()).isInstanceOf(LlmException.class);
++    assertThat(llm.calls).hasSize(stage + 1);
++  }
++
++  @Test
++  void theShortPathMapsFailuresToo() {
++    ScriptedLlm llm = failing(0, LlmException.Reason.CONNECTION, null);
++
++    assertThat(failureOf(service(llm), "hello").kind())
++        .isEqualTo(JobFailure.Kind.SUMMARY_UNREACHABLE);
++  }
++
++  // ---- truncation check ----
++
++  private static long threshold(String system, String user) {
++    long expected = TokenEstimator.requestEstimate(system, user);
++    return (expected + 1) / 2;
++  }
++
++  @Test
++  void theShortPathRejectsOneBelowTheThresholdAndAcceptsTheThreshold() {
++    String text = "x".repeat(100);
++    long threshold = threshold(Prompts.SHORT, text);
++
++    ScriptedLlm below = new ScriptedLlm((i, s, u) -> new LlmReply("- a", threshold - 1));
++    JobFailure failure = failureOf(service(below), text);
++    assertThat(failure.kind()).isEqualTo(JobFailure.Kind.FAILED);
++    assertThat(failure.getMessage()).isEqualTo(FAILED_MESSAGE);
++    assertThat(failure.getCause()).isNull();
++
++    ScriptedLlm at = new ScriptedLlm((i, s, u) -> new LlmReply("- a", threshold));
++    assertThat(service(at).summarize(text)).isEqualTo("• a");
++  }
++
++  @Test
++  void theThresholdRoundsUpForAnOddEstimate() {
++    // estimate(system) + estimate(user) + 32 is odd for this text, so ceil(expected / 2) matters
++    String text = "x".repeat(100);
++    long expected = TokenEstimator.requestEstimate(Prompts.SHORT, text);
++    String odd = expected % 2 == 1 ? text : "x".repeat(103);
++    long oddExpected = TokenEstimator.requestEstimate(Prompts.SHORT, odd);
++    assertThat(oddExpected % 2).isEqualTo(1);
++    long threshold = (oddExpected + 1) / 2;
++
++    ScriptedLlm at = new ScriptedLlm((i, s, u) -> new LlmReply("- a", threshold));
++    ScriptedLlm below = new ScriptedLlm((i, s, u) -> new LlmReply("- a", threshold - 1));
++
++    assertThat(service(at).summarize(odd)).isEqualTo("• a");
++    assertThat(failureOf(service(below), odd).kind()).isEqualTo(JobFailure.Kind.FAILED);
++  }
++
++  @Test
++  void t3sTruncatedExampleIsRejected() {
++    // a prompt of about 4,831 real tokens (the estimate is higher) that Ollama cut to 1,026
++    String text = "word ".repeat(5400).strip();
++    ScriptedLlm llm = new ScriptedLlm((i, s, u) -> new LlmReply("- a", 1026));
++
++    assertThat(failureOf(service(llm), text).kind()).isEqualTo(JobFailure.Kind.FAILED);
++  }
++
++  @Test
++  void aFullCountIsAccepted() {
++    String text = "word ".repeat(5400).strip();
++    ScriptedLlm llm = new ScriptedLlm((i, s, u) -> new LlmReply("- a", 4831));
++
++    assertThat(service(llm).summarize(text)).isEqualTo("• a");
++  }
++
++  @ParameterizedTest
++  @ValueSource(ints = {0, 1, 2, 3})
++  void everyStageChecksItsOwnPromptTokens(int stage) {
++    ScriptedLlm llm =
++        new ScriptedLlm((i, s, u) -> i == stage ? new LlmReply("- a", 1) : valid("- a", s, u));
++
++    JobFailure failure = failureOf(service(llm), threeChunks());
++
++    assertThat(failure.kind()).isEqualTo(JobFailure.Kind.FAILED);
++    assertThat(llm.calls).hasSize(stage + 1);
++  }
++
++  @Test
++  void aMapStageAcceptsItsThresholdAndRejectsOneBelow() {
++    String text = threeChunks();
++    List<String> chunks = TextChunker.split(text, service(always("- a")).maxChunkChars());
++    long threshold = threshold(Prompts.MAP, chunks.get(1));
++
++    ScriptedLlm below =
++        new ScriptedLlm(
++            (i, s, u) -> i == 1 ? new LlmReply("- a", threshold - 1) : valid("- a", s, u));
++    ScriptedLlm at =
++        new ScriptedLlm((i, s, u) -> i == 1 ? new LlmReply("- a", threshold) : valid("- a", s, u));
++
++    assertThat(failureOf(service(below), text).kind()).isEqualTo(JobFailure.Kind.FAILED);
++    assertThat(service(at).summarize(text)).isEqualTo("• a");
++  }
++
++  @Test
++  void aReductionStageAcceptsItsThresholdAndRejectsOneBelow() {
++    String joined = "- a\n\n- a\n\n- a";
++    long threshold = threshold(Prompts.REDUCE_FINAL, joined);
++    String text = threeChunks();
++
++    ScriptedLlm below =
++        new ScriptedLlm(
++            (i, s, u) -> i == 3 ? new LlmReply("- a", threshold - 1) : valid("- a", s, u));
++    ScriptedLlm at =
++        new ScriptedLlm((i, s, u) -> i == 3 ? new LlmReply("- a", threshold) : valid("- a", s, u));
++
++    assertThat(failureOf(service(below), text).kind()).isEqualTo(JobFailure.Kind.FAILED);
++    assertThat(service(at).summarize(text)).isEqualTo("• a");
++  }
++
++  // ---- output ----
++
++  @Test
++  void anAnswerWithoutABulletIsAFailure() {
++    ScriptedLlm llm = always("- \n * ");
++
++    assertThat(failureOf(service(llm), "hello").kind()).isEqualTo(JobFailure.Kind.FAILED);
++  }
++
++  @Test
++  void theFinalAnswerIsCappedAt1500() {
++    ScriptedLlm llm = always("x".repeat(1800));
++
++    assertThat(service(llm).summarize("hello")).hasSize(1500).endsWith("…");
++  }
++}
+diff --git a/src/test/java/com/video2podcast/summary/TextChunkerTest.java b/src/test/java/com/video2podcast/summary/TextChunkerTest.java
+new file mode 100644
+index 0000000..6d6ec4a
+--- /dev/null
++++ b/src/test/java/com/video2podcast/summary/TextChunkerTest.java
+@@ -0,0 +1,127 @@
++package com.video2podcast.summary;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++import java.util.List;
++import org.junit.jupiter.api.Test;
++
++class TextChunkerTest {
++
++  private static String withoutWhitespace(String text) {
++    return text.replaceAll("\\s", "");
++  }
++
++  @Test
++  void textWithinTheLimitIsOneUnchangedChunk() {
++    assertThat(TextChunker.split(" abc def ", 9)).containsExactly(" abc def ");
++    assertThat(TextChunker.split("abc", 10)).containsExactly("abc");
++  }
++
++  @Test
++  void textOneOverTheLimitIsSplit() {
++    assertThat(TextChunker.split("aaaaaaaaaa", 9)).containsExactly("aaaaaaaaa", "a");
++  }
++
++  @Test
++  void cutsAfterTheLastWhitespaceInTheSecondHalfOfTheWindow() {
++    // window "aaa bb cc " is 10 chars; the last whitespace is at index 9
++    List<String> chunks = TextChunker.split("aaa bb cc dddd eeee", 10);
++
++    assertThat(chunks).containsExactly("aaa bb cc", "dddd eeee");
++  }
++
++  @Test
++  void whitespaceRightAfterTheWindowAlsoEndsTheChunk() {
++    List<String> chunks = TextChunker.split("aaaa bbbb cccc", 9);
++
++    assertThat(chunks).containsExactly("aaaa bbbb", "cccc");
++  }
++
++  @Test
++  void whitespaceExactlyAtTheHalfOfTheWindowIsUsed() {
++    // index 5 == maxChars / 2 for maxChars 10
++    assertThat(TextChunker.split("aaaaa bbbbbbbbbbbb", 10))
++        .containsExactly("aaaaa", "bbbbbbbbbb", "bb");
++  }
++
++  @Test
++  void whitespaceBeforeTheHalfOfTheWindowIsIgnored() {
++    // the only whitespace is at index 3 < 5, so the cut is at the limit
++    assertThat(TextChunker.split("aaa bbbbbbbbbbbbbb", 10))
++        .containsExactly("aaa bbbbbb", "bbbbbbbb");
++  }
++
++  @Test
++  void oneLongWordIsCutIntoPiecesOfTheLimit() {
++    assertThat(TextChunker.split("a".repeat(25), 10))
++        .containsExactly("a".repeat(10), "a".repeat(10), "a".repeat(5));
++  }
++
++  @Test
++  void aSurrogatePairIsNotSplit() {
++    String text = "a".repeat(9) + "😀" + "b".repeat(5);
++
++    List<String> chunks = TextChunker.split(text, 10);
++
++    assertThat(chunks).containsExactly("a".repeat(9), "😀" + "b".repeat(5));
++  }
++
++  @Test
++  void aPairIsKeptWhenItEndsExactlyAtTheLimit() {
++    String text = "a".repeat(8) + "😀" + "b".repeat(5);
++
++    assertThat(TextChunker.split(text, 10)).containsExactly("a".repeat(8) + "😀", "b".repeat(5));
++  }
++
++  @Test
++  void aLoneHighSurrogateAtTheLimitIsNotBackedOff() {
++    String text = "a".repeat(9) + "\uD83D" + "b".repeat(5);
++
++    assertThat(TextChunker.split(text, 10))
++        .containsExactly("a".repeat(9) + "\uD83D", "b".repeat(5));
++  }
++
++  @Test
++  void windowOfTwoWithAPairStillMakesProgress() {
++    List<String> chunks = TextChunker.split("😀😀😀", 2);
++
++    assertThat(chunks).containsExactly("😀", "😀", "😀");
++  }
++
++  @Test
++  void aWindowOfOneAlwaysMakesProgress() {
++    assertThat(TextChunker.split("😀", 1)).containsExactly("\uD83D", "\uDE00");
++  }
++
++  @Test
++  void emptyChunksAreDropped() {
++    // after the first cut only whitespace is left in the window
++    List<String> chunks = TextChunker.split("aaaa" + " ".repeat(30) + "bbbb", 8);
++
++    assertThat(chunks).doesNotContain("");
++    assertThat(String.join("", chunks)).isEqualTo("aaaabbbb");
++  }
++
++  @Test
++  void everyChunkFitsAndTheTextIsKeptInOrderWithoutGaps() {
++    StringBuilder builder = new StringBuilder();
++    for (int i = 0; i < 400; i++) {
++      builder.append("word").append(i).append(i % 7 == 0 ? "\n" : " ");
++    }
++    String text = builder.toString();
++
++    List<String> chunks = TextChunker.split(text, 100);
++
++    assertThat(chunks).allSatisfy(chunk -> assertThat(chunk.length()).isLessThanOrEqualTo(100));
++    assertThat(chunks).allSatisfy(chunk -> assertThat(chunk).isEqualTo(chunk.strip()).isNotEmpty());
++    assertThat(withoutWhitespace(String.join("", chunks))).isEqualTo(withoutWhitespace(text));
++    assertThat(chunks.size()).isGreaterThan(4);
++  }
++
++  @Test
++  void theFinalRemainderIsKept() {
++    List<String> chunks = TextChunker.split("aaaa bbbb cc", 9);
++
++    assertThat(chunks).containsExactly("aaaa bbbb", "cc");
++  }
++}
+diff --git a/src/test/java/com/video2podcast/summary/TokenEstimatorTest.java b/src/test/java/com/video2podcast/summary/TokenEstimatorTest.java
+new file mode 100644
+index 0000000..0ad6a23
+--- /dev/null
++++ b/src/test/java/com/video2podcast/summary/TokenEstimatorTest.java
+@@ -0,0 +1,28 @@
++package com.video2podcast.summary;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++import org.junit.jupiter.api.Test;
++
++class TokenEstimatorTest {
++
++  @Test
++  void estimateIsLengthOverThreeRoundedUp() {
++    assertThat(TokenEstimator.estimate("")).isZero();
++    assertThat(TokenEstimator.estimate("a")).isEqualTo(1);
++    assertThat(TokenEstimator.estimate("abc")).isEqualTo(1);
++    assertThat(TokenEstimator.estimate("abcd")).isEqualTo(2);
++    assertThat(TokenEstimator.estimate("a".repeat(300))).isEqualTo(100);
++  }
++
++  @Test
++  void aSupplementaryCharacterCountsAsTwoUtf16Units() {
++    assertThat(TokenEstimator.estimate("😀😀")).isEqualTo(2);
++  }
++
++  @Test
++  void requestEstimateAddsBothTextsAndTheTemplateOverhead() {
++    assertThat(TokenEstimator.requestEstimate("a".repeat(30), "b".repeat(31)))
++        .isEqualTo(10 + 11 + 32);
++  }
++}

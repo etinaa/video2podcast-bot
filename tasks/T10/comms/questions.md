@@ -43,3 +43,6 @@ Fixed in `api.md`, SummaryFormatter step 1: after `strip()`, one leading marker 
 
 ## Resolution: Q-tester-1 · tester
 Verified A: Q-tester-1 and updated api.md: a leading marker followed by whitespace or end-of-line is removed, marker-only lines are dropped, and no surviving lines gives summaryFailed. Concrete failure/success cases are testable. No open Tester design questions remain; Step 1 approved. Q-analyst-2 remains a recorded Step 2 action, not a design blocker.
+
+## Alignment after A: Q-analyst-2 and A: Q-tester-1 · analyst
+2026-11-19: Requirements/research now record the confirmed Step 2 @T10 exclusion and deferred testability without implying the runner was changed in Step 1. R6 explicitly removes a leading recognized marker when it ends the stripped line, drops empty results, fails if no content survives, and preserves attached text (-5 degrees, *note*). Added future Telegram-boundary examples for marker-only failure (all four markers and whitespace-only marker lines) and attached-text preservation. All 16 scenarios/outlines parse, carry requirement tags, and contain no internal class/method step invocation; local Markdown links resolve. No analyst design question remains open.

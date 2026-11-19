@@ -124,7 +124,7 @@ Sizes: S = 1-2 files, M = 3-5 files.
   - Depends on: T3, T8
   - Files: `transcript/TranscriptionClient.java`, `transcript/TranscriptMerger.java`, `job/JobFailure.java` (kinds `NO_SPEECH`, `SERVICE_UNREACHABLE`), `config/AppProperties.java`, `application.yml`, `SPEC.md`, tests
 
-- [~] **T10: Ollama client and map-reduce summary** (M)
+- [x] **T10: Ollama client and map-reduce summary** (M)
   - Acceptance:
     - The `LlmClient` interface has an Ollama implementation that sets `num_ctx` and the model on every request.
     - `SummaryService` splits the transcript into chunks that fit the context, summarizes each chunk, then summarizes the partial summaries. A short transcript is summarized in a single call.

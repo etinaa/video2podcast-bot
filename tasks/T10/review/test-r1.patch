@@ -1,0 +1,14 @@
+diff --git a/src/it/java/com/video2podcast/functional/CucumberIT.java b/src/it/java/com/video2podcast/functional/CucumberIT.java
+index 060bd23..63aeb5a 100644
+--- a/src/it/java/com/video2podcast/functional/CucumberIT.java
++++ b/src/it/java/com/video2podcast/functional/CucumberIT.java
+@@ -18,5 +18,8 @@ import org.junit.platform.suite.api.Suite;
+ // T8 scenarios are deferred to the pipeline wiring in T11.
+ // TD2 scenarios are covered by the Developer-owned JobQueueTest.
+ // T9 component scenarios are deferred until pipeline wiring; no functional steps yet.
+-@ConfigurationParameter(key = FILTER_TAGS_PROPERTY_NAME, value = "not @T8 and not @TD2 and not @T9")
++// T10 summary scenarios are deferred to T11's Telegram trigger and step definitions.
++@ConfigurationParameter(
++    key = FILTER_TAGS_PROPERTY_NAME,
++    value = "not @T8 and not @TD2 and not @T9 and not @T10")
+ public class CucumberIT {}
