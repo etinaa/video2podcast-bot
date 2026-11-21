@@ -170,13 +170,15 @@ Sizes: S = 1-2 files, M = 3-5 files.
   - Depends on: T11, T12
   - Files: `media/AudioPreparer.java`, `media/FfmpegRunner.java`, `bot/DeliveryCallbackHandler.java`, `job/DeliveryService.java`, tests
 
-- [ ] **T14: Retention sweeper and restart recovery** (M)
+- [~] **T14: Retention sweeper and restart recovery** (M)
   - Acceptance:
     - A `@Scheduled` sweeper (every minute) and a run at startup delete files whose `expiresAt` has passed and mark them `EXPIRED`. A job directory is removed when every file is `SENT` or `EXPIRED`, or when its retention is over. Failed jobs are removed immediately.
+    - A job directory that has a file in `SENDING` is never swept (a tap granted before expiry finishes, T12/T13 rule).
+    - A job directory is removed by age only when the job is no longer being processed (`DONE` or `FAILED`); a job still processing is left to startup recovery.
     - At startup, `SENDING` files go back to `AVAILABLE`, and directories with a missing or corrupt `job.json` are removed.
-    - After expiry the summary message buttons are replaced with "expired" (best effort).
+    - After expiry the summary message buttons are replaced with "Audio expired" / "Transcript expired" (best effort, labels as in T12). A file already sent keeps its "sent" label.
     - Functional test `ExpiryIT`: after the retention time the files are gone and a tap gets "expired"; a restart between the summary and the tap keeps the buttons working.
-  - Verify: `./mvnw test -Dtest=RetentionSweeperTest` with a fake clock and a temp directory: expiry, partial delivery, all delivered, `SENDING` recovery, corrupt `job.json`.
+  - Verify: `./mvnw test -Dtest=RetentionSweeperTest` with a fake clock and a temp directory: expiry, partial delivery, all delivered, `SENDING` recovery, corrupt `job.json`, a directory with `SENDING` is kept.
   - Depends on: T7, T12, T13
   - Files: `job/RetentionSweeper.java`, `job/JobRecovery.java`, `bot/Keyboards.java`, tests
 

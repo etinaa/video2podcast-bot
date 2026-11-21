@@ -1,0 +1,54 @@
+# T14 research — Retention and restart recovery
+
+Researched/accessed: 2026-11-21. No live Telegram uploads or model calls were made. Repository decisions below define product behavior; upstream documentation only establishes the available protocol/lifecycle mechanisms.
+
+## Official sources
+
+| Source | Fact taken | Application to T14 | Access date |
+|---|---|---|---|
+| [Spring scheduling reference](https://docs.spring.io/spring-framework/reference/integration/scheduling.html#scheduling-annotation-support-scheduled) | Scheduling needs annotation support enabled. Fixed delay measures from prior completion; fixed rate measures successive starts. Multiple registrations may overlap. | Register minute cleanup once and coordinate overlapping cleanup/callback/startup work. The Architect chooses the concrete schedule/lifecycle mechanism; a fake expiry clock alone does not fire a wall-clock scheduler. | 2026-11-21 |
+| [Spring Boot 4.1 application runners](https://docs.spring.io/spring-boot/4.1/reference/features/spring-application.html#features.spring-application.command-line-runner) | Runners execute before SpringApplication.run completes; runners can be ordered. | There is a supported startup hook for recovery followed by initial cleanup. Actual ordering relative to this bot's polling must be established explicitly rather than assumed from the hook name. | 2026-11-21 |
+| [Telegram editMessageReplyMarkup](https://core.telegram.org/bots/api#editmessagereplymarkup) | This endpoint edits reply markup alone; chat_id/message_id identify ordinary messages. | Use stored targets to update labels without rewriting summary text. Telegram rejection must not determine filesystem expiry. | 2026-11-21 |
+| [Telegram InlineKeyboardButton](https://core.telegram.org/bots/api#inlinekeyboardbutton) | callback_data is limited to 1–64 bytes. | Retain the existing audio/transcript job-id callback values when showing expired/sent labels. | 2026-11-21 |
+| [Telegram CallbackQuery](https://core.telegram.org/bots/api#callbackquery) | Callback data can arrive independently of the current message's button data. | Durable job/file state and the original deadlines enforce refusal; a label edit alone cannot protect expired files. | 2026-11-21 |
+
+The unversioned Spring Framework reference currently identifies itself as 7.1.0; Boot's 4.1 reference currently identifies itself as 4.1.3. The project remains pinned to Boot 4.1.2. These sources document existing scheduling/runner semantics, not a request to upgrade dependencies. The Developer should check concrete API wiring against the pinned classpath.
+
+## Repository evidence
+
+| Source | Fact taken and implication | Read date |
+|---|---|---|
+| [SPEC.md](../../SPEC.md), [plan.md](../plan.md), T14 in [todo.md](../todo.md), [brief.md](brief.md) | One-hour default retention starts after summary publication. Delete failed/all-delivered/expired work; recover sends at startup. The owner explicitly confirmed whole-directory SENDING protection, terminal-only runtime age cleanup, and T12 expired/sent labels. | 2026-11-21 |
+| [JobRecord.java](../../src/main/java/com/video2podcast/job/JobRecord.java), [JobFile.java](../../src/main/java/com/video2podcast/job/JobFile.java) | Published records contain summaryMessageId and per-file expiresAt; no top-level job lifecycle state currently exists. Per-file deadlines must not be recomputed from createdAt. | 2026-11-21 |
+| [PipelineService.java](../../src/main/java/com/video2podcast/job/PipelineService.java) | A working directory exists during media/model work, but job.json is created only just before summary publication. Failure already attempts immediate directory deletion. | 2026-11-21 |
+| [JobStore.java](../../src/main/java/com/video2podcast/job/JobStore.java) | Changes use per-job locks and atomic persistence. Existing read validation treats missing/invalid/unusable records as absent, while real I/O failure throws. Recursive discard deletes contents. | 2026-11-21 |
+| [FileState.java](../../src/main/java/com/video2podcast/job/FileState.java), [DeliveryService.java](../../src/main/java/com/video2podcast/job/DeliveryService.java) | AVAILABLE → SENDING → SENT; failed/recovered sends may return to AVAILABLE. AVAILABLE can expire; SENT and EXPIRED are terminal. Claims check stored timestamps inclusively; SENDING/SENT precedence prevents a later deadline check undoing a granted send. | 2026-11-21 |
+| [T12 requirements](../T12/requirements.md), [T13 requirements](../T13/requirements.md), [decisions D11/D12](../../docs/decisions.md) | Delivery targets durable chat/message ids; keyboard-only edits; agreed labels/refusals. Audio claims occur before queue work, so SENDING protection must include queued preparation. Ambiguous successful uploads can remain SENDING at crash. | 2026-11-21 |
+| [whoami.feature](../../src/features/whoami.feature), [T12 feature](../../src/features/T12-transcript-button.feature), [T13 feature](../../src/features/T13-audio-button.feature) | Acceptance enters through Telegram updates and observes HTTP/files. Existing reusable steps set clocks, write disk records and hold external replies. | 2026-11-21 |
+| [Analyst role](../../.claude/roles/analyst.md), [common rules](../../.claude/roles/common.md), [CLAUDE.md](../../CLAUDE.md) | Analyst owns requirements/research/features and comms only, with append-only questions. The orchestrator commits; Tester writes functional code; Developer writes unit tests. | 2026-11-21 |
+
+## Findings and design questions
+
+1. **Runtime missing metadata is not corruption evidence.** The existing pipeline intentionally lacks job.json during download/transcription. Startup can discard such orphan directories because no prior processing survives a process restart; periodic cleanup must not apply that startup rule to live work. Held external-response scenarios cover this distinction without naming an internal service.
+2. **Job lifecycle uses the existing record.** [A: Q-analyst-1](comms/questions.md) resolves the original gap: a published record with deadlines is DONE; no usable record or a null publication deadline is left alone at runtime. FAILED is discarded immediately by the existing pipeline. Startup removes unusable records, resets SENDING and expires AVAILABLE entries with null/due deadlines. There is no new persisted status or automatic replay.
+3. **Each deadline is independent.** [A: Q-analyst-2](comms/questions.md) confirms no createdAt/mtime age fallback and no fresh window at restart. Null deadlines never expire at runtime; at startup they do. An explicitly future sibling deadline stays valid. Normal publication stores identical deadlines. Any SENDING protects the whole directory at runtime.
+4. **Whole-directory SENDING protection matters.** Expiring only the sibling while audio is queued would violate the confirmed brief. Scenarios hold an upload or earlier Whisper request and let scheduled time pass; assertions check both entries and files remain until the claim resolves.
+5. **Recovery permits explicit retry, not exactly-once delivery across crashes.** Resetting SENDING cannot establish whether Telegram received an upload before a crash. Preserve SENT, never auto-upload during recovery, and document the possible duplicate after a fresh tap on a recovered interrupted upload.
+6. **Expired labels must be captured before deleting metadata.** A mixed SENT/AVAILABLE record at expiry needs a sent/expired keyboard even if the whole directory is removed. A rejected edit must not retain local files or prevent another job's cleanup. No tombstone is required; later callbacks to a removed directory return the existing expired notice.
+7. **Acceptance tests need real lifecycle boundaries.** Restart means starting a fresh application context against the same work directory/access store and external mocks; fixtures are prepared before its startup pass. Minute steps exercise the registered scheduling boundary, not a call to RetentionSweeper or JobRecovery. The Tester may use a controllable scheduler harness, but must separately demonstrate production registration and must not mistake fake Clock advancement for firing a scheduler. Deterministic low-level lock/I/O cases stay in Developer unit tests.
+8. **Existing immediate-after-send assertions need isolation.** T12/T13 intentionally kept files for the future T14 slice. Their assertions remain valid before the next cleanup pass. Tester must control scheduled ticks rather than weaken T14 cleanup or race those existing checks.
+
+## Validation and handoff
+
+Artifacts: [requirements.md](requirements.md) and [T14-retention.feature](../../src/features/T14-retention.feature). Static validation results are recorded below after checks. No Maven build, unit test, functional test or mutation run is claimed by the Analyst. Both architecture questions are answered in the append-only log; requirements and scenarios incorporate their contracts.
+
+Validation result (2026-11-21): installed GherkinParser 42.0.1 parsed/compiled 25 scenarios/outlines into 41 concrete scenarios; every concrete scenario has a local requirement tag. Static checks found 9 requirement ids (R1–R9), valid scenario references to R1–R8 (R9 covers execution/gates), valid local Markdown link targets, and 179 steps without calls to named cleanup/recovery services. `git diff --check -- tasks/T14 src/features/T14-retention.feature` passed. Production behavior and step automation remain for Developer/Tester validation.
+
+
+## Architecture alignment — 2026-11-21
+
+Read the Architect's [components.md](components.md), [data-flow.md](data-flow.md), [flows.md](flows.md), [api.md](api.md) and answers A: Q-analyst-1/2. Added acceptance cases for runtime null deadlines, startup null-deadline AVAILABLE/SENDING records, mixed null/future deadlines and directories outside the job-id naming contract. Added recovered keyboard observations; an unexpired reset refreshes its available label while preserving a sent sibling. Expiry edits and recovery refreshes use the existing labels and stored targets.
+
+The implementation contract uses fixed delay with default `JOB_SWEEP_INTERVAL=PT1M`, and allows functional tests to set e.g. `PT1S`; this changes scheduling frequency, not retention. Startup runs through bean initialization before polling, with scheduling initially delayed one interval. Requirements demand that ordering be verified against real application wiring. The earlier application-runner research remains a possible framework mechanism, not the chosen architecture.
+
+Alignment validation result (2026-11-21, supersedes draft counts above): 29 scenario definitions compile into 46 concrete scenarios, each with valid local requirement tags. All local Markdown links and 202 external-boundary steps pass static checks; scoped `git diff --check` passes. No Maven or executable acceptance tests were run by Analyst. No open owner or architecture question remains for this handoff.
