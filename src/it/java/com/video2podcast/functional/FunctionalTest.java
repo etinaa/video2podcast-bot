@@ -80,6 +80,8 @@ abstract class FunctionalTest {
         directory.resolve("allowed-users.json").toString(),
         "app.jobs.work-dir",
         directory.resolve("work").toString(),
+        "app.jobs.sweep-interval",
+        "P1D",
         "spring.autoconfigure.exclude",
         "org.telegram.telegrambots.longpolling.starter.TelegramBotStarterConfiguration");
   }

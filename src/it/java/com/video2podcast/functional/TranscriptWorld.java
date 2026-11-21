@@ -49,7 +49,8 @@ public class TranscriptWorld implements AutoCloseable {
   ConfigurableApplicationContext context;
   Path root, dir, sentinel;
   AudioSupport audio;
-  boolean active, hold, drop, rejectAnswer;
+  RetentionSupport retention;
+  boolean active, hold, drop, rejectAnswer, persistedStartup;
   int rejectUpload, rejectEdit, tapStart;
   long user = 101, admin = 999;
   String originalTitle = "Budget meeting";
@@ -100,6 +101,12 @@ public class TranscriptWorld implements AutoCloseable {
     audio = new AudioSupport(this);
   }
 
+  @Before(value = "@T14", order = 10)
+  public void beginRetention() throws Exception {
+    beginAudio();
+    retention = new RetentionSupport(this);
+  }
+
   void start() {
     assertThat(active)
         .as("retained-job scenario is active before starting its application")
@@ -112,27 +119,53 @@ public class TranscriptWorld implements AutoCloseable {
     props.put("app.telegram.admin-user-id", Long.toString(admin));
     props.put("spring.main.banner-mode", "off");
     props.put("logging.level.root", "WARN");
+    props.put("app.jobs.sweep-interval", retention == null ? "P1D" : "PT0.1S");
+    // T12/T13 describe callbacks against runtime records, including active SENDING claims.
+    // Install those fixtures after startup recovery; T14 explicitly exercises persisted startup.
+    Path staged = root.resolve("runtime-job");
+    if (retention == null && !persistedStartup && Files.exists(dir)) {
+      try {
+        Files.move(dir, staged);
+      } catch (java.io.IOException e) {
+        throw new IllegalStateException(e);
+      }
+    }
     // Initializer registers only boundary fixtures, leaving all delivery wiring real.
+    var builder = new SpringApplicationBuilder(Video2PodcastApplication.class, Fixtures.class);
+    if (retention != null) builder.sources(RetentionSupport.Scheduling.class);
     context =
-        new SpringApplicationBuilder(Video2PodcastApplication.class, Fixtures.class)
+        builder
             .initializers(c -> {
               c.getBeanFactory().registerSingleton("transcriptFixtureClock", clock);
+              if (retention != null)
+                c.getBeanFactory().registerSingleton("retentionSchedule", retention.schedule);
               ProcessRunner runner =
-                  audio == null
-                      ? (command, timeout) -> {
-                        throw new AssertionError(
-                            "Transcript tap invoked a media process: " + command);
-                      }
-                      : audio::run;
+                  retention != null
+                      ? retention::run
+                      : audio == null
+                          ? (command, timeout) -> {
+                            throw new AssertionError(
+                                "Transcript tap invoked a media process: " + command);
+                          }
+                          : audio::run;
               c.getBeanFactory().registerSingleton("retainedFixtureProcesses", runner);
             })
             .run(
                 props.entrySet().stream()
                     .map(e -> "--" + e.getKey() + "=" + e.getValue())
                     .toArray(String[]::new));
-    for (long id : allowed) bot().consume(Updates.privateMessage(admin, "/allow " + id));
-    events.clear();
-    telegram.resetRequests();
+    if (retention == null && !persistedStartup && Files.exists(staged)) {
+      try {
+        Files.move(staged, dir);
+      } catch (java.io.IOException e) {
+        throw new IllegalStateException(e);
+      }
+    }
+    if (retention == null || !retention.restarting) {
+      for (long id : allowed) bot().consume(Updates.privateMessage(admin, "/allow " + id));
+      events.clear();
+      telegram.resetRequests();
+    }
   }
 
   TelegramBot bot() {
@@ -195,6 +228,8 @@ public class TranscriptWorld implements AutoCloseable {
         .put("id", chat)
         .put("type", type);
     Update update = PipelineWorld.JSON.treeToValue(node, Update.class);
+    if (retention != null)
+      retention.uploadMethod = data.startsWith("audio:") ? "sendaudio" : "senddocument";
     boolean awaitFirstUpload = hold && releaseUpload.getCount() != 0 && pending.isEmpty();
     Future<?> task = updates.submit(() -> bot().consume(update));
     pending.add(task);
@@ -209,7 +244,8 @@ public class TranscriptWorld implements AutoCloseable {
   void finishUpload() throws Exception {
     releaseUpload.countDown();
     for (Future<?> task : pending) task.get(WAIT.toMillis(), TimeUnit.MILLISECONDS);
-    if (audio != null) audio.awaitDelivery();
+    if (retention != null) retention.awaitUpload();
+    else if (audio != null) audio.awaitDelivery();
   }
 
   List<Call> calls(String method) {
@@ -279,10 +315,11 @@ public class TranscriptWorld implements AutoCloseable {
     assertThat(r.getPart("caption")).isNull();
   }
 
-  @After(value = "@T12 or @T13", order = 100)
+  @After(value = "@T12 or @T13 or @T14", order = 100)
   public void close() {
     active = false;
     releaseUpload.countDown();
+    if (retention != null) retention.releaseDownload.countDown();
     if (audio != null) audio.releaseWhisper.countDown();
     updates.shutdown();
     try {
@@ -348,7 +385,10 @@ public class TranscriptWorld implements AutoCloseable {
         persisted = null;
       }
       events.add(new Call(method, request, persisted));
-      if (method.equals(audio == null ? "senddocument" : "sendaudio")) {
+      if (method.equals(
+          retention != null
+              ? retention.uploadMethod
+              : audio == null ? "senddocument" : "sendaudio")) {
         int attempt = uploads.incrementAndGet();
         uploadReceived.countDown();
         if (hold)
@@ -365,6 +405,10 @@ public class TranscriptWorld implements AutoCloseable {
         if (audio == null) clock.now = clock.instant().plusSeconds(1);
         uploadSuccess = clock.instant();
       }
+      if (retention != null
+          && method.equals("editmessagereplymarkup")
+          && PipelineWorld.json(request.getBodyAsString()).path("message_id").asInt()
+              == retention.rejectMessage) return rejected();
       if (method.equals("answercallbackquery") && rejectAnswer) return rejected();
       if (method.equals("editmessagereplymarkup") && edits.incrementAndGet() == rejectEdit)
         return rejected();

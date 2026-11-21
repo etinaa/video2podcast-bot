@@ -14,6 +14,7 @@ import java.util.stream.*;
 /** External boundary assertions for media and transcription. */
 public class MediaAssertionSteps {
   final PipelineWorld w;
+  @org.springframework.beans.factory.annotation.Autowired private TranscriptWorld retained;
 
   public MediaAssertionSteps(PipelineWorld world) {
     w = world;
@@ -375,6 +376,10 @@ public class MediaAssertionSteps {
 
   @Then("{string} does not exist in the job directory")
   public void missingFile(String file) {
+    if (retained != null && retained.active) {
+      assertThat(retained.dir.resolve(file)).doesNotExist();
+      return;
+    }
     PipelineWorld.until(() -> assertThat(w.job().resolve(file)).doesNotExist());
   }
 

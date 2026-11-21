@@ -266,10 +266,12 @@ final class AudioSupport implements AutoCloseable {
             .willReturn(aResponse().withHeader("Content-Type", "audio/mp4").withBody(bytes)));
     w.allowed.add(202L);
     w.start();
+    if (w.retention != null) w.bot().consume(Updates.privateMessage(w.admin, "/allow 202"));
     w.bot().consume(Updates.privateMessage(202, "http://videos.example/earlier"));
     assertThat(whisperReceived.await(30, TimeUnit.SECONDS))
         .as("earlier job reached Whisper")
         .isTrue();
+    if (w.retention != null) w.retention.captureLive();
   }
 
   void releaseEarlier() {

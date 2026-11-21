@@ -204,6 +204,7 @@ public class TranscriptSetupSteps {
   @Given("the application starts with the existing job directory")
   public void startup() {
     assertThat(w.context).isNull();
+    w.persistedStartup = true;
     w.start();
   }
 
