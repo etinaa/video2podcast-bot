@@ -26,7 +26,8 @@ class YtDlpClientTest {
           Duration.ofHours(1),
           Duration.ofMinutes(1),
           Duration.ofMinutes(30),
-          Duration.ofMinutes(20));
+          Duration.ofMinutes(20),
+          Duration.ofMinutes(1));
 
   @TempDir Path dir;
 
@@ -79,7 +80,8 @@ class YtDlpClientTest {
           Duration.ofHours(1),
           Duration.ofSeconds(7),
           Duration.ofSeconds(11),
-          Duration.ofSeconds(13));
+          Duration.ofSeconds(13),
+          Duration.ofMinutes(1));
 
   @Test
   void configuredLimitAndTimeoutsAreUsed() {

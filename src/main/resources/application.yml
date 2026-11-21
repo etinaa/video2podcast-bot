@@ -26,3 +26,4 @@ app:
     metadata-timeout: ${METADATA_TIMEOUT:PT1M}
     download-timeout: ${DOWNLOAD_TIMEOUT:PT30M}
     ffmpeg-timeout: ${FFMPEG_TIMEOUT:PT30M}
+    sweep-interval: ${JOB_SWEEP_INTERVAL:PT1M}

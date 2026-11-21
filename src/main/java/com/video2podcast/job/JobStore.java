@@ -6,10 +6,12 @@ import com.video2podcast.storage.Json;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -44,6 +46,32 @@ public class JobStore {
     STATE_MISMATCH,
     /** There is no such job or the job has no such file. */
     NOT_FOUND
+  }
+
+  /** What {@link #recover} did to one job. */
+  public enum Recovery {
+    REMOVED,
+    RESET,
+    UNCHANGED
+  }
+
+  /** Result of {@link #recover}. {@code job} is the stored job after a RESET, otherwise null. */
+  public record Recovered(Recovery recovery, JobRecord job) {}
+
+  /**
+   * Result of {@link #sweep}. {@code job} is the job after the change (null when there was no
+   * usable job.json or the job was kept untouched with a SENDING file); {@code expired} lists files
+   * this call moved to EXPIRED; {@code removed} is true when the directory is gone.
+   */
+  public record Swept(JobRecord job, List<FileKind> expired, boolean removed) {
+
+    public Swept {
+      expired = List.copyOf(expired);
+    }
+
+    public static Swept none() {
+      return new Swept(null, List.of(), false);
+    }
   }
 
   private final Path workDir;
@@ -177,7 +205,7 @@ public class JobStore {
     }
     try (Stream<Path> children = Files.list(workDir)) {
       return children
-          .filter(Files::isDirectory)
+          .filter(path -> Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS))
           .map(path -> String.valueOf(path.getFileName()))
           .filter(name -> JOB_ID.matcher(name).matches())
           .toList();
@@ -186,14 +214,113 @@ public class JobStore {
     }
   }
 
-  /** Deletes the job directory with everything in it. Deleting a missing job does nothing. */
+  /**
+   * Startup only. Under the job lock: if there is no usable job.json, deletes the whole directory;
+   * else moves every SENDING file back to AVAILABLE and saves. Expiry dates and sentAt stay as they
+   * were, and no file is recreated.
+   *
+   * @throws JobStoreException on an I/O error
+   */
+  public Recovered recover(String jobId) {
+    return withLock(
+        jobId,
+        () -> {
+          Optional<JobRecord> stored = read(jobId);
+          if (stored.isEmpty()) {
+            deleteRecursively(directory(jobId));
+            return new Recovered(Recovery.REMOVED, null);
+          }
+          JobRecord job = stored.get();
+          boolean interrupted = false;
+          for (Map.Entry<FileKind, JobFile> entry : job.files().entrySet()) {
+            JobFile file = entry.getValue();
+            if (file.state() == FileState.SENDING) {
+              job = job.withFile(entry.getKey(), file.moveTo(FileState.AVAILABLE, file.sentAt()));
+              interrupted = true;
+            }
+          }
+          if (!interrupted) {
+            return new Recovered(Recovery.UNCHANGED, null);
+          }
+          save(job);
+          return new Recovered(Recovery.RESET, job);
+        });
+  }
+
+  /**
+   * Expires the files whose deadline has come and removes the directory once nothing is left to
+   * download. A job with a SENDING file, or without a usable job.json, is left alone. A file
+   * without a deadline expires only when {@code atStartup}.
+   *
+   * @throws JobStoreException on an I/O error; the stored state stays consistent for a retry
+   */
+  public Swept sweep(String jobId, Instant now, boolean atStartup) {
+    return withLock(
+        jobId,
+        () -> {
+          Optional<JobRecord> stored = read(jobId);
+          if (stored.isEmpty() || hasSendingFile(stored.get())) {
+            return Swept.none();
+          }
+          JobRecord job = stored.get();
+          List<FileKind> expired = new ArrayList<>();
+          for (Map.Entry<FileKind, JobFile> entry : job.files().entrySet()) {
+            JobFile file = entry.getValue();
+            if (file.state() == FileState.AVAILABLE && isDue(file, now, atStartup)) {
+              deleteFile(resolve(jobId, file));
+              job = job.withFile(entry.getKey(), file.moveTo(FileState.EXPIRED, file.sentAt()));
+              expired.add(entry.getKey());
+            }
+          }
+          if (isFinished(job)) {
+            deleteRecursively(directory(jobId));
+            return new Swept(job, expired, true);
+          }
+          if (!expired.isEmpty()) {
+            save(job);
+          }
+          return new Swept(job, expired, false);
+        });
+  }
+
+  private static boolean hasSendingFile(JobRecord job) {
+    return job.files().values().stream().anyMatch(file -> file.state() == FileState.SENDING);
+  }
+
+  private static boolean isDue(JobFile file, Instant now, boolean atStartup) {
+    return file.expiresAt() == null ? atStartup : !now.isBefore(file.expiresAt());
+  }
+
+  private static boolean isFinished(JobRecord job) {
+    return !job.files().isEmpty()
+        && job.files().values().stream()
+            .allMatch(file -> file.state() == FileState.SENT || file.state() == FileState.EXPIRED);
+  }
+
+  /** A failure after the first file leaves it AVAILABLE but gone; the next pass finishes it. */
+  private static void deleteFile(Path file) {
+    try {
+      Files.deleteIfExists(file);
+    } catch (IOException e) {
+      throw new JobStoreException("Cannot delete " + file, e);
+    }
+  }
+
+  /**
+   * Deletes the job directory with everything in it, {@code job.json} last, so a failure in the
+   * middle leaves the job known and the next pass retries. Deleting a missing job does nothing.
+   */
   public void discard(String jobId) {
     Path dir = directory(jobId);
     withLock(jobId, () -> deleteRecursively(dir));
   }
 
   private Optional<JobRecord> read(String jobId) {
-    Path file = directory(jobId).resolve(JOB_FILE);
+    Path dir = directory(jobId);
+    if (Files.isSymbolicLink(dir)) {
+      return Optional.empty();
+    }
+    Path file = dir.resolve(JOB_FILE);
     try {
       JobRecord job = Json.MAPPER.readValue(Files.readAllBytes(file), JobRecord.class);
       if (isUsable(job, jobId)) {
@@ -246,18 +373,33 @@ public class JobStore {
     if (!Files.exists(dir)) {
       return;
     }
+    try {
+      if (Files.isSymbolicLink(dir)) {
+        // Only the link goes, never what it points to.
+        Files.delete(dir);
+        return;
+      }
+    } catch (IOException e) {
+      throw new JobStoreException("Cannot delete " + dir, e);
+    }
+    Path jobFile = dir.resolve(JOB_FILE);
     try (Stream<Path> paths = Files.walk(dir)) {
       paths
           .sorted(Comparator.reverseOrder())
-          .forEach(path -> {
-            try {
-              Files.deleteIfExists(path);
-            } catch (IOException e) {
-              throw new UncheckedIOException(e);
-            }
-          });
+          .filter(path -> !path.equals(dir) && !path.equals(jobFile))
+          .forEach(JobStore::deleteUnchecked);
+      Files.deleteIfExists(jobFile);
+      Files.deleteIfExists(dir);
     } catch (IOException | UncheckedIOException e) {
       throw new JobStoreException("Cannot delete " + dir, e);
+    }
+  }
+
+  private static void deleteUnchecked(Path path) {
+    try {
+      Files.deleteIfExists(path);
+    } catch (IOException e) {
+      throw new UncheckedIOException(e);
     }
   }
 

@@ -28,7 +28,8 @@ class MediaConfigTest {
             Duration.ofHours(1),
             Duration.ofMinutes(1),
             Duration.ofMinutes(30),
-            Duration.ofMinutes(30)));
+            Duration.ofMinutes(30),
+            Duration.ofMinutes(1)));
   }
 
   private ApplicationContextRunner runner() {

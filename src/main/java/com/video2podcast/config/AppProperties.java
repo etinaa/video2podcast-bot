@@ -28,5 +28,6 @@ public record AppProperties(
       Duration retention,
       Duration metadataTimeout,
       Duration downloadTimeout,
-      Duration ffmpegTimeout) {}
+      Duration ffmpegTimeout,
+      Duration sweepInterval) {}
 }

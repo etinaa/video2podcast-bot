@@ -12,6 +12,7 @@ import org.springframework.boot.ApplicationRunner;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.DependsOn;
 import org.telegram.telegrambots.client.okhttp.OkHttpTelegramClient;
 import org.telegram.telegrambots.meta.generics.TelegramClient;
 
@@ -53,7 +54,12 @@ public class TelegramConfig {
     return args -> handler.resendPendingNotifications();
   }
 
+  /**
+   * Depends on the sweeper so its startup recovery has finished before the long-polling starter
+   * registers the bot and the first update arrives.
+   */
   @Bean
+  @DependsOn("retentionSweeper")
   TelegramBot telegramBot(AppProperties props, BotUpdateHandler handler) {
     return new TelegramBot(requireToken(props), handler);
   }

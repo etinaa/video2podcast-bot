@@ -1,9 +1,11 @@
 package com.video2podcast.config;
 
 import com.video2podcast.bot.DeliveryCallbackHandler;
+import com.video2podcast.bot.SummaryButtonRefresher;
 import com.video2podcast.bot.SummaryMessagePublisher;
 import com.video2podcast.bot.TelegramGateway;
 import com.video2podcast.bot.UrlMessageHandler;
+import com.video2podcast.job.ButtonRefresher;
 import com.video2podcast.job.DeliveryService;
 import com.video2podcast.job.JobQueue;
 import com.video2podcast.job.JobStore;
@@ -32,6 +34,11 @@ public class PipelineConfig {
   @Bean
   SummaryPublisher summaryPublisher(TelegramGateway gateway) {
     return new SummaryMessagePublisher(gateway);
+  }
+
+  @Bean
+  ButtonRefresher summaryButtonRefresher(TelegramGateway gateway) {
+    return new SummaryButtonRefresher(gateway);
   }
 
   @Bean

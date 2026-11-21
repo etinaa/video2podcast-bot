@@ -6,6 +6,7 @@ import static org.mockito.Mockito.mock;
 import com.video2podcast.bot.DeliveryCallbackHandler;
 import com.video2podcast.bot.TelegramGateway;
 import com.video2podcast.bot.UrlMessageHandler;
+import com.video2podcast.job.ButtonRefresher;
 import com.video2podcast.job.DeliveryService;
 import com.video2podcast.job.JobQueue;
 import com.video2podcast.job.JobStore;
@@ -37,7 +38,8 @@ class PipelineConfigTest {
             Duration.ofHours(1),
             Duration.ofMinutes(1),
             Duration.ofMinutes(30),
-            Duration.ofMinutes(30)));
+            Duration.ofMinutes(30),
+            Duration.ofMinutes(1)));
   }
 
   private ApplicationContextRunner runner(boolean enabled) {
@@ -63,6 +65,7 @@ class PipelineConfigTest {
         .run(context -> {
           assertThat(context).hasSingleBean(SummaryPublisher.class);
           assertThat(context).hasSingleBean(PipelineService.class);
+          assertThat(context).hasSingleBean(ButtonRefresher.class);
           assertThat(context).hasSingleBean(UrlMessageHandler.class);
           assertThat(context).hasSingleBean(DeliveryService.class);
           assertThat(context).hasSingleBean(DeliveryCallbackHandler.class);
@@ -78,6 +81,7 @@ class PipelineConfigTest {
         .run(context -> {
           assertThat(context).doesNotHaveBean(SummaryPublisher.class);
           assertThat(context).doesNotHaveBean(PipelineService.class);
+          assertThat(context).doesNotHaveBean(ButtonRefresher.class);
           assertThat(context).doesNotHaveBean(UrlMessageHandler.class);
           assertThat(context).doesNotHaveBean(DeliveryService.class);
           assertThat(context).doesNotHaveBean(DeliveryCallbackHandler.class);

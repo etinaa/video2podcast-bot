@@ -44,7 +44,8 @@ class PipelineServiceTest {
           RETENTION,
           Duration.ofMinutes(1),
           Duration.ofMinutes(30),
-          Duration.ofMinutes(20));
+          Duration.ofMinutes(20),
+          Duration.ofMinutes(1));
   private static final JobRequest REQUEST = new JobRequest(JOB_ID, 7, 555, URL, CREATED);
 
   @TempDir Path work;

@@ -24,7 +24,8 @@ class FfmpegRunnerTest {
           Duration.ofHours(1),
           Duration.ofMinutes(1),
           Duration.ofMinutes(30),
-          Duration.ofMinutes(20));
+          Duration.ofMinutes(20),
+          Duration.ofMinutes(1));
 
   @TempDir Path dir;
 
