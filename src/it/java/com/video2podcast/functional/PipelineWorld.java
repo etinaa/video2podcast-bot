@@ -380,6 +380,10 @@ public class PipelineWorld implements AutoCloseable {
   }
 
   Event latestTerminal() {
+    return latestStatus(Set.of("Done.", "Failed."));
+  }
+
+  Event latestStatus(Set<String> statuses) {
     List<Event> queued =
         calls("sendMessage").stream()
             .filter(e -> e.nanos >= lastUpdateNanos && e.text().startsWith("Queued:"))
@@ -394,7 +398,7 @@ public class PipelineWorld implements AutoCloseable {
             e.nanos >= submission.nanos
                 && e.json().path("chat_id").asLong() == chat
                 && e.json().path("message_id").asInt() == messageId
-                && Set.of("Done.", "Failed.").contains(e.text()))
+                && statuses.contains(e.text()))
         .reduce((previous, current) -> current)
         .orElse(null);
   }
@@ -416,10 +420,16 @@ public class PipelineWorld implements AutoCloseable {
 
   void transcriptionSettled() {
     until(() ->
-        assertThat(
-                !service("ollama").isEmpty()
-                    || calls("editMessageText").stream().anyMatch(e -> e.text().equals("Failed.")))
+        assertThat(transcriptionHasSettled())
+            .as(
+                "transcription outcome for %s at %s; Telegram replies: %s",
+                lastUrl, whisper.baseUrl(), calls("sendMessage").stream().map(Event::text).toList())
             .isTrue());
+  }
+
+  boolean transcriptionHasSettled() {
+    // Summarizing is emitted only after transcription has persisted and removed temporary audio.
+    return latestStatus(Set.of("Summarizing…", "Done.", "Failed.")) != null;
   }
 
   void noUploads() {
@@ -590,6 +600,10 @@ public class PipelineWorld implements AutoCloseable {
       context.close();
       context = null;
     }
+    List<Map<String, Object>> whisperTimings =
+        whisper == null
+            ? List.of()
+            : whisper.getAllServeEvents().stream().map(PipelineWorld::whisperTiming).toList();
     for (var s : Arrays.asList(telegram, whisper, ollama, proxy)) if (s != null) s.stop();
     if (root != null)
       try {
@@ -606,10 +620,24 @@ public class PipelineWorld implements AutoCloseable {
                             : e.service.equals("whisper") ? e.chunk() : ""))
                 .collect(Collectors.joining("\n")));
         Files.writeString(root.resolve("settings.json"), stringify(properties));
+        Files.writeString(root.resolve("whisper-timings.json"), stringify(whisperTimings));
       } catch (IOException e) {
         throw new UncheckedIOException(e);
       }
     active = false;
+  }
+
+  private static Map<String, Object> whisperTiming(ServeEvent serve) {
+    Map<String, Object> timing = new LinkedHashMap<>();
+    timing.put("receivedAt", serve.getRequest().getLoggedDateString());
+    timing.put("requestBytes", serve.getRequest().getBody().length);
+    timing.put("status", serve.getResponseDefinition().getStatus());
+    timing.put("configuredDelayMillis", serve.getResponseDefinition().getFixedDelayMilliseconds());
+    timing.put("addedDelayMillis", serve.getTiming().getAddedDelay());
+    timing.put("processMillis", serve.getTiming().getProcessTime());
+    timing.put("responseSendMillis", serve.getTiming().getResponseSendTime());
+    timing.put("totalMillis", serve.getTiming().getTotalTime());
+    return timing;
   }
 
   @TestConfiguration(proxyBeanMethods = false)

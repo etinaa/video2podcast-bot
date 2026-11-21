@@ -47,6 +47,43 @@ class ScenarioFixtureIT {
     assertThat(w.latestTerminal()).isSameAs(currentTerminal);
   }
 
+  @Test
+  void transcriptionWaitIgnoresEarlierSubmissionOutcomes() {
+    PipelineWorld w = new PipelineWorld();
+    w.lastUpdateNanos = 3;
+    w.events.add(event("editmessagetext", "Failed.", 101, 10, 2));
+    assertThat(w.transcriptionHasSettled()).isFalse();
+    w.events.clear();
+    w.events.add(
+        new PipelineWorld.Event("ollama", "/api/chat", new byte[0], 2, java.time.Instant.EPOCH));
+    assertThat(w.transcriptionHasSettled()).isFalse();
+  }
+
+  @Test
+  void transcriptionWaitRequiresTheCurrentFailedOrSummarizingStatus() {
+    PipelineWorld w = new PipelineWorld();
+    w.lastUpdateNanos = 3;
+    var queued = event("sendmessage", "Queued: position 1", 101, 0, 3);
+    w.events.add(queued);
+    w.responseIds.put(queued, 11);
+    w.events.add(event("editmessagetext", "Failed.", 202, 11, 4));
+    w.events.add(event("editmessagetext", "Failed.", 101, 10, 5));
+    assertThat(w.transcriptionHasSettled()).isFalse();
+    w.events.add(event("editmessagetext", "Failed.", 101, 11, 6));
+    assertThat(w.transcriptionHasSettled()).isTrue();
+    w.events.clear();
+    // An earlier queued job can reach Ollama after the latest submission was accepted.
+    w.events.add(queued);
+    w.events.add(
+        new PipelineWorld.Event("ollama", "/api/chat", new byte[0], 4, java.time.Instant.EPOCH));
+    assertThat(w.transcriptionHasSettled()).isFalse();
+    w.events.add(event("editmessagetext", "Summarizing…", 101, 10, 5));
+    w.events.add(event("editmessagetext", "Summarizing…", 202, 11, 6));
+    assertThat(w.transcriptionHasSettled()).isFalse();
+    w.events.add(event("editmessagetext", "Summarizing…", 101, 11, 7));
+    assertThat(w.transcriptionHasSettled()).isTrue();
+  }
+
   private static PipelineWorld.Event event(
       String method, String text, long chat, int message, long nanos) {
     String body =

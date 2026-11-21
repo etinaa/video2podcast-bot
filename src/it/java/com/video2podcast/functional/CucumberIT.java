@@ -1,6 +1,5 @@
 package com.video2podcast.functional;
 
-import static io.cucumber.junit.platform.engine.Constants.FILTER_TAGS_PROPERTY_NAME;
 import static io.cucumber.junit.platform.engine.Constants.GLUE_PROPERTY_NAME;
 import static io.cucumber.junit.platform.engine.Constants.JUNIT_PLATFORM_NAMING_STRATEGY_PROPERTY_NAME;
 import static io.cucumber.junit.platform.engine.Constants.PLUGIN_PROPERTY_NAME;
@@ -18,5 +17,4 @@ import org.junit.platform.suite.api.Suite;
 @ConfigurationParameter(key = PLUGIN_PROPERTY_NAME, value = "summary")
 // Keep examples from different outlines distinct in Failsafe XML reports.
 @ConfigurationParameter(key = JUNIT_PLATFORM_NAMING_STRATEGY_PROPERTY_NAME, value = "long")
-@ConfigurationParameter(key = FILTER_TAGS_PROPERTY_NAME, value = "not @manual_media")
 public class CucumberIT {}

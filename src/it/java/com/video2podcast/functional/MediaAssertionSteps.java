@@ -328,8 +328,11 @@ public class MediaAssertionSteps {
   @Then("^\"([^\"]+)\" is (?:sent|attempted) exactly twice$")
   public void twice(String s) {
     w.transcriptionSettled();
-    PipelineWorld.until(() ->
-        assertThat(w.service("whisper").stream().filter(e -> e.chunk().equals(s))).hasSize(2));
+    assertThat(w.service("whisper").stream().filter(e -> e.chunk().equals(s)).toList())
+        .as(
+            "Whisper attempts for %s at %s after transcription settled; Telegram replies: %s",
+            s, w.whisper.baseUrl(), w.calls("sendMessage").stream().map(Event::text).toList())
+        .hasSize(2);
   }
 
   @Then("{string} is never sent")
@@ -359,7 +362,12 @@ public class MediaAssertionSteps {
 
   @Then("{string} exists in the job directory despite total elapsed time exceeding 1 second")
   public void freshWait(String s) {
-    PipelineWorld.until(() -> assertThat(w.job().resolve(s)).isRegularFile());
+    w.transcriptionSettled();
+    assertThat(w.job().resolve(s))
+        .as(
+            "persisted transcript after transcription settled at %s; Telegram replies: %s",
+            w.whisper.baseUrl(), w.calls("sendMessage").stream().map(Event::text).toList())
+        .isRegularFile();
     assertThat(System.nanoTime() - w.lastUpdateNanos)
         .isGreaterThan(Duration.ofSeconds(1).toNanos());
   }
