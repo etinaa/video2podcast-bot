@@ -1,0 +1,1765 @@
+diff --git a/src/main/java/com/video2podcast/bot/SummaryButtonRefresher.java b/src/main/java/com/video2podcast/bot/SummaryButtonRefresher.java
+new file mode 100644
+index 0000000..4aa9e82
+--- /dev/null
++++ b/src/main/java/com/video2podcast/bot/SummaryButtonRefresher.java
+@@ -0,0 +1,42 @@
++package com.video2podcast.bot;
++
++import com.video2podcast.job.ButtonRefresher;
++import com.video2podcast.job.FileKind;
++import com.video2podcast.job.FileState;
++import com.video2podcast.job.JobFile;
++import com.video2podcast.job.JobRecord;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
++/** Shows the stored file states on the buttons of a job's summary message. */
++public class SummaryButtonRefresher implements ButtonRefresher {
++
++  private static final Logger LOG = LoggerFactory.getLogger(SummaryButtonRefresher.class);
++
++  private final TelegramGateway gateway;
++
++  public SummaryButtonRefresher(TelegramGateway gateway) {
++    this.gateway = gateway;
++  }
++
++  @Override
++  public void refresh(JobRecord job) {
++    if (job.summaryMessageId() == null) {
++      return;
++    }
++    String jobId = job.jobId();
++    try {
++      gateway.editButtons(
++          job.chatId(),
++          job.summaryMessageId(),
++          Keyboards.delivery(jobId, state(job, FileKind.AUDIO), state(job, FileKind.TRANSCRIPT)));
++    } catch (RuntimeException e) {
++      LOG.warn("Could not update the buttons of job {}", jobId, e);
++    }
++  }
++
++  private static FileState state(JobRecord job, FileKind kind) {
++    JobFile file = job.files().get(kind);
++    return file == null ? FileState.AVAILABLE : file.state();
++  }
++}
+diff --git a/src/main/java/com/video2podcast/config/AppProperties.java b/src/main/java/com/video2podcast/config/AppProperties.java
+index d019ca4..a17b1b2 100644
+--- a/src/main/java/com/video2podcast/config/AppProperties.java
++++ b/src/main/java/com/video2podcast/config/AppProperties.java
+@@ -28,5 +28,6 @@ public record AppProperties(
+       Duration retention,
+       Duration metadataTimeout,
+       Duration downloadTimeout,
+-      Duration ffmpegTimeout) {}
++      Duration ffmpegTimeout,
++      Duration sweepInterval) {}
+ }
+diff --git a/src/main/java/com/video2podcast/config/JobConfig.java b/src/main/java/com/video2podcast/config/JobConfig.java
+index 84a20ba..ec13d9e 100644
+--- a/src/main/java/com/video2podcast/config/JobConfig.java
++++ b/src/main/java/com/video2podcast/config/JobConfig.java
+@@ -1,12 +1,17 @@
+ package com.video2podcast.config;
+ 
++import com.video2podcast.job.ButtonRefresher;
+ import com.video2podcast.job.JobQueue;
+ import com.video2podcast.job.JobStore;
++import com.video2podcast.job.RetentionSweeper;
+ import java.time.Clock;
++import org.springframework.beans.factory.ObjectProvider;
+ import org.springframework.context.annotation.Bean;
+ import org.springframework.context.annotation.Configuration;
++import org.springframework.scheduling.annotation.EnableScheduling;
+ 
+ @Configuration(proxyBeanMethods = false)
++@EnableScheduling
+ public class JobConfig {
+ 
+   @Bean
+@@ -18,4 +23,14 @@ public class JobConfig {
+   JobQueue jobQueue() {
+     return new JobQueue();
+   }
++
++  /**
++   * Recovers at startup, before the bot gets updates, then sweeps on a schedule. Without Telegram
++   * there is no summary message to update, so the buttons step does nothing.
++   */
++  @Bean(initMethod = "recoverAtStartup")
++  RetentionSweeper retentionSweeper(
++      JobStore store, ObjectProvider<ButtonRefresher> buttons, Clock clock) {
++    return new RetentionSweeper(store, buttons.getIfAvailable(() -> job -> {}), clock);
++  }
+ }
+diff --git a/src/main/java/com/video2podcast/config/PipelineConfig.java b/src/main/java/com/video2podcast/config/PipelineConfig.java
+index 8f660d5..a05f28a 100644
+--- a/src/main/java/com/video2podcast/config/PipelineConfig.java
++++ b/src/main/java/com/video2podcast/config/PipelineConfig.java
+@@ -1,9 +1,11 @@
+ package com.video2podcast.config;
+ 
+ import com.video2podcast.bot.DeliveryCallbackHandler;
++import com.video2podcast.bot.SummaryButtonRefresher;
+ import com.video2podcast.bot.SummaryMessagePublisher;
+ import com.video2podcast.bot.TelegramGateway;
+ import com.video2podcast.bot.UrlMessageHandler;
++import com.video2podcast.job.ButtonRefresher;
+ import com.video2podcast.job.DeliveryService;
+ import com.video2podcast.job.JobQueue;
+ import com.video2podcast.job.JobStore;
+@@ -34,6 +36,11 @@ public class PipelineConfig {
+     return new SummaryMessagePublisher(gateway);
+   }
+ 
++  @Bean
++  ButtonRefresher summaryButtonRefresher(TelegramGateway gateway) {
++    return new SummaryButtonRefresher(gateway);
++  }
++
+   @Bean
+   PipelineService pipelineService(
+       YtDlpClient ytDlp,
+diff --git a/src/main/java/com/video2podcast/config/TelegramConfig.java b/src/main/java/com/video2podcast/config/TelegramConfig.java
+index f9d0c05..1b01daf 100644
+--- a/src/main/java/com/video2podcast/config/TelegramConfig.java
++++ b/src/main/java/com/video2podcast/config/TelegramConfig.java
+@@ -12,6 +12,7 @@ import org.springframework.boot.ApplicationRunner;
+ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+ import org.springframework.context.annotation.Bean;
+ import org.springframework.context.annotation.Configuration;
++import org.springframework.context.annotation.DependsOn;
+ import org.telegram.telegrambots.client.okhttp.OkHttpTelegramClient;
+ import org.telegram.telegrambots.meta.generics.TelegramClient;
+ 
+@@ -53,7 +54,12 @@ public class TelegramConfig {
+     return args -> handler.resendPendingNotifications();
+   }
+ 
++  /**
++   * Depends on the sweeper so its startup recovery has finished before the long-polling starter
++   * registers the bot and the first update arrives.
++   */
+   @Bean
++  @DependsOn("retentionSweeper")
+   TelegramBot telegramBot(AppProperties props, BotUpdateHandler handler) {
+     return new TelegramBot(requireToken(props), handler);
+   }
+diff --git a/src/main/java/com/video2podcast/job/ButtonRefresher.java b/src/main/java/com/video2podcast/job/ButtonRefresher.java
+new file mode 100644
+index 0000000..2c190af
+--- /dev/null
++++ b/src/main/java/com/video2podcast/job/ButtonRefresher.java
+@@ -0,0 +1,7 @@
++package com.video2podcast.job;
++
++/** Best effort: shows the current file states on the summary message buttons. Never throws. */
++public interface ButtonRefresher {
++
++  void refresh(JobRecord job);
++}
+diff --git a/src/main/java/com/video2podcast/job/JobStore.java b/src/main/java/com/video2podcast/job/JobStore.java
+index 661f452..dc105b3 100644
+--- a/src/main/java/com/video2podcast/job/JobStore.java
++++ b/src/main/java/com/video2podcast/job/JobStore.java
+@@ -6,10 +6,12 @@ import com.video2podcast.storage.Json;
+ import java.io.IOException;
+ import java.io.UncheckedIOException;
+ import java.nio.file.Files;
++import java.nio.file.LinkOption;
+ import java.nio.file.NoSuchFileException;
+ import java.nio.file.Path;
+ import java.time.Clock;
+ import java.time.Instant;
++import java.util.ArrayList;
+ import java.util.Comparator;
+ import java.util.List;
+ import java.util.Map;
+@@ -46,6 +48,32 @@ public class JobStore {
+     NOT_FOUND
+   }
+ 
++  /** What {@link #recover} did to one job. */
++  public enum Recovery {
++    REMOVED,
++    RESET,
++    UNCHANGED
++  }
++
++  /** Result of {@link #recover}. {@code job} is the stored job after a RESET, otherwise null. */
++  public record Recovered(Recovery recovery, JobRecord job) {}
++
++  /**
++   * Result of {@link #sweep}. {@code job} is the job after the change (null when there was no
++   * usable job.json or the job was kept untouched with a SENDING file); {@code expired} lists files
++   * this call moved to EXPIRED; {@code removed} is true when the directory is gone.
++   */
++  public record Swept(JobRecord job, List<FileKind> expired, boolean removed) {
++
++    public Swept {
++      expired = List.copyOf(expired);
++    }
++
++    public static Swept none() {
++      return new Swept(null, List.of(), false);
++    }
++  }
++
+   private final Path workDir;
+   private final Clock clock;
+ 
+@@ -177,7 +205,7 @@ public class JobStore {
+     }
+     try (Stream<Path> children = Files.list(workDir)) {
+       return children
+-          .filter(Files::isDirectory)
++          .filter(path -> Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS))
+           .map(path -> String.valueOf(path.getFileName()))
+           .filter(name -> JOB_ID.matcher(name).matches())
+           .toList();
+@@ -186,14 +214,113 @@ public class JobStore {
+     }
+   }
+ 
+-  /** Deletes the job directory with everything in it. Deleting a missing job does nothing. */
++  /**
++   * Startup only. Under the job lock: if there is no usable job.json, deletes the whole directory;
++   * else moves every SENDING file back to AVAILABLE and saves. Expiry dates and sentAt stay as they
++   * were, and no file is recreated.
++   *
++   * @throws JobStoreException on an I/O error
++   */
++  public Recovered recover(String jobId) {
++    return withLock(
++        jobId,
++        () -> {
++          Optional<JobRecord> stored = read(jobId);
++          if (stored.isEmpty()) {
++            deleteRecursively(directory(jobId));
++            return new Recovered(Recovery.REMOVED, null);
++          }
++          JobRecord job = stored.get();
++          boolean interrupted = false;
++          for (Map.Entry<FileKind, JobFile> entry : job.files().entrySet()) {
++            JobFile file = entry.getValue();
++            if (file.state() == FileState.SENDING) {
++              job = job.withFile(entry.getKey(), file.moveTo(FileState.AVAILABLE, file.sentAt()));
++              interrupted = true;
++            }
++          }
++          if (!interrupted) {
++            return new Recovered(Recovery.UNCHANGED, null);
++          }
++          save(job);
++          return new Recovered(Recovery.RESET, job);
++        });
++  }
++
++  /**
++   * Expires the files whose deadline has come and removes the directory once nothing is left to
++   * download. A job with a SENDING file, or without a usable job.json, is left alone. A file
++   * without a deadline expires only when {@code atStartup}.
++   *
++   * @throws JobStoreException on an I/O error; the stored state stays consistent for a retry
++   */
++  public Swept sweep(String jobId, Instant now, boolean atStartup) {
++    return withLock(
++        jobId,
++        () -> {
++          Optional<JobRecord> stored = read(jobId);
++          if (stored.isEmpty() || hasSendingFile(stored.get())) {
++            return Swept.none();
++          }
++          JobRecord job = stored.get();
++          List<FileKind> expired = new ArrayList<>();
++          for (Map.Entry<FileKind, JobFile> entry : job.files().entrySet()) {
++            JobFile file = entry.getValue();
++            if (file.state() == FileState.AVAILABLE && isDue(file, now, atStartup)) {
++              deleteFile(resolve(jobId, file));
++              job = job.withFile(entry.getKey(), file.moveTo(FileState.EXPIRED, file.sentAt()));
++              expired.add(entry.getKey());
++            }
++          }
++          if (isFinished(job)) {
++            deleteRecursively(directory(jobId));
++            return new Swept(job, expired, true);
++          }
++          if (!expired.isEmpty()) {
++            save(job);
++          }
++          return new Swept(job, expired, false);
++        });
++  }
++
++  private static boolean hasSendingFile(JobRecord job) {
++    return job.files().values().stream().anyMatch(file -> file.state() == FileState.SENDING);
++  }
++
++  private static boolean isDue(JobFile file, Instant now, boolean atStartup) {
++    return file.expiresAt() == null ? atStartup : !now.isBefore(file.expiresAt());
++  }
++
++  private static boolean isFinished(JobRecord job) {
++    return !job.files().isEmpty()
++        && job.files().values().stream()
++            .allMatch(file -> file.state() == FileState.SENT || file.state() == FileState.EXPIRED);
++  }
++
++  /** A failure after the first file leaves it AVAILABLE but gone; the next pass finishes it. */
++  private static void deleteFile(Path file) {
++    try {
++      Files.deleteIfExists(file);
++    } catch (IOException e) {
++      throw new JobStoreException("Cannot delete " + file, e);
++    }
++  }
++
++  /**
++   * Deletes the job directory with everything in it, {@code job.json} last, so a failure in the
++   * middle leaves the job known and the next pass retries. Deleting a missing job does nothing.
++   */
+   public void discard(String jobId) {
+     Path dir = directory(jobId);
+     withLock(jobId, () -> deleteRecursively(dir));
+   }
+ 
+   private Optional<JobRecord> read(String jobId) {
+-    Path file = directory(jobId).resolve(JOB_FILE);
++    Path dir = directory(jobId);
++    if (Files.isSymbolicLink(dir)) {
++      return Optional.empty();
++    }
++    Path file = dir.resolve(JOB_FILE);
+     try {
+       JobRecord job = Json.MAPPER.readValue(Files.readAllBytes(file), JobRecord.class);
+       if (isUsable(job, jobId)) {
+@@ -246,21 +373,36 @@ public class JobStore {
+     if (!Files.exists(dir)) {
+       return;
+     }
++    try {
++      if (Files.isSymbolicLink(dir)) {
++        // Only the link goes, never what it points to.
++        Files.delete(dir);
++        return;
++      }
++    } catch (IOException e) {
++      throw new JobStoreException("Cannot delete " + dir, e);
++    }
++    Path jobFile = dir.resolve(JOB_FILE);
+     try (Stream<Path> paths = Files.walk(dir)) {
+       paths
+           .sorted(Comparator.reverseOrder())
+-          .forEach(path -> {
+-            try {
+-              Files.deleteIfExists(path);
+-            } catch (IOException e) {
+-              throw new UncheckedIOException(e);
+-            }
+-          });
++          .filter(path -> !path.equals(dir) && !path.equals(jobFile))
++          .forEach(JobStore::deleteUnchecked);
++      Files.deleteIfExists(jobFile);
++      Files.deleteIfExists(dir);
+     } catch (IOException | UncheckedIOException e) {
+       throw new JobStoreException("Cannot delete " + dir, e);
+     }
+   }
+ 
++  private static void deleteUnchecked(Path path) {
++    try {
++      Files.deleteIfExists(path);
++    } catch (IOException e) {
++      throw new UncheckedIOException(e);
++    }
++  }
++
+   private <T> T withLock(String jobId, Supplier<T> action) {
+     directory(jobId);
+     ReentrantLock lock = locks[Math.floorMod(jobId.hashCode(), locks.length)];
+diff --git a/src/main/java/com/video2podcast/job/RetentionSweeper.java b/src/main/java/com/video2podcast/job/RetentionSweeper.java
+new file mode 100644
+index 0000000..9960ae5
+--- /dev/null
++++ b/src/main/java/com/video2podcast/job/RetentionSweeper.java
+@@ -0,0 +1,74 @@
++package com.video2podcast.job;
++
++import java.time.Clock;
++import java.util.List;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++import org.springframework.scheduling.annotation.Scheduled;
++
++/**
++ * Decides when a job's files and directory are reclaimed: once at startup, after an interrupted
++ * run, and then on a fixed delay. The per-job rules and locking live in {@link JobStore}; this
++ * class walks the jobs, keeps one failing job from stopping the others and asks for new buttons
++ * when files expired. Knows nothing about Telegram.
++ */
++public class RetentionSweeper {
++
++  private static final Logger LOG = LoggerFactory.getLogger(RetentionSweeper.class);
++
++  private final JobStore store;
++  private final ButtonRefresher buttons;
++  private final Clock clock;
++
++  public RetentionSweeper(JobStore store, ButtonRefresher buttons, Clock clock) {
++    this.store = store;
++    this.buttons = buttons;
++    this.clock = clock;
++  }
++
++  /**
++   * Init method, so it finishes before the bot gets its first update. Per job: removes an unusable
++   * directory, resets interrupted sends, then sweeps with startup rules. The buttons are refreshed
++   * once when the job lost a file or a send was reset and the job is still there.
++   */
++  public void recoverAtStartup() {
++    for (String id : ids()) {
++      try {
++        JobStore.Recovered recovered = store.recover(id);
++        JobStore.Swept swept = store.sweep(id, clock.instant(), true);
++        if (!swept.expired().isEmpty()) {
++          buttons.refresh(swept.job());
++        } else if (recovered.recovery() == JobStore.Recovery.RESET && !swept.removed()) {
++          buttons.refresh(swept.job() == null ? recovered.job() : swept.job());
++        }
++      } catch (RuntimeException e) {
++        LOG.warn("Startup cleanup of job {} failed", id, e);
++      }
++    }
++  }
++
++  @Scheduled(
++      fixedDelayString = "${app.jobs.sweep-interval}",
++      initialDelayString = "${app.jobs.sweep-interval}")
++  public void sweep() {
++    for (String id : ids()) {
++      try {
++        JobStore.Swept swept = store.sweep(id, clock.instant(), false);
++        if (!swept.expired().isEmpty()) {
++          buttons.refresh(swept.job());
++        }
++      } catch (RuntimeException e) {
++        LOG.warn("Cleanup of job {} failed", id, e);
++      }
++    }
++  }
++
++  private List<String> ids() {
++    try {
++      return store.jobIds();
++    } catch (RuntimeException e) {
++      LOG.warn("Cannot list the jobs", e);
++      return List.of();
++    }
++  }
++}
+diff --git a/src/main/resources/application.yml b/src/main/resources/application.yml
+index b421bc5..84720cd 100644
+--- a/src/main/resources/application.yml
++++ b/src/main/resources/application.yml
+@@ -26,3 +26,4 @@ app:
+     metadata-timeout: ${METADATA_TIMEOUT:PT1M}
+     download-timeout: ${DOWNLOAD_TIMEOUT:PT30M}
+     ffmpeg-timeout: ${FFMPEG_TIMEOUT:PT30M}
++    sweep-interval: ${JOB_SWEEP_INTERVAL:PT1M}
+diff --git a/src/test/java/com/video2podcast/bot/SummaryButtonRefresherTest.java b/src/test/java/com/video2podcast/bot/SummaryButtonRefresherTest.java
+new file mode 100644
+index 0000000..7a446e9
+--- /dev/null
++++ b/src/test/java/com/video2podcast/bot/SummaryButtonRefresherTest.java
+@@ -0,0 +1,80 @@
++package com.video2podcast.bot;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++import com.video2podcast.job.FileKind;
++import com.video2podcast.job.FileState;
++import com.video2podcast.job.JobFile;
++import com.video2podcast.job.JobRecord;
++import java.time.Instant;
++import java.util.HashMap;
++import java.util.Map;
++import org.junit.jupiter.api.Test;
++
++class SummaryButtonRefresherTest {
++
++  private static final Instant T0 = Instant.parse("2026-11-21T12:00:00Z");
++
++  private final RecordingGateway gateway = new RecordingGateway();
++  private final SummaryButtonRefresher refresher = new SummaryButtonRefresher(gateway);
++
++  private static JobRecord job(Integer messageId, Map<FileKind, JobFile> files) {
++    return new JobRecord("job-1", 42L, 4242L, messageId, "Title", 60, T0, files);
++  }
++
++  private static JobFile file(FileState state) {
++    return new JobFile("f", state, T0, null);
++  }
++
++  @Test
++  void showsTheStoredStatesOnTheSummaryMessage() {
++    refresher.refresh(
++        job(
++            700,
++            Map.of(
++                FileKind.AUDIO,
++                file(FileState.SENT),
++                FileKind.TRANSCRIPT,
++                file(FileState.EXPIRED))));
++
++    assertThat(gateway.buttonEdits).hasSize(1);
++    RecordingGateway.Buttons edit = gateway.buttonEdits.get(0);
++    assertThat(edit.chatId()).isEqualTo(4242L);
++    assertThat(edit.messageId()).isEqualTo(700);
++    assertThat(edit.buttons())
++        .isEqualTo(Keyboards.delivery("job-1", FileState.SENT, FileState.EXPIRED));
++  }
++
++  @Test
++  void countsAMissingFileAsAvailable() {
++    Map<FileKind, JobFile> files = new HashMap<>();
++    files.put(FileKind.TRANSCRIPT, file(FileState.EXPIRED));
++
++    refresher.refresh(job(700, files));
++
++    assertThat(gateway.buttonEdits.get(0).buttons())
++        .isEqualTo(Keyboards.delivery("job-1", FileState.AVAILABLE, FileState.EXPIRED));
++
++    gateway.buttonEdits.clear();
++    refresher.refresh(job(700, Map.of(FileKind.AUDIO, file(FileState.EXPIRED))));
++
++    assertThat(gateway.buttonEdits.get(0).buttons())
++        .isEqualTo(Keyboards.delivery("job-1", FileState.EXPIRED, FileState.AVAILABLE));
++  }
++
++  @Test
++  void doesNothingWithoutASummaryMessage() {
++    refresher.refresh(job(null, Map.of()));
++
++    assertThat(gateway.buttonEdits).isEmpty();
++  }
++
++  @Test
++  void neverThrowsWhenTelegramRejectsTheEdit() {
++    gateway.failButtons = true;
++
++    refresher.refresh(job(700, Map.of()));
++
++    assertThat(gateway.buttonEdits).isEmpty();
++  }
++}
+diff --git a/src/test/java/com/video2podcast/config/JobConfigTest.java b/src/test/java/com/video2podcast/config/JobConfigTest.java
+new file mode 100644
+index 0000000..661136c
+--- /dev/null
++++ b/src/test/java/com/video2podcast/config/JobConfigTest.java
+@@ -0,0 +1,156 @@
++package com.video2podcast.config;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.mockito.Mockito.mock;
++
++import com.video2podcast.access.AccessService;
++import com.video2podcast.bot.DeliveryCallbackHandler;
++import com.video2podcast.bot.TelegramBot;
++import com.video2podcast.bot.UrlMessageHandler;
++import com.video2podcast.job.ButtonRefresher;
++import com.video2podcast.job.FileKind;
++import com.video2podcast.job.FileState;
++import com.video2podcast.job.JobFile;
++import com.video2podcast.job.JobRecord;
++import com.video2podcast.job.JobStore;
++import com.video2podcast.job.RetentionSweeper;
++import java.io.IOException;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.time.Clock;
++import java.time.Duration;
++import java.time.Instant;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Map;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.io.TempDir;
++import org.springframework.beans.factory.InitializingBean;
++import org.springframework.beans.factory.config.BeanPostProcessor;
++import org.springframework.boot.test.context.runner.ApplicationContextRunner;
++import org.springframework.scheduling.annotation.EnableScheduling;
++
++class JobConfigTest {
++
++  @TempDir Path dir;
++
++  private AppProperties props() {
++    return new AppProperties(
++        new AppProperties.Telegram("123:abc", 1L, true, ""),
++        new AppProperties.Access(Path.of("a.json"), Duration.ofHours(24)),
++        new AppProperties.Ollama("http://localhost:11434", "m", 8192, Duration.ofMinutes(10)),
++        new AppProperties.Whisper("http://localhost:8081", Duration.ofMinutes(10)),
++        new AppProperties.Jobs(
++            dir,
++            Duration.ofHours(3),
++            Duration.ofHours(1),
++            Duration.ofMinutes(1),
++            Duration.ofMinutes(30),
++            Duration.ofMinutes(30),
++            Duration.ofMinutes(1)));
++  }
++
++  private ApplicationContextRunner runner() {
++    return new ApplicationContextRunner()
++        .withUserConfiguration(JobConfig.class)
++        .withBean(AppProperties.class, this::props)
++        .withBean(
++            Clock.class,
++            () -> Clock.fixed(Instant.parse("2026-11-21T14:00:00Z"), java.time.ZoneOffset.UTC))
++        .withPropertyValues("app.jobs.sweep-interval=PT1M");
++  }
++
++  private void expiredJob() throws IOException {
++    Path jobDir = dir.resolve("job-1");
++    Files.createDirectories(jobDir);
++    Files.writeString(jobDir.resolve("a.m4a"), "a");
++    Instant past = Instant.parse("2026-11-21T13:00:00Z");
++    new JobStore(dir, Clock.systemUTC())
++        .create(
++            new JobRecord(
++                "job-1",
++                1L,
++                2L,
++                7,
++                "T",
++                1,
++                past,
++                Map.of(FileKind.AUDIO, new JobFile("a.m4a", FileState.AVAILABLE, past, null))));
++  }
++
++  @Test
++  void enablesScheduling() {
++    assertThat(JobConfig.class.isAnnotationPresent(EnableScheduling.class)).isTrue();
++  }
++
++  @Test
++  void recoversAtStartupAndUsesTheButtonRefresherWhenThereIsOne() throws IOException {
++    expiredJob();
++    List<JobRecord> refreshed = new ArrayList<>();
++    runner()
++        .withBean(ButtonRefresher.class, () -> refreshed::add)
++        .run(context -> {
++          assertThat(context).hasSingleBean(RetentionSweeper.class);
++          assertThat(dir.resolve("job-1")).doesNotExist();
++          assertThat(refreshed).hasSize(1);
++        });
++  }
++
++  @Test
++  void worksWithoutTelegram() throws IOException {
++    expiredJob();
++    runner()
++        .run(context -> {
++          assertThat(context).hasSingleBean(RetentionSweeper.class);
++          assertThat(dir.resolve("job-1")).doesNotExist();
++        });
++  }
++
++  @Test
++  void theBotIsCreatedOnlyAfterStartupRecoveryFinished() {
++    List<String> order = new ArrayList<>();
++    class RecordingSweeper extends RetentionSweeper implements InitializingBean {
++      RecordingSweeper() {
++        super(null, job -> {}, null);
++      }
++
++      @Override
++      public void afterPropertiesSet() {
++        order.add("recovered");
++      }
++    }
++    BeanPostProcessor recordBot =
++        new BeanPostProcessor() {
++          @Override
++          public Object postProcessBeforeInitialization(Object bean, String beanName) {
++            if (bean instanceof TelegramBot) {
++              order.add("bot");
++            }
++            return bean;
++          }
++        };
++    telegramRunner()
++        .withBean("retentionSweeper", RetentionSweeper.class, RecordingSweeper::new)
++        .withBean(BeanPostProcessor.class, () -> recordBot)
++        .run(context -> assertThat(order).containsExactly("recovered", "bot"));
++  }
++
++  private ApplicationContextRunner telegramRunner() {
++    return new ApplicationContextRunner()
++        .withUserConfiguration(TelegramConfig.class)
++        .withBean(AppProperties.class, this::props)
++        .withBean(AccessService.class, () -> mock(AccessService.class))
++        .withBean(UrlMessageHandler.class, () -> mock(UrlMessageHandler.class))
++        .withBean(DeliveryCallbackHandler.class, () -> mock(DeliveryCallbackHandler.class))
++        .withPropertyValues("app.telegram.enabled=true");
++  }
++
++  @Test
++  void theTelegramBotBeanDefinitionDependsOnTheSweeper() {
++    telegramRunner()
++        .withBean("retentionSweeper", RetentionSweeper.class, () -> mock(RetentionSweeper.class))
++        .run(context ->
++            assertThat(context.getBeanFactory().getBeanDefinition("telegramBot").getDependsOn())
++                .containsExactly("retentionSweeper"));
++  }
++}
+diff --git a/src/test/java/com/video2podcast/config/MediaConfigTest.java b/src/test/java/com/video2podcast/config/MediaConfigTest.java
+index 120ee46..9bf3f26 100644
+--- a/src/test/java/com/video2podcast/config/MediaConfigTest.java
++++ b/src/test/java/com/video2podcast/config/MediaConfigTest.java
+@@ -28,7 +28,8 @@ class MediaConfigTest {
+             Duration.ofHours(1),
+             Duration.ofMinutes(1),
+             Duration.ofMinutes(30),
+-            Duration.ofMinutes(30)));
++            Duration.ofMinutes(30),
++            Duration.ofMinutes(1)));
+   }
+ 
+   private ApplicationContextRunner runner() {
+diff --git a/src/test/java/com/video2podcast/config/PipelineConfigTest.java b/src/test/java/com/video2podcast/config/PipelineConfigTest.java
+index 20879a9..f881515 100644
+--- a/src/test/java/com/video2podcast/config/PipelineConfigTest.java
++++ b/src/test/java/com/video2podcast/config/PipelineConfigTest.java
+@@ -6,6 +6,7 @@ import static org.mockito.Mockito.mock;
+ import com.video2podcast.bot.DeliveryCallbackHandler;
+ import com.video2podcast.bot.TelegramGateway;
+ import com.video2podcast.bot.UrlMessageHandler;
++import com.video2podcast.job.ButtonRefresher;
+ import com.video2podcast.job.DeliveryService;
+ import com.video2podcast.job.JobQueue;
+ import com.video2podcast.job.JobStore;
+@@ -37,7 +38,8 @@ class PipelineConfigTest {
+             Duration.ofHours(1),
+             Duration.ofMinutes(1),
+             Duration.ofMinutes(30),
+-            Duration.ofMinutes(30)));
++            Duration.ofMinutes(30),
++            Duration.ofMinutes(1)));
+   }
+ 
+   private ApplicationContextRunner runner(boolean enabled) {
+@@ -63,6 +65,7 @@ class PipelineConfigTest {
+         .run(context -> {
+           assertThat(context).hasSingleBean(SummaryPublisher.class);
+           assertThat(context).hasSingleBean(PipelineService.class);
++          assertThat(context).hasSingleBean(ButtonRefresher.class);
+           assertThat(context).hasSingleBean(UrlMessageHandler.class);
+           assertThat(context).hasSingleBean(DeliveryService.class);
+           assertThat(context).hasSingleBean(DeliveryCallbackHandler.class);
+@@ -78,6 +81,7 @@ class PipelineConfigTest {
+         .run(context -> {
+           assertThat(context).doesNotHaveBean(SummaryPublisher.class);
+           assertThat(context).doesNotHaveBean(PipelineService.class);
++          assertThat(context).doesNotHaveBean(ButtonRefresher.class);
+           assertThat(context).doesNotHaveBean(UrlMessageHandler.class);
+           assertThat(context).doesNotHaveBean(DeliveryService.class);
+           assertThat(context).doesNotHaveBean(DeliveryCallbackHandler.class);
+diff --git a/src/test/java/com/video2podcast/config/TelegramConfigTest.java b/src/test/java/com/video2podcast/config/TelegramConfigTest.java
+index a40e42d..521d8d4 100644
+--- a/src/test/java/com/video2podcast/config/TelegramConfigTest.java
++++ b/src/test/java/com/video2podcast/config/TelegramConfigTest.java
+@@ -10,6 +10,7 @@ import com.video2podcast.bot.DeliveryCallbackHandler;
+ import com.video2podcast.bot.TelegramBot;
+ import com.video2podcast.bot.TelegramGateway;
+ import com.video2podcast.bot.UrlMessageHandler;
++import com.video2podcast.job.RetentionSweeper;
+ import java.nio.file.Path;
+ import java.time.Duration;
+ import org.junit.jupiter.api.Test;
+@@ -30,13 +31,15 @@ class TelegramConfigTest {
+             Duration.ofHours(1),
+             Duration.ofMinutes(1),
+             Duration.ofMinutes(30),
+-            Duration.ofMinutes(30)));
++            Duration.ofMinutes(30),
++            Duration.ofMinutes(1)));
+   }
+ 
+   private ApplicationContextRunner runner(String token, long admin, boolean enabled) {
+     return new ApplicationContextRunner()
+         .withUserConfiguration(TelegramConfig.class)
+         .withBean(AppProperties.class, () -> props(token, admin, enabled))
++        .withBean("retentionSweeper", RetentionSweeper.class, () -> mock(RetentionSweeper.class))
+         .withBean(AccessService.class, () -> mock(AccessService.class))
+         .withBean(UrlMessageHandler.class, () -> mock(UrlMessageHandler.class))
+         .withBean(DeliveryCallbackHandler.class, () -> mock(DeliveryCallbackHandler.class))
+diff --git a/src/test/java/com/video2podcast/job/JobStoreRetentionTest.java b/src/test/java/com/video2podcast/job/JobStoreRetentionTest.java
+new file mode 100644
+index 0000000..ca7a488
+--- /dev/null
++++ b/src/test/java/com/video2podcast/job/JobStoreRetentionTest.java
+@@ -0,0 +1,571 @@
++package com.video2podcast.job;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.assertj.core.api.Assertions.assertThatThrownBy;
++
++import com.video2podcast.job.JobStore.Recovered;
++import com.video2podcast.job.JobStore.Recovery;
++import com.video2podcast.job.JobStore.Swept;
++import com.video2podcast.support.MutableClock;
++import java.io.IOException;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.nio.file.attribute.PosixFilePermissions;
++import java.time.Duration;
++import java.time.Instant;
++import java.util.List;
++import java.util.Map;
++import org.junit.jupiter.api.Assumptions;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.io.TempDir;
++
++class JobStoreRetentionTest {
++
++  private static final Instant T0 = Instant.parse("2026-11-21T12:00:00Z");
++  private static final Instant DEADLINE = Instant.parse("2026-11-21T13:00:00Z");
++  private static final Instant SENT_AT = Instant.parse("2026-11-21T12:10:00Z");
++  private static final String ID = "job-1";
++
++  @TempDir Path dir;
++
++  private final MutableClock clock = new MutableClock(T0);
++  private JobStore store;
++  private Path jobDir;
++
++  @BeforeEach
++  void setUp() throws IOException {
++    store = new JobStore(dir.resolve("work"), clock);
++    jobDir = store.directory(ID);
++    Files.createDirectories(jobDir);
++    Files.writeString(jobDir.resolve("audio.m4a"), "audio");
++    Files.writeString(jobDir.resolve("transcript.txt"), "text");
++  }
++
++  private static JobFile file(String path, FileState state, Instant expiresAt, Instant sentAt) {
++    return new JobFile(path, state, expiresAt, sentAt);
++  }
++
++  private void create(JobFile audio, JobFile transcript) {
++    store.create(
++        new JobRecord(
++            ID,
++            42L,
++            4242L,
++            700,
++            "Title",
++            60,
++            T0,
++            Map.of(FileKind.AUDIO, audio, FileKind.TRANSCRIPT, transcript)));
++  }
++
++  private void create(FileState audio, FileState transcript, Instant expiresAt) {
++    create(
++        file("audio.m4a", audio, expiresAt, audio == FileState.SENT ? SENT_AT : null),
++        file(
++            "transcript.txt",
++            transcript,
++            expiresAt,
++            transcript == FileState.SENT ? SENT_AT : null));
++  }
++
++  private JobRecord stored() {
++    return store.load(ID).orElseThrow();
++  }
++
++  // --- sweep ---
++
++  @Test
++  void sweepLeavesAJobWithoutJobJsonAlone() {
++    assertThat(store.sweep(ID, DEADLINE, false)).isEqualTo(Swept.none());
++    assertThat(jobDir.resolve("audio.m4a")).exists();
++  }
++
++  @Test
++  void sweepLeavesAJobWithUnusableJobJsonAlone() throws IOException {
++    Files.writeString(jobDir.resolve("job.json"), "{ not json");
++    assertThat(store.sweep(ID, DEADLINE, true)).isEqualTo(Swept.none());
++    assertThat(jobDir.resolve("audio.m4a")).exists();
++  }
++
++  @Test
++  void noneIsEmpty() {
++    Swept none = Swept.none();
++    assertThat(none.job()).isNull();
++    assertThat(none.expired()).isEmpty();
++    assertThat(none.removed()).isFalse();
++  }
++
++  @Test
++  void sweptKeepsACopyOfTheExpiredList() {
++    List<FileKind> kinds = new java.util.ArrayList<>(List.of(FileKind.AUDIO));
++    Swept swept = new Swept(null, kinds, false);
++    kinds.clear();
++    assertThat(swept.expired()).containsExactly(FileKind.AUDIO);
++  }
++
++  @Test
++  void sweepLeavesWholeDirectoryAloneWhileAFileIsSending() {
++    create(FileState.SENDING, FileState.AVAILABLE, DEADLINE);
++    JobRecord before = stored();
++
++    assertThat(store.sweep(ID, DEADLINE.plusSeconds(10), false)).isEqualTo(Swept.none());
++    assertThat(store.sweep(ID, DEADLINE.plusSeconds(10), true)).isEqualTo(Swept.none());
++
++    assertThat(stored()).isEqualTo(before);
++    assertThat(jobDir.resolve("transcript.txt")).exists();
++  }
++
++  @Test
++  void sweepKeepsFilesBeforeTheirDeadline() {
++    create(FileState.AVAILABLE, FileState.AVAILABLE, DEADLINE);
++    JobRecord before = stored();
++
++    Swept swept = store.sweep(ID, DEADLINE.minusNanos(1), false);
++
++    assertThat(swept.expired()).isEmpty();
++    assertThat(swept.removed()).isFalse();
++    assertThat(swept.job()).isEqualTo(before);
++    assertThat(stored()).isEqualTo(before);
++    assertThat(jobDir.resolve("audio.m4a")).exists();
++  }
++
++  @Test
++  void sweepExpiresBothFilesAtTheDeadlineAndRemovesTheDirectory() throws IOException {
++    create(FileState.AVAILABLE, FileState.AVAILABLE, DEADLINE);
++    Files.createDirectories(jobDir.resolve("chunks"));
++    Files.writeString(jobDir.resolve("chunks/chunk-000.wav"), "w");
++    Files.writeString(jobDir.resolve("out.m4a"), "o");
++
++    Swept swept = store.sweep(ID, DEADLINE, false);
++
++    assertThat(swept.removed()).isTrue();
++    assertThat(swept.expired()).containsExactlyInAnyOrder(FileKind.AUDIO, FileKind.TRANSCRIPT);
++    assertThat(swept.job().files().values()).allMatch(f -> f.state() == FileState.EXPIRED);
++    assertThat(jobDir).doesNotExist();
++  }
++
++  @Test
++  void sweepExpiresOnlyTheFileThatIsDueAndKeepsTheOther() {
++    create(
++        file("audio.m4a", FileState.AVAILABLE, DEADLINE, null),
++        file("transcript.txt", FileState.AVAILABLE, DEADLINE.plusSeconds(60), null));
++
++    Swept swept = store.sweep(ID, DEADLINE, false);
++
++    assertThat(swept.removed()).isFalse();
++    assertThat(swept.expired()).containsExactly(FileKind.AUDIO);
++    assertThat(jobDir.resolve("audio.m4a")).doesNotExist();
++    assertThat(jobDir.resolve("transcript.txt")).hasContent("text");
++    JobRecord saved = stored();
++    assertThat(saved.files().get(FileKind.AUDIO).state()).isEqualTo(FileState.EXPIRED);
++    assertThat(saved.files().get(FileKind.TRANSCRIPT))
++        .isEqualTo(file("transcript.txt", FileState.AVAILABLE, DEADLINE.plusSeconds(60), null));
++    assertThat(swept.job()).isEqualTo(saved);
++  }
++
++  @Test
++  void sweepKeepsTheSentLabelAndTimeWhenTheSiblingExpires() {
++    create(
++        file("audio.m4a", FileState.SENT, DEADLINE, SENT_AT),
++        file("transcript.txt", FileState.AVAILABLE, DEADLINE, null));
++
++    Swept swept = store.sweep(ID, DEADLINE, false);
++
++    assertThat(swept.removed()).isTrue();
++    assertThat(swept.expired()).containsExactly(FileKind.TRANSCRIPT);
++    assertThat(swept.job().files().get(FileKind.AUDIO).state()).isEqualTo(FileState.SENT);
++    assertThat(swept.job().files().get(FileKind.AUDIO).sentAt()).isEqualTo(SENT_AT);
++  }
++
++  @Test
++  void sweepKeepsAnUnexpiredFileAfterPartialDelivery() {
++    create(
++        file("audio.m4a", FileState.SENT, DEADLINE, SENT_AT),
++        file("transcript.txt", FileState.AVAILABLE, DEADLINE, null));
++
++    Swept swept = store.sweep(ID, DEADLINE.minusSeconds(1), false);
++
++    assertThat(swept.removed()).isFalse();
++    assertThat(swept.expired()).isEmpty();
++    assertThat(jobDir.resolve("transcript.txt")).exists();
++    assertThat(stored().files().get(FileKind.AUDIO).sentAt()).isEqualTo(SENT_AT);
++  }
++
++  @Test
++  void sweepRemovesTheDirectoryWhenEverythingIsAlreadyTerminalWithoutReportingExpiry()
++      throws IOException {
++    create(
++        file("audio.m4a", FileState.SENT, DEADLINE, SENT_AT),
++        file("transcript.txt", FileState.EXPIRED, DEADLINE, null));
++    Files.delete(jobDir.resolve("transcript.txt"));
++
++    Swept swept = store.sweep(ID, T0, false);
++
++    assertThat(swept.removed()).isTrue();
++    assertThat(swept.expired()).isEmpty();
++    assertThat(jobDir).doesNotExist();
++  }
++
++  @Test
++  void sweepDoesNotTreatAnEmptyFileMapAsFinished() {
++    store.create(new JobRecord(ID, 42L, 4242L, null, "Title", 60, T0, null));
++
++    Swept swept = store.sweep(ID, DEADLINE, true);
++
++    assertThat(swept.removed()).isFalse();
++    assertThat(jobDir.resolve("job.json")).exists();
++  }
++
++  @Test
++  void sweepAtRuntimeNeverExpiresAFileWithoutDeadline() {
++    create(FileState.AVAILABLE, FileState.AVAILABLE, null);
++    JobRecord before = stored();
++
++    Swept swept = store.sweep(ID, DEADLINE.plusSeconds(86_400), false);
++
++    assertThat(swept.expired()).isEmpty();
++    assertThat(swept.removed()).isFalse();
++    assertThat(stored()).isEqualTo(before);
++    assertThat(jobDir.resolve("audio.m4a")).exists();
++  }
++
++  @Test
++  void sweepAtStartupExpiresFilesWithoutDeadline() {
++    create(FileState.AVAILABLE, FileState.AVAILABLE, null);
++
++    Swept swept = store.sweep(ID, T0, true);
++
++    assertThat(swept.removed()).isTrue();
++    assertThat(swept.expired()).containsExactlyInAnyOrder(FileKind.AUDIO, FileKind.TRANSCRIPT);
++    assertThat(jobDir).doesNotExist();
++  }
++
++  @Test
++  void sweepAtStartupKeepsASiblingWithAFutureDeadline() {
++    create(
++        file("audio.m4a", FileState.AVAILABLE, null, null),
++        file("transcript.txt", FileState.AVAILABLE, DEADLINE, null));
++
++    Swept swept = store.sweep(ID, T0, true);
++
++    assertThat(swept.expired()).containsExactly(FileKind.AUDIO);
++    assertThat(swept.removed()).isFalse();
++    assertThat(jobDir.resolve("audio.m4a")).doesNotExist();
++    assertThat(jobDir.resolve("transcript.txt")).exists();
++  }
++
++  @Test
++  void sweepIsHarmlessWhenTheFileIsAlreadyGone() throws IOException {
++    create(FileState.AVAILABLE, FileState.AVAILABLE, DEADLINE);
++    Files.delete(jobDir.resolve("audio.m4a"));
++
++    Swept swept = store.sweep(ID, DEADLINE, false);
++
++    assertThat(swept.removed()).isTrue();
++    assertThat(swept.expired()).hasSize(2);
++  }
++
++  @Test
++  void sweepFailsAndStaysRetryableWhenAFileCannotBeDeleted() throws IOException {
++    Assumptions.assumeTrue(!"root".equals(System.getProperty("user.name")));
++    create(FileState.AVAILABLE, FileState.AVAILABLE, DEADLINE);
++    JobRecord before = stored();
++    Files.setPosixFilePermissions(jobDir, PosixFilePermissions.fromString("r-xr-xr-x"));
++    try {
++      assertThatThrownBy(() -> store.sweep(ID, DEADLINE, false))
++          .isInstanceOf(JobStoreException.class);
++    } finally {
++      Files.setPosixFilePermissions(jobDir, PosixFilePermissions.fromString("rwxr-xr-x"));
++    }
++    assertThat(stored()).isEqualTo(before);
++    assertThat(store.sweep(ID, DEADLINE, false).removed()).isTrue();
++  }
++
++  @Test
++  void sweepRefusesAnInvalidJobId() {
++    assertThatThrownBy(() -> store.sweep("../x", DEADLINE, false))
++        .isInstanceOf(IllegalArgumentException.class);
++  }
++
++  // --- recover ---
++
++  @Test
++  void recoverRemovesTheDirectoryWithoutJobJson() throws IOException {
++    Files.createDirectories(jobDir.resolve("chunks"));
++    Files.writeString(jobDir.resolve("chunks/c.wav"), "w");
++
++    Recovered recovered = store.recover(ID);
++
++    assertThat(recovered).isEqualTo(new Recovered(Recovery.REMOVED, null));
++    assertThat(jobDir).doesNotExist();
++  }
++
++  @Test
++  void recoverRemovesTheDirectoryWithUnusableJobJson() throws IOException {
++    Files.writeString(jobDir.resolve("job.json"), "null");
++
++    assertThat(store.recover(ID).recovery()).isEqualTo(Recovery.REMOVED);
++    assertThat(jobDir).doesNotExist();
++  }
++
++  @Test
++  void recoverResetsSendingFilesAndKeepsEverythingElse() {
++    create(
++        file("audio.m4a", FileState.SENDING, DEADLINE, null),
++        file("transcript.txt", FileState.SENT, DEADLINE, SENT_AT));
++
++    Recovered recovered = store.recover(ID);
++
++    assertThat(recovered.recovery()).isEqualTo(Recovery.RESET);
++    assertThat(recovered.job()).isEqualTo(stored());
++    assertThat(stored().files().get(FileKind.AUDIO))
++        .isEqualTo(file("audio.m4a", FileState.AVAILABLE, DEADLINE, null));
++    assertThat(stored().files().get(FileKind.TRANSCRIPT))
++        .isEqualTo(file("transcript.txt", FileState.SENT, DEADLINE, SENT_AT));
++    assertThat(stored().summaryMessageId()).isEqualTo(700);
++  }
++
++  @Test
++  void recoverResetsBothFilesWhenBothAreSending() {
++    create(FileState.SENDING, FileState.SENDING, DEADLINE);
++
++    assertThat(store.recover(ID).recovery()).isEqualTo(Recovery.RESET);
++    assertThat(stored().files().values()).allMatch(f -> f.state() == FileState.AVAILABLE);
++  }
++
++  @Test
++  void recoverDoesNotRecreateAMissingFile() throws IOException {
++    create(FileState.SENDING, FileState.AVAILABLE, DEADLINE);
++    Files.delete(jobDir.resolve("audio.m4a"));
++
++    store.recover(ID);
++
++    assertThat(jobDir.resolve("audio.m4a")).doesNotExist();
++  }
++
++  @Test
++  void recoverLeavesAJobWithoutSendingFilesAsItIs() {
++    create(FileState.AVAILABLE, FileState.SENT, DEADLINE);
++    JobRecord before = stored();
++
++    assertThat(store.recover(ID)).isEqualTo(new Recovered(Recovery.UNCHANGED, null));
++    assertThat(stored()).isEqualTo(before);
++  }
++
++  // --- discard order ---
++
++  @Test
++  void discardKeepsJobJsonWhenAnotherFileCannotBeDeleted() throws IOException {
++    Assumptions.assumeTrue(!"root".equals(System.getProperty("user.name")));
++    create(FileState.AVAILABLE, FileState.AVAILABLE, DEADLINE);
++    Path chunks = Files.createDirectories(jobDir.resolve("chunks"));
++    Files.writeString(chunks.resolve("c.wav"), "w");
++    Files.setPosixFilePermissions(chunks, PosixFilePermissions.fromString("r-xr-xr-x"));
++    try {
++      assertThatThrownBy(() -> store.discard(ID)).isInstanceOf(JobStoreException.class);
++      assertThat(jobDir.resolve("job.json")).exists();
++    } finally {
++      Files.setPosixFilePermissions(chunks, PosixFilePermissions.fromString("rwxr-xr-x"));
++    }
++    store.discard(ID);
++    assertThat(jobDir).doesNotExist();
++  }
++
++  // --- claim versus sweep ---
++
++  @Test
++  void aClaimThatWinsKeepsTheWholeDirectoryEvenAfterTheDeadline() {
++    create(FileState.AVAILABLE, FileState.AVAILABLE, DEADLINE);
++    DeliveryService delivery = new DeliveryService(store, clock);
++    clock.advance(Duration.ofMinutes(59));
++
++    DeliveryService.Claim claim = delivery.claim(ID, 42L, FileKind.AUDIO);
++    clock.advance(Duration.ofMinutes(2));
++    Swept swept = store.sweep(ID, clock.instant(), false);
++
++    assertThat(claim.outcome()).isEqualTo(DeliveryService.Outcome.GRANTED);
++    assertThat(swept).isEqualTo(Swept.none());
++    assertThat(jobDir.resolve("audio.m4a")).hasContent("audio");
++    assertThat(jobDir.resolve("transcript.txt")).hasContent("text");
++    assertThat(stored().files().get(FileKind.AUDIO).state()).isEqualTo(FileState.SENDING);
++    assertThat(stored().files().get(FileKind.TRANSCRIPT).state()).isEqualTo(FileState.AVAILABLE);
++
++    assertThat(delivery.complete(ID, FileKind.AUDIO)).isPresent();
++    Swept after = store.sweep(ID, clock.instant(), false);
++    assertThat(after.removed()).isTrue();
++    assertThat(after.expired()).containsExactly(FileKind.TRANSCRIPT);
++    assertThat(after.job().files().get(FileKind.AUDIO).state()).isEqualTo(FileState.SENT);
++  }
++
++  @Test
++  void aReleasedSendAfterTheDeadlineIsExpiredOnTheNextPass() {
++    create(FileState.AVAILABLE, FileState.SENT, DEADLINE);
++    DeliveryService delivery = new DeliveryService(store, clock);
++    DeliveryService.Claim claim = delivery.claim(ID, 42L, FileKind.AUDIO);
++    clock.advance(Duration.ofHours(2));
++
++    assertThat(store.sweep(ID, clock.instant(), false)).isEqualTo(Swept.none());
++    delivery.release(ID, FileKind.AUDIO);
++    Swept swept = store.sweep(ID, clock.instant(), false);
++
++    assertThat(claim.outcome()).isEqualTo(DeliveryService.Outcome.GRANTED);
++    assertThat(swept.removed()).isTrue();
++    assertThat(swept.expired()).containsExactly(FileKind.AUDIO);
++  }
++
++  @Test
++  void aSweepThatWinsLeavesTheLaterClaimWithoutAGrant() {
++    create(FileState.AVAILABLE, FileState.AVAILABLE, DEADLINE);
++    DeliveryService delivery = new DeliveryService(store, clock);
++    clock.advance(Duration.ofHours(1));
++
++    Swept swept = store.sweep(ID, clock.instant(), false);
++    DeliveryService.Claim audio = delivery.claim(ID, 42L, FileKind.AUDIO);
++    DeliveryService.Claim transcript = delivery.claim(ID, 42L, FileKind.TRANSCRIPT);
++
++    assertThat(swept.removed()).isTrue();
++    assertThat(audio.outcome()).isEqualTo(DeliveryService.Outcome.EXPIRED);
++    assertThat(audio.file()).isNull();
++    assertThat(transcript.outcome()).isEqualTo(DeliveryService.Outcome.EXPIRED);
++    assertThat(jobDir).doesNotExist();
++    assertThat(store.transition(ID, FileKind.AUDIO, FileState.AVAILABLE, FileState.SENDING))
++        .isEqualTo(JobStore.Transition.NOT_FOUND);
++  }
++
++  @Test
++  void aSweepThatExpiresOneFileRefusesATransitionOnThatFileOnly() {
++    create(
++        file("audio.m4a", FileState.AVAILABLE, DEADLINE, null),
++        file("transcript.txt", FileState.AVAILABLE, DEADLINE.plusSeconds(60), null));
++
++    store.sweep(ID, DEADLINE, false);
++
++    assertThat(store.transition(ID, FileKind.AUDIO, FileState.AVAILABLE, FileState.SENDING))
++        .isEqualTo(JobStore.Transition.STATE_MISMATCH);
++    assertThat(store.transition(ID, FileKind.TRANSCRIPT, FileState.AVAILABLE, FileState.SENDING))
++        .isEqualTo(JobStore.Transition.APPLIED);
++    assertThat(jobDir.resolve("transcript.txt")).hasContent("text");
++  }
++
++  // --- symlinks ---
++
++  private Path externalJob() throws IOException {
++    Path outside = Files.createDirectories(dir.resolve("outside"));
++    Files.writeString(outside.resolve("job.json"), "{ not json");
++    Files.writeString(outside.resolve("sentinel.txt"), "keep me");
++    return outside;
++  }
++
++  @Test
++  void jobIdsSkipsASymlinkedJobDirectory() throws IOException {
++    Path outside = externalJob();
++    Files.createSymbolicLink(store.directory("linked"), outside);
++
++    assertThat(store.jobIds()).containsExactly(ID);
++  }
++
++  @Test
++  void recoverRemovesASymlinkedJobRootWithoutTouchingItsTarget() throws IOException {
++    Path outside = externalJob();
++    Path link = Files.createSymbolicLink(store.directory("linked"), outside);
++
++    assertThat(store.recover("linked").recovery()).isEqualTo(Recovery.REMOVED);
++
++    assertThat(Files.exists(link, java.nio.file.LinkOption.NOFOLLOW_LINKS)).isFalse();
++    assertThat(outside.resolve("job.json")).hasContent("{ not json");
++    assertThat(outside.resolve("sentinel.txt")).hasContent("keep me");
++  }
++
++  @Test
++  void sweepIgnoresASymlinkedJobRootWithAUsableExternalRecord() throws IOException {
++    Path outside = Files.createDirectories(dir.resolve("outside"));
++    Files.writeString(outside.resolve("audio.m4a"), "external media");
++    new JobStore(dir, clock)
++        .create(
++            new JobRecord(
++                "outside",
++                1L,
++                2L,
++                3,
++                "T",
++                1,
++                T0,
++                Map.of(FileKind.AUDIO, file("audio.m4a", FileState.AVAILABLE, DEADLINE, null))));
++    Files.createSymbolicLink(store.directory("outside"), outside);
++
++    assertThat(store.sweep("outside", DEADLINE.plusSeconds(1), false)).isEqualTo(Swept.none());
++
++    assertThat(outside.resolve("audio.m4a")).hasContent("external media");
++    assertThat(outside.resolve("job.json")).exists();
++  }
++
++  @Test
++  void discardRemovesASymlinkedJobRootWithoutTouchingItsTarget() throws IOException {
++    Path outside = externalJob();
++    Path link = Files.createSymbolicLink(store.directory("linked"), outside);
++
++    store.discard("linked");
++
++    assertThat(Files.exists(link, java.nio.file.LinkOption.NOFOLLOW_LINKS)).isFalse();
++    assertThat(outside.resolve("job.json")).exists();
++    assertThat(outside.resolve("sentinel.txt")).hasContent("keep me");
++  }
++
++  @Test
++  void aNestedSymlinkIsUnlinkedNotFollowed() throws IOException {
++    Path outside = externalJob();
++    create(FileState.AVAILABLE, FileState.AVAILABLE, DEADLINE);
++    Files.createSymbolicLink(jobDir.resolve("chunks"), outside);
++
++    assertThat(store.sweep(ID, DEADLINE, false).removed()).isTrue();
++
++    assertThat(jobDir).doesNotExist();
++    assertThat(outside.resolve("sentinel.txt")).hasContent("keep me");
++    assertThat(outside.resolve("job.json")).exists();
++  }
++
++  // --- read and persist failures ---
++
++  @Test
++  void aReadFailureIsReportedAndNothingIsDeleted() throws IOException {
++    Files.createDirectories(jobDir.resolve("job.json"));
++
++    assertThatThrownBy(() -> store.recover(ID)).isInstanceOf(JobStoreException.class);
++    assertThatThrownBy(() -> store.sweep(ID, DEADLINE, true)).isInstanceOf(JobStoreException.class);
++
++    assertThat(jobDir.resolve("audio.m4a")).exists();
++    assertThat(jobDir.resolve("transcript.txt")).exists();
++  }
++
++  @Test
++  void aSweepThatCannotSaveStaysRetryable() throws IOException {
++    create(
++        file("audio.m4a", FileState.AVAILABLE, DEADLINE, null),
++        file("transcript.txt", FileState.AVAILABLE, DEADLINE.plusSeconds(60), null));
++    Path blocker = Files.createDirectories(jobDir.resolve("job.json.tmp"));
++
++    assertThatThrownBy(() -> store.sweep(ID, DEADLINE, false))
++        .isInstanceOf(JobStoreException.class);
++
++    assertThat(jobDir.resolve("audio.m4a")).doesNotExist();
++    assertThat(stored().files().get(FileKind.AUDIO).state()).isEqualTo(FileState.AVAILABLE);
++
++    Files.delete(blocker);
++    Swept retry = store.sweep(ID, DEADLINE, false);
++    assertThat(retry.expired()).containsExactly(FileKind.AUDIO);
++    assertThat(stored().files().get(FileKind.AUDIO).state()).isEqualTo(FileState.EXPIRED);
++  }
++
++  @Test
++  void aRecoverThatCannotSaveKeepsTheSendingState() throws IOException {
++    create(FileState.SENDING, FileState.AVAILABLE, DEADLINE);
++    Path blocker = Files.createDirectories(jobDir.resolve("job.json.tmp"));
++
++    assertThatThrownBy(() -> store.recover(ID)).isInstanceOf(JobStoreException.class);
++
++    assertThat(stored().files().get(FileKind.AUDIO).state()).isEqualTo(FileState.SENDING);
++    Files.delete(blocker);
++    assertThat(store.recover(ID).recovery()).isEqualTo(Recovery.RESET);
++  }
++}
+diff --git a/src/test/java/com/video2podcast/job/PipelineServiceTest.java b/src/test/java/com/video2podcast/job/PipelineServiceTest.java
+index 8069555..05084a8 100644
+--- a/src/test/java/com/video2podcast/job/PipelineServiceTest.java
++++ b/src/test/java/com/video2podcast/job/PipelineServiceTest.java
+@@ -44,7 +44,8 @@ class PipelineServiceTest {
+           RETENTION,
+           Duration.ofMinutes(1),
+           Duration.ofMinutes(30),
+-          Duration.ofMinutes(20));
++          Duration.ofMinutes(20),
++          Duration.ofMinutes(1));
+   private static final JobRequest REQUEST = new JobRequest(JOB_ID, 7, 555, URL, CREATED);
+ 
+   @TempDir Path work;
+diff --git a/src/test/java/com/video2podcast/job/RetentionSweeperTest.java b/src/test/java/com/video2podcast/job/RetentionSweeperTest.java
+new file mode 100644
+index 0000000..1f6c39c
+--- /dev/null
++++ b/src/test/java/com/video2podcast/job/RetentionSweeperTest.java
+@@ -0,0 +1,316 @@
++package com.video2podcast.job;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.ArgumentMatchers.anyBoolean;
++import static org.mockito.ArgumentMatchers.eq;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.when;
++
++import com.video2podcast.support.MutableClock;
++import java.io.IOException;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.time.Duration;
++import java.time.Instant;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Map;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.io.TempDir;
++import org.springframework.scheduling.annotation.Scheduled;
++
++class RetentionSweeperTest {
++
++  private static final Instant T0 = Instant.parse("2026-11-21T12:00:00Z");
++  private static final Instant DEADLINE = Instant.parse("2026-11-21T13:00:00Z");
++
++  @TempDir Path dir;
++
++  private final MutableClock clock = new MutableClock(T0);
++  private final List<JobRecord> refreshed = new ArrayList<>();
++  private JobStore store;
++  private RetentionSweeper sweeper;
++
++  @BeforeEach
++  void setUp() {
++    store = new JobStore(dir.resolve("work"), clock);
++    sweeper = new RetentionSweeper(store, refreshed::add, clock);
++  }
++
++  private Path publish(String id, FileState audio, FileState transcript, Instant expiresAt)
++      throws IOException {
++    return publish(id, audio, transcript, expiresAt, 700);
++  }
++
++  private Path publish(
++      String id, FileState audio, FileState transcript, Instant expiresAt, Integer messageId)
++      throws IOException {
++    Path jobDir = store.directory(id);
++    Files.createDirectories(jobDir);
++    Files.writeString(jobDir.resolve("audio.m4a"), "a");
++    Files.writeString(jobDir.resolve("transcript.txt"), "t");
++    store.create(
++        new JobRecord(
++            id,
++            42L,
++            4242L,
++            messageId,
++            "Title",
++            60,
++            T0,
++            Map.of(
++                FileKind.AUDIO, new JobFile("audio.m4a", audio, expiresAt, null),
++                FileKind.TRANSCRIPT, new JobFile("transcript.txt", transcript, expiresAt, null))));
++    return jobDir;
++  }
++
++  // --- sweep ---
++
++  @Test
++  void sweepExpiresDueFilesAndRefreshesTheButtonsOnce() throws IOException {
++    Path jobDir = publish("a", FileState.AVAILABLE, FileState.AVAILABLE, DEADLINE);
++    clock.advance(Duration.ofHours(1));
++
++    sweeper.sweep();
++
++    assertThat(jobDir).doesNotExist();
++    assertThat(refreshed).hasSize(1);
++    assertThat(refreshed.get(0).jobId()).isEqualTo("a");
++    assertThat(refreshed.get(0).files().values()).allMatch(f -> f.state() == FileState.EXPIRED);
++  }
++
++  @Test
++  void sweepDoesNothingBeforeTheDeadline() throws IOException {
++    Path jobDir = publish("a", FileState.AVAILABLE, FileState.AVAILABLE, DEADLINE);
++    clock.advance(Duration.ofMinutes(59));
++
++    sweeper.sweep();
++
++    assertThat(jobDir.resolve("job.json")).exists();
++    assertThat(refreshed).isEmpty();
++  }
++
++  @Test
++  void sweepDoesNotRefreshWhenNothingExpiredNow() throws IOException {
++    Path jobDir = publish("a", FileState.SENT, FileState.SENT, DEADLINE);
++
++    sweeper.sweep();
++
++    assertThat(jobDir).doesNotExist();
++    assertThat(refreshed).isEmpty();
++  }
++
++  @Test
++  void sweepLeavesJobsInProcessingAlone() throws IOException {
++    Path live = store.directory("live");
++    Files.createDirectories(live);
++    Files.writeString(live.resolve("source.m4a"), "partial");
++    clock.advance(Duration.ofHours(5));
++
++    sweeper.sweep();
++
++    assertThat(live.resolve("source.m4a")).hasContent("partial");
++    assertThat(refreshed).isEmpty();
++  }
++
++  @Test
++  void sweepIgnoresDirectoriesThatAreNotJobs() throws IOException {
++    Path other = dir.resolve("work/not.a.job");
++    Files.createDirectories(other);
++    Files.writeString(other.resolve("keep.txt"), "keep me");
++
++    sweeper.sweep();
++    sweeper.recoverAtStartup();
++
++    assertThat(other.resolve("keep.txt")).hasContent("keep me");
++  }
++
++  @Test
++  void sweepWithoutWorkDirectoryIsHarmless() {
++    sweeper.sweep();
++    sweeper.recoverAtStartup();
++
++    assertThat(refreshed).isEmpty();
++    assertThat(dir.resolve("work")).doesNotExist();
++  }
++
++  @Test
++  void sweepContinuesWithTheNextJobAfterAFailure() {
++    JobStore failing = mock(JobStore.class);
++    JobRecord record = new JobRecord("b", 1L, 2L, 3, "T", 1, T0, Map.of());
++    when(failing.jobIds()).thenReturn(List.of("a", "b", "c"));
++    when(failing.sweep(eq("a"), any(), anyBoolean())).thenThrow(new JobStoreException("io", null));
++    when(failing.sweep(eq("b"), any(), anyBoolean()))
++        .thenReturn(new JobStore.Swept(record, List.of(FileKind.AUDIO), false));
++    when(failing.sweep(eq("c"), any(), anyBoolean()))
++        .thenThrow(new IllegalArgumentException("bad id"));
++
++    new RetentionSweeper(failing, refreshed::add, clock).sweep();
++
++    assertThat(refreshed).containsExactly(record);
++  }
++
++  @Test
++  void sweepSurvivesAFailureToListTheJobs() {
++    JobStore failing = mock(JobStore.class);
++    when(failing.jobIds()).thenThrow(new JobStoreException("io", null));
++
++    new RetentionSweeper(failing, refreshed::add, clock).sweep();
++    new RetentionSweeper(failing, refreshed::add, clock).recoverAtStartup();
++
++    assertThat(refreshed).isEmpty();
++  }
++
++  @Test
++  void sweepUsesTheConfiguredIntervalForBothDelays() throws NoSuchMethodException {
++    Scheduled scheduled = RetentionSweeper.class.getMethod("sweep").getAnnotation(Scheduled.class);
++
++    assertThat(scheduled.fixedDelayString()).isEqualTo("${app.jobs.sweep-interval}");
++    assertThat(scheduled.initialDelayString()).isEqualTo("${app.jobs.sweep-interval}");
++  }
++
++  // --- startup ---
++
++  @Test
++  void startupRemovesDirectoriesWithoutUsableJobJson() throws IOException {
++    Path orphan = store.directory("orphan");
++    Files.createDirectories(orphan);
++    Files.writeString(orphan.resolve("source.m4a"), "partial");
++    Path corrupt = store.directory("corrupt");
++    Files.createDirectories(corrupt);
++    Files.writeString(corrupt.resolve("job.json"), "{");
++
++    sweeper.recoverAtStartup();
++
++    assertThat(orphan).doesNotExist();
++    assertThat(corrupt).doesNotExist();
++    assertThat(refreshed).isEmpty();
++  }
++
++  @Test
++  void startupResetsAnInterruptedSendAndRefreshesTheButtons() throws IOException {
++    Path jobDir = publish("a", FileState.SENDING, FileState.AVAILABLE, DEADLINE);
++
++    sweeper.recoverAtStartup();
++
++    assertThat(jobDir.resolve("audio.m4a")).exists();
++    assertThat(store.load("a").orElseThrow().files().get(FileKind.AUDIO).state())
++        .isEqualTo(FileState.AVAILABLE);
++    assertThat(refreshed).hasSize(1);
++    assertThat(refreshed.get(0).files().get(FileKind.AUDIO).state()).isEqualTo(FileState.AVAILABLE);
++  }
++
++  @Test
++  void startupDoesNotRefreshAnUntouchedJob() throws IOException {
++    publish("a", FileState.AVAILABLE, FileState.SENT, DEADLINE);
++
++    sweeper.recoverAtStartup();
++
++    assertThat(refreshed).isEmpty();
++  }
++
++  @Test
++  void startupDoesNotRenewTheDeadline() throws IOException {
++    publish("a", FileState.AVAILABLE, FileState.AVAILABLE, DEADLINE);
++    clock.advance(Duration.ofMinutes(10));
++
++    sweeper.recoverAtStartup();
++
++    assertThat(store.load("a").orElseThrow().files().get(FileKind.AUDIO).expiresAt())
++        .isEqualTo(DEADLINE);
++  }
++
++  @Test
++  void startupRefreshesAResetJobOnlyOnceWhenItAlsoExpires() throws IOException {
++    Path jobDir = publish("a", FileState.SENDING, FileState.SENDING, DEADLINE);
++    clock.advance(Duration.ofHours(1));
++
++    sweeper.recoverAtStartup();
++
++    assertThat(jobDir).doesNotExist();
++    assertThat(refreshed).hasSize(1);
++    assertThat(refreshed.get(0).files().values()).allMatch(f -> f.state() == FileState.EXPIRED);
++  }
++
++  @Test
++  void startupDoesNotRefreshAResetJobWhoseDirectoryIsGone() {
++    JobStore mocked = mock(JobStore.class);
++    JobRecord record = new JobRecord("a", 1L, 2L, 3, "T", 1, T0, Map.of());
++    when(mocked.jobIds()).thenReturn(List.of("a"));
++    when(mocked.recover("a")).thenReturn(new JobStore.Recovered(JobStore.Recovery.RESET, record));
++    when(mocked.sweep(eq("a"), any(), eq(true)))
++        .thenReturn(new JobStore.Swept(record, List.of(), true));
++
++    new RetentionSweeper(mocked, refreshed::add, clock).recoverAtStartup();
++
++    assertThat(refreshed).isEmpty();
++  }
++
++  @Test
++  void startupFallsBackToTheRecoveredJobWhenTheSweepReturnsNone() {
++    JobStore mocked = mock(JobStore.class);
++    JobRecord record = new JobRecord("a", 1L, 2L, 3, "T", 1, T0, Map.of());
++    when(mocked.jobIds()).thenReturn(List.of("a"));
++    when(mocked.recover("a")).thenReturn(new JobStore.Recovered(JobStore.Recovery.RESET, record));
++    when(mocked.sweep(eq("a"), any(), eq(true))).thenReturn(JobStore.Swept.none());
++
++    new RetentionSweeper(mocked, refreshed::add, clock).recoverAtStartup();
++
++    assertThat(refreshed).containsExactly(record);
++  }
++
++  @Test
++  void startupContinuesAfterAFailingJob() {
++    JobStore mocked = mock(JobStore.class);
++    JobRecord record = new JobRecord("b", 1L, 2L, 3, "T", 1, T0, Map.of());
++    when(mocked.jobIds()).thenReturn(List.of("a", "b", "c"));
++    when(mocked.recover("a")).thenThrow(new JobStoreException("io", null));
++    when(mocked.recover("b")).thenReturn(new JobStore.Recovered(JobStore.Recovery.UNCHANGED, null));
++    when(mocked.sweep(eq("b"), any(), eq(true)))
++        .thenReturn(new JobStore.Swept(record, List.of(FileKind.AUDIO), true));
++    when(mocked.recover("c")).thenThrow(new IllegalArgumentException("bad"));
++
++    new RetentionSweeper(mocked, refreshed::add, clock).recoverAtStartup();
++
++    assertThat(refreshed).containsExactly(record);
++  }
++
++  @Test
++  void aRuntimeFailureOfOneJobDoesNotStopTheOthers() {
++    JobStore mocked = mock(JobStore.class);
++    JobRecord record = new JobRecord("b", 1L, 2L, 3, "T", 1, T0, Map.of());
++    when(mocked.jobIds()).thenReturn(List.of("a", "b"));
++    when(mocked.recover("a")).thenThrow(new IllegalStateException("boom"));
++    when(mocked.recover("b")).thenReturn(new JobStore.Recovered(JobStore.Recovery.UNCHANGED, null));
++    when(mocked.sweep(eq("a"), any(), anyBoolean())).thenThrow(new IllegalStateException("boom"));
++    when(mocked.sweep(eq("b"), any(), anyBoolean()))
++        .thenReturn(new JobStore.Swept(record, List.of(FileKind.AUDIO), false));
++
++    new RetentionSweeper(mocked, refreshed::add, clock).sweep();
++    new RetentionSweeper(mocked, refreshed::add, clock).recoverAtStartup();
++
++    assertThat(refreshed).containsExactly(record, record);
++  }
++
++  @Test
++  void aFailingRefresherDoesNotStopThePassOrStartup() throws IOException {
++    publish("a", FileState.AVAILABLE, FileState.AVAILABLE, DEADLINE);
++    Path second = publish("b", FileState.AVAILABLE, FileState.AVAILABLE, DEADLINE);
++    clock.advance(Duration.ofHours(1));
++    ButtonRefresher failing =
++        job -> {
++          throw new IllegalStateException("boom");
++        };
++
++    new RetentionSweeper(store, failing, clock).sweep();
++
++    assertThat(second).doesNotExist();
++    assertThat(store.directory("a")).doesNotExist();
++
++    publish("c", FileState.AVAILABLE, FileState.AVAILABLE, DEADLINE);
++    new RetentionSweeper(store, failing, clock).recoverAtStartup();
++    assertThat(store.directory("c")).doesNotExist();
++  }
++}
+diff --git a/src/test/java/com/video2podcast/media/AudioPreparerTest.java b/src/test/java/com/video2podcast/media/AudioPreparerTest.java
+index 6e0fbe9..fdb38e0 100644
+--- a/src/test/java/com/video2podcast/media/AudioPreparerTest.java
++++ b/src/test/java/com/video2podcast/media/AudioPreparerTest.java
+@@ -30,7 +30,8 @@ class AudioPreparerTest {
+           Duration.ofHours(1),
+           Duration.ofMinutes(1),
+           Duration.ofMinutes(30),
+-          Duration.ofMinutes(20));
++          Duration.ofMinutes(20),
++          Duration.ofMinutes(1));
+ 
+   @TempDir Path dir;
+ 
+diff --git a/src/test/java/com/video2podcast/media/FfmpegRunnerTest.java b/src/test/java/com/video2podcast/media/FfmpegRunnerTest.java
+index fc3c2ce..9a77c61 100644
+--- a/src/test/java/com/video2podcast/media/FfmpegRunnerTest.java
++++ b/src/test/java/com/video2podcast/media/FfmpegRunnerTest.java
+@@ -24,7 +24,8 @@ class FfmpegRunnerTest {
+           Duration.ofHours(1),
+           Duration.ofMinutes(1),
+           Duration.ofMinutes(30),
+-          Duration.ofMinutes(20));
++          Duration.ofMinutes(20),
++          Duration.ofMinutes(1));
+ 
+   @TempDir Path dir;
+ 
+diff --git a/src/test/java/com/video2podcast/media/YtDlpClientTest.java b/src/test/java/com/video2podcast/media/YtDlpClientTest.java
+index f4260dd..e1ff281 100644
+--- a/src/test/java/com/video2podcast/media/YtDlpClientTest.java
++++ b/src/test/java/com/video2podcast/media/YtDlpClientTest.java
+@@ -26,7 +26,8 @@ class YtDlpClientTest {
+           Duration.ofHours(1),
+           Duration.ofMinutes(1),
+           Duration.ofMinutes(30),
+-          Duration.ofMinutes(20));
++          Duration.ofMinutes(20),
++          Duration.ofMinutes(1));
+ 
+   @TempDir Path dir;
+ 
+@@ -79,7 +80,8 @@ class YtDlpClientTest {
+           Duration.ofHours(1),
+           Duration.ofSeconds(7),
+           Duration.ofSeconds(11),
+-          Duration.ofSeconds(13));
++          Duration.ofSeconds(13),
++          Duration.ofMinutes(1));
+ 
+   @Test
+   void configuredLimitAndTimeoutsAreUsed() {

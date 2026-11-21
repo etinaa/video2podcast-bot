@@ -66,7 +66,7 @@ Feature: Reclaim retained job files and recover downloads after restart
 
   @R2 @R3 @R7
   Scenario Outline: A sent file keeps its label when the remaining download expires
-    Given job.json records <sentKind> state "SENT" and sentAt "2026-11-21T12:10:00Z"
+    Given job.json is preloaded with <sentKind> state "SENT" and sentAt "2026-11-21T12:10:00Z"
     And the application clock is "2026-11-21T13:00:01Z"
     When the next scheduled minute elapses without any Telegram update
     Then the job directory no longer exists
@@ -79,7 +79,7 @@ Feature: Reclaim retained job files and recover downloads after restart
 
   @R3
   Scenario Outline: Partial delivery preserves the unexpired download
-    Given job.json records <sentKind> state "SENT" and sentAt "2026-11-21T12:10:00Z"
+    Given job.json is preloaded with <sentKind> state "SENT" and sentAt "2026-11-21T12:10:00Z"
     And the application clock is "2026-11-21T12:30:00Z"
     When the next scheduled minute elapses without any Telegram update
     Then the job directory still contains "job.json" and "<keptPath>"
@@ -212,12 +212,12 @@ Feature: Reclaim retained job files and recover downloads after restart
   Scenario: Startup resets both interrupted sends without renewing either deadline
     Given the job's AUDIO and TRANSCRIPT entries are "SENDING" with expiresAt "2026-11-21T13:00:00Z" and null sentAt
     When the application restarts using the same work directory and access store
-    Then the job's AUDIO and TRANSCRIPT entries are "AVAILABLE" with expiresAt "2026-11-21T13:00:00Z" and null sentAt
+    Then job.json records both AUDIO and TRANSCRIPT entries as "AVAILABLE" with expiresAt "2026-11-21T13:00:00Z" and null sentAt
     And no automatic upload or media process occurs
 
   @R5
   Scenario: Recovery leaves an already-sent sibling sent
-    Given job.json records AUDIO state "SENT" and sentAt "2026-11-21T11:50:00Z"
+    Given job.json is preloaded with AUDIO state "SENT" and sentAt "2026-11-21T11:50:00Z"
     And the TRANSCRIPT state in job.json is "SENDING"
     When the application restarts using the same work directory and access store
     Then job.json records AUDIO state "SENT" and sentAt "2026-11-21T11:50:00Z"

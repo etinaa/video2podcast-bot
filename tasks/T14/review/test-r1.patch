@@ -1,0 +1,1069 @@
+diff --git a/src/it/java/com/video2podcast/functional/AudioSupport.java b/src/it/java/com/video2podcast/functional/AudioSupport.java
+index 7fa2441..0c21b2e 100644
+--- a/src/it/java/com/video2podcast/functional/AudioSupport.java
++++ b/src/it/java/com/video2podcast/functional/AudioSupport.java
+@@ -266,10 +266,12 @@ final class AudioSupport implements AutoCloseable {
+             .willReturn(aResponse().withHeader("Content-Type", "audio/mp4").withBody(bytes)));
+     w.allowed.add(202L);
+     w.start();
++    if (w.retention != null) w.bot().consume(Updates.privateMessage(w.admin, "/allow 202"));
+     w.bot().consume(Updates.privateMessage(202, "http://videos.example/earlier"));
+     assertThat(whisperReceived.await(30, TimeUnit.SECONDS))
+         .as("earlier job reached Whisper")
+         .isTrue();
++    if (w.retention != null) w.retention.captureLive();
+   }
+ 
+   void releaseEarlier() {
+diff --git a/src/it/java/com/video2podcast/functional/ExpiryIT.java b/src/it/java/com/video2podcast/functional/ExpiryIT.java
+new file mode 100644
+index 0000000..d321652
+--- /dev/null
++++ b/src/it/java/com/video2podcast/functional/ExpiryIT.java
+@@ -0,0 +1,67 @@
++package com.video2podcast.functional;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++import java.nio.file.Files;
++import java.time.Instant;
++import org.junit.jupiter.api.*;
++
++/**
++ * Focused acceptance entry point for real scheduler registration and full-context restart wiring.
++ */
++class ExpiryIT {
++  TranscriptWorld w;
++
++  @BeforeEach
++  void fixtures() throws Exception {
++    w = new TranscriptWorld();
++    w.beginRetention();
++    w.clock.now = Instant.parse("2026-11-21T12:00:00Z");
++    w.change(j -> {
++      for (String kind : java.util.List.of("AUDIO", "TRANSCRIPT"))
++        w.retention.file(j, kind).put("expiresAt", "2026-11-21T13:00:00Z");
++    });
++    w.retention.baseline();
++  }
++
++  @AfterEach
++  void close() {
++    w.close();
++  }
++
++  @Test
++  void idleApplicationExpiresFilesThroughRegisteredWallClockSchedule() {
++    w.clock.now = Instant.parse("2026-11-21T13:00:00Z");
++    // No test invokes the registered Runnable: release its wait and let Spring's timer run it.
++    w.retention.schedule.automatic = true;
++    w.retention.schedule.permits.release();
++    PipelineWorld.until(() -> {
++      assertThat(w.dir).doesNotExist();
++      assertThat(w.calls("editMessageReplyMarkup")).hasSize(1);
++      assertThat(w.retention.schedule.completed.get()).isGreaterThan(0);
++    });
++    w.labels(w.calls("editMessageReplyMarkup").getFirst(), "Audio expired", "Transcript expired");
++    assertThat(w.calls("sendAudio")).isEmpty();
++    assertThat(w.calls("sendDocument")).isEmpty();
++    w.noModels();
++  }
++
++  @Test
++  void expiredCallbackAndFreshContextUseOriginalDurableDeadlines() throws Exception {
++    byte[] source = Files.readAllBytes(w.dir.resolve("source.m4a"));
++    w.retention.state("TRANSCRIPT", "SENDING", null);
++    w.retention.restart();
++    w.retention.assertState("TRANSCRIPT", "AVAILABLE", null);
++    assertThat(w.file("TRANSCRIPT").path("expiresAt").asText()).isEqualTo("2026-11-21T13:00:00Z");
++    assertThat(Files.readAllBytes(w.dir.resolve("source.m4a"))).containsExactly(source);
++    assertThat(w.calls("sendDocument")).isEmpty();
++    w.tap("transcript:" + TranscriptWorld.JOB, 101, 701, 101, "private");
++    w.multipart("Budget meeting.txt", 101);
++    w.clock.now = Instant.parse("2026-11-21T13:00:00Z");
++    w.retention.tick();
++    assertThat(w.dir).doesNotExist();
++    w.tap("audio:" + TranscriptWorld.JOB, 101, 701, 101, "private");
++    w.refusal("Expired, please resend the link.");
++    assertThat(w.calls("sendAudio")).isEmpty();
++  }
++}
+diff --git a/src/it/java/com/video2podcast/functional/FunctionalTest.java b/src/it/java/com/video2podcast/functional/FunctionalTest.java
+index c60703b..398d010 100644
+--- a/src/it/java/com/video2podcast/functional/FunctionalTest.java
++++ b/src/it/java/com/video2podcast/functional/FunctionalTest.java
+@@ -80,6 +80,8 @@ abstract class FunctionalTest {
+         directory.resolve("allowed-users.json").toString(),
+         "app.jobs.work-dir",
+         directory.resolve("work").toString(),
++        "app.jobs.sweep-interval",
++        "P1D",
+         "spring.autoconfigure.exclude",
+         "org.telegram.telegrambots.longpolling.starter.TelegramBotStarterConfiguration");
+   }
+diff --git a/src/it/java/com/video2podcast/functional/MediaAssertionSteps.java b/src/it/java/com/video2podcast/functional/MediaAssertionSteps.java
+index 63be240..1b5a43f 100644
+--- a/src/it/java/com/video2podcast/functional/MediaAssertionSteps.java
++++ b/src/it/java/com/video2podcast/functional/MediaAssertionSteps.java
+@@ -14,6 +14,7 @@ import java.util.stream.*;
+ /** External boundary assertions for media and transcription. */
+ public class MediaAssertionSteps {
+   final PipelineWorld w;
++  @org.springframework.beans.factory.annotation.Autowired private TranscriptWorld retained;
+ 
+   public MediaAssertionSteps(PipelineWorld world) {
+     w = world;
+@@ -375,6 +376,10 @@ public class MediaAssertionSteps {
+ 
+   @Then("{string} does not exist in the job directory")
+   public void missingFile(String file) {
++    if (retained != null && retained.active) {
++      assertThat(retained.dir.resolve(file)).doesNotExist();
++      return;
++    }
+     PipelineWorld.until(() -> assertThat(w.job().resolve(file)).doesNotExist());
+   }
+ 
+diff --git a/src/it/java/com/video2podcast/functional/RetentionAssertionSteps.java b/src/it/java/com/video2podcast/functional/RetentionAssertionSteps.java
+new file mode 100644
+index 0000000..c77a390
+--- /dev/null
++++ b/src/it/java/com/video2podcast/functional/RetentionAssertionSteps.java
+@@ -0,0 +1,316 @@
++package com.video2podcast.functional;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++import com.fasterxml.jackson.databind.JsonNode;
++import io.cucumber.java.en.Then;
++import java.nio.file.*;
++import java.util.*;
++
++/** T14 observations use persisted state and external requests, never sweeper return values. */
++public class RetentionAssertionSteps {
++  final TranscriptWorld w;
++
++  public RetentionAssertionSteps(TranscriptWorld world) {
++    w = world;
++  }
++
++  RetentionSupport r() {
++    return w.retention;
++  }
++
++  @Then("the job directory no longer exists")
++  public void removed() {
++    assertThat(w.dir).doesNotExist();
++  }
++
++  @Then("the job directory no longer exists before the first scheduled minute elapses")
++  public void startupRemoved() {
++    assertThat(r().schedule.completed.get()).isZero();
++    removed();
++  }
++
++  @Then("the job directory still contains {string} and {string}")
++  public void retained(String a, String b) {
++    for (String file : List.of(a, b)) assertThat(w.dir.resolve(file)).isRegularFile();
++  }
++
++  @Then("the {word} entry and its retained file bytes are unchanged")
++  public void kept(String kind) throws Exception {
++    r().kept(kind);
++  }
++
++  @Then("the {word} entry remains AVAILABLE with expiresAt {string}")
++  public void available(String kind, String at) throws Exception {
++    assertThat(w.file(kind).path("state").asText()).isEqualTo("AVAILABLE");
++    assertThat(w.file(kind).path("expiresAt").asText()).isEqualTo(at);
++    r().kept(kind);
++  }
++
++  @Then("job.json records TRANSCRIPT state {string} and sentAt {string}")
++  public void sentAt(String state, String at) throws Exception {
++    r().assertState("TRANSCRIPT", state, at);
++  }
++
++  @Then(
++      "job.json records both AUDIO and TRANSCRIPT entries as {string} with expiresAt {string} and null sentAt")
++  public void both(String state, String at) throws Exception {
++    for (String kind : List.of("AUDIO", "TRANSCRIPT")) {
++      r().assertState(kind, state, null);
++      assertThat(w.file(kind).path("expiresAt").asText()).isEqualTo(at);
++    }
++  }
++
++  @Then("both expiresAt values in job.json remain {string}")
++  @Then("both expiresAt values remain {string}")
++  public void deadlines(String at) throws Exception {
++    for (String kind : List.of("AUDIO", "TRANSCRIPT"))
++      assertThat(w.file(kind).path("expiresAt").asText()).isEqualTo(at);
++  }
++
++  @Then("the retained source and transcript bytes are unchanged")
++  public void bytes() throws Exception {
++    for (String name : List.of("source.m4a", "transcript.txt"))
++      assertThat(Files.readAllBytes(w.dir.resolve(name)))
++          .containsExactly(r().restartBefore.get(name));
++    JsonNode prior = PipelineWorld.JSON.readTree(r().restartBefore.get("job.json"));
++    for (String key :
++        List.of(
++            "jobId",
++            "ownerUserId",
++            "chatId",
++            "summaryMessageId",
++            "title",
++            "durationSeconds",
++            "createdAt"))
++      assertThat(w.job().path(key)).as("preserved %s", key).isEqualTo(prior.path(key));
++  }
++
++  @Then("no automatic upload or media process occurs")
++  public void noAutomatic() {
++    assertThat(w.calls("sendAudio")).isEmpty();
++    assertThat(w.calls("sendDocument")).isEmpty();
++    assertThat(r().commands).hasSize(r().restartCommandCount);
++    w.noModels();
++  }
++
++  @Then("the Telegram mock receives one successful {word} targeting stored chat {long}")
++  public void successful(String method, long chat) {
++    assertThat(w.calls(method))
++        .singleElement()
++        .satisfies(c -> {
++          assertThat(c.request().isMultipart()).isTrue();
++          assertThat(c.request().getPart("chat_id").getBody().asString())
++              .isEqualTo(Long.toString(chat));
++          String field = method.equals("sendAudio") ? "audio" : "document";
++          String reference = c.request().getPart(field).getBody().asString();
++          assertThat(reference).startsWith("attach://");
++          assertThat(c.request().getPart(reference.substring(9)).getBody().asBytes())
++              .containsExactly(
++                  r().restartBefore.get(field.equals("audio") ? "source.m4a" : "transcript.txt"));
++        });
++    assertThat(
++            w.telegram.getAllServeEvents().stream()
++                .filter(
++                    e -> e.getRequest().getUrl().endsWith("/" + method.toLowerCase(Locale.ROOT))))
++        .singleElement()
++        .satisfies(e -> assertThat(e.getResponse().getStatus()).isEqualTo(200));
++  }
++
++  @Then("the summary keyboard offers {string} and {string} after any recovery edit")
++  public void recovered(String a, String t) throws Exception {
++    JsonNode prior = PipelineWorld.JSON.readTree(r().restartBefore.get("job.json"));
++    boolean reset = prior.path("files").findValuesAsText("state").contains("SENDING");
++    assertThat(w.calls("editMessageReplyMarkup")).hasSize(reset ? 1 : 0);
++    for (var c : w.calls("editMessageReplyMarkup")) w.labels(c, a, t);
++    // AVAILABLE startup has no edit; the original published keyboard remains unchanged.
++    for (String kind : List.of("AUDIO", "TRANSCRIPT"))
++      assertThat(w.file(kind).path("state").asText()).isEqualTo("AVAILABLE");
++  }
++
++  @Then(
++      "the Telegram mock receives a reply-markup edit targeting chat {long} and message {int} with {string} and {string}")
++  public void edit(long chat, int message, String a, String t) {
++    var edits =
++        w.calls("editMessageReplyMarkup").stream()
++            .filter(c -> c.json().path("message_id").asInt() == message)
++            .toList();
++    // Fixtures with no callback have exactly one combined expiry/recovery edit.
++    if (w.calls("answerCallbackQuery").isEmpty()) assertThat(edits).hasSize(1);
++    assertThat(edits)
++        .anySatisfy(c -> {
++          assertThat(c.json().path("chat_id").asLong()).isEqualTo(chat);
++          w.labels(c, a, t);
++        });
++  }
++
++  @Then("the edit keeps audio first and transcript second with the original callback data")
++  public void callbackData() {
++    assertThat(w.calls("editMessageReplyMarkup")).hasSize(1);
++    w.labels(w.calls("editMessageReplyMarkup").getFirst(), "Audio expired", "Transcript expired");
++  }
++
++  @Then("no summary keyboard edit labels either file as expired")
++  public void noExpired() {
++    for (var c : w.calls("editMessageReplyMarkup"))
++      assertThat(c.json().toString()).doesNotContain("Audio expired", "Transcript expired");
++  }
++
++  @Then(
++      "the Telegram mock receives no sendAudio, sendDocument, sendMessage, editMessageText or deleteMessage")
++  public void noMessages() {
++    none("sendAudio", "sendDocument", "sendMessage", "editMessageText", "deleteMessage");
++  }
++
++  @Then("the Telegram mock receives no deleteMessage, sendAudio or sendDocument")
++  public void noUploadsOrDelete() {
++    none("deleteMessage", "sendAudio", "sendDocument");
++  }
++
++  @Then("the Telegram mock receives no sendAudio or sendDocument")
++  public void noUploads() {
++    none("sendAudio", "sendDocument");
++  }
++
++  @Then("the Telegram mock receives no sendAudio request")
++  public void noAudio() {
++    none("sendAudio");
++  }
++
++  @Then("the Telegram mock receives no deleteMessage")
++  public void noDelete() {
++    none("deleteMessage");
++  }
++
++  @Then(
++      "the Telegram mock has received exactly one sendAudio request and one sendDocument request in total")
++  public void bothOnce() {
++    assertThat(w.calls("sendAudio")).hasSize(1);
++    assertThat(w.calls("sendDocument")).hasSize(1);
++  }
++
++  @Then("the Telegram mock receives no upload or reply-markup edit for that job")
++  @Then("the Telegram mock receives no upload or expiry keyboard edit")
++  public void noUploadsOrEdits() {
++    none("sendAudio", "sendDocument", "editMessageReplyMarkup");
++  }
++
++  void none(String... methods) {
++    for (String m : methods) assertThat(w.calls(m)).as(m).isEmpty();
++  }
++
++  @Then("both expired job directories no longer exist")
++  public void bothGone() {
++    removed();
++    assertThat(w.root.resolve("work/22222222-2222-4222-8222-222222222222")).doesNotExist();
++  }
++
++  @Then(
++      "the Telegram mock receives a reply-markup edit for message {int} with {string} and {string}")
++  public void secondEdit(int message, String a, String t) {
++    assertThat(
++            w.calls("editMessageReplyMarkup").stream()
++                .filter(c -> c.json().path("message_id").asInt() == message))
++        .singleElement()
++        .satisfies(c -> {
++          assertThat(c.json().path("chat_id").asLong()).isEqualTo(101);
++          JsonNode row = c.json().path("reply_markup").path("inline_keyboard");
++          assertThat(row.size()).isEqualTo(1);
++          assertThat(row.path(0).size()).isEqualTo(2);
++          for (int i = 0; i < 2; i++) {
++            assertThat(row.path(0).path(i).path("text").asText()).isEqualTo(i == 0 ? a : t);
++            assertThat(row.path(0).path(i).path("callback_data").asText())
++                .isEqualTo(
++                    (i == 0 ? "audio:" : "transcript:") + "22222222-2222-4222-8222-222222222222");
++          }
++        });
++  }
++
++  @Then("no job files are created by startup cleanup")
++  public void empty() throws Exception {
++    if (Files.exists(w.root.resolve("work")))
++      try (var entries = Files.list(w.root.resolve("work"))) {
++        assertThat(entries.toList()).isEmpty();
++      }
++    assertThat(r().schedule.completed.get()).isZero();
++  }
++
++  @Then("the sentinel file and allowed-users.json bytes are unchanged")
++  public void external() throws Exception {
++    assertThat(Files.readAllBytes(w.sentinel)).containsExactly(r().sentinelBefore);
++    assertThat(Files.readAllBytes(w.root.resolve("allowed-users.json")))
++        .containsExactly(r().accessBefore);
++  }
++
++  @Then("{string} under the work directory still contains {string}")
++  public void unrelated(String name, String text) throws Exception {
++    assertThat(Files.readString(w.root.resolve("work").resolve(name))).isEqualTo(text);
++  }
++
++  @Then("the Telegram mock receives the allowed-user help text")
++  public void help() {
++    assertThat(w.calls("sendMessage"))
++        .singleElement()
++        .satisfies(c -> {
++          assertThat(c.json().path("chat_id").asLong()).isEqualTo(w.user);
++          assertThat(c.json().path("text").asText())
++              .startsWith("Send me a video link and I'll reply with a summary.");
++        });
++  }
++
++  @Then("the live job's partial source bytes remain on disk")
++  public void partial() throws Exception {
++    r().liveUnchanged();
++    assertThat(r().liveBefore.keySet()).contains("source.m4a.part");
++  }
++
++  @Then("its directory still exists")
++  public void liveDir() {
++    assertThat(r().liveDir).isDirectory();
++  }
++
++  @Then("that live job's source and transcription input files remain on disk")
++  public void liveFiles() throws Exception {
++    r().liveUnchanged();
++    assertThat(r().liveBefore.keySet()).contains("source.m4a", "audio.wav", "chunks/chunk-000.wav");
++  }
++
++  @Then("no Telegram failure message is sent for that live job")
++  public void noFailure() {
++    for (var c : w.calls("sendMessage"))
++      if (c.json().path("chat_id").asLong() == 202)
++        assertThat(c.json().path("text").asText())
++            .doesNotContain("Could not", "failed", "unavailable");
++  }
++
++  @Then("that earlier job publishes its summary with both download buttons")
++  public void summary() {
++    PipelineWorld.until(() ->
++        assertThat(
++                w.calls("sendMessage").stream()
++                    .filter(c ->
++                        c.json().path("chat_id").asLong() == 202 && c.json().has("reply_markup")))
++            .anySatisfy(c -> {
++              assertThat(c.json().path("text").asText())
++                  .contains("Earlier video", "Earlier summary");
++              assertThat(c.json().path("reply_markup").toString())
++                  .contains("Download audio", "Download transcript");
++            }));
++  }
++
++  @Then("the Telegram mock receives a sendMessage with {string}")
++  public void failure(String text) {
++    PipelineWorld.until(() ->
++        assertThat(w.calls("sendMessage"))
++            .anySatisfy(c -> {
++              assertThat(c.json().path("chat_id").asLong()).isEqualTo(w.user);
++              assertThat(c.json().path("text").asText()).isEqualTo(text);
++            }));
++  }
++
++  @Then("the failed job's directory no longer exists before another scheduled minute elapses")
++  public void failedGone() {
++    PipelineWorld.until(() -> assertThat(r().liveDir).isNotNull().doesNotExist());
++    assertThat(r().schedule.completed.get()).isZero();
++  }
++}
+diff --git a/src/it/java/com/video2podcast/functional/RetentionSetupSteps.java b/src/it/java/com/video2podcast/functional/RetentionSetupSteps.java
+new file mode 100644
+index 0000000..6d70a31
+--- /dev/null
++++ b/src/it/java/com/video2podcast/functional/RetentionSetupSteps.java
+@@ -0,0 +1,220 @@
++package com.video2podcast.functional;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++import com.fasterxml.jackson.databind.node.ObjectNode;
++import io.cucumber.java.en.*;
++import java.nio.file.*;
++import java.time.*;
++import java.util.*;
++import java.util.concurrent.TimeUnit;
++
++/**
++ * Retention fixture changes happen while scheduler execution is gated and no pipeline owns the job.
++ */
++public class RetentionSetupSteps {
++  final TranscriptWorld w;
++
++  public RetentionSetupSteps(TranscriptWorld world) {
++    w = world;
++  }
++
++  @Given("the Telegram mock accepts audio uploads, document uploads and keyboard edits")
++  public void baseline() throws Exception {
++    w.retention.baseline();
++  }
++
++  RetentionSupport support() {
++    return w.retention;
++  }
++
++  @Given("the job directory also contains {string} and {string}")
++  public void extras(String a, String b) throws Exception {
++    for (String name : List.of(a, b)) {
++      Path file = w.dir.resolve(name);
++      Files.createDirectories(file.getParent());
++      Files.writeString(file, "temporary working bytes");
++    }
++  }
++
++  @Given("the job createdAt in job.json is {string}")
++  public void created(String at) throws Exception {
++    w.change(j -> j.put("createdAt", at));
++  }
++
++  @Given("job.json is preloaded with {word} state {string} and sentAt {string}")
++  public void preloaded(String kind, String state, String sent) throws Exception {
++    support().state(kind, state, sent);
++  }
++
++  @Given("job.json records AUDIO state {string} and TRANSCRIPT state {string}")
++  public void terminal(String a, String t) throws Exception {
++    support().state("AUDIO", a, a.equals("SENT") ? "2026-11-21T11:50:00Z" : null);
++    support().state("TRANSCRIPT", t, t.equals("SENT") ? "2026-11-21T11:50:00Z" : null);
++  }
++
++  @Given("files marked EXPIRED are already absent from the job directory")
++  public void absentExpired() throws Exception {
++    for (String kind : List.of("AUDIO", "TRANSCRIPT"))
++      if (w.file(kind).path("state").asText().equals("EXPIRED"))
++        Files.deleteIfExists(w.dir.resolve(w.file(kind).path("path").asText()));
++  }
++
++  @Given("the application clock advances by two hours")
++  public void advance() {
++    w.clock.now = w.clock.instant().plus(Duration.ofHours(2));
++  }
++
++  @When("the next scheduled minute elapses without any Telegram update")
++  public void tick() throws Exception {
++    support().tick();
++  }
++
++  @When("the application clock is {string} and the next scheduled minute elapses")
++  public void atAndTick(String at) throws Exception {
++    w.clock.now = Instant.parse(at);
++    tick();
++  }
++
++  @Given("a scheduled minute has elapsed and the job directory no longer exists")
++  public void expired() throws Exception {
++    tick();
++    assertThat(w.dir).doesNotExist();
++  }
++
++  @When("the application restarts using the same work directory and access store")
++  public void restart() throws Exception {
++    support().restart();
++  }
++
++  @When("the application restarts twice using the same work directory and access store")
++  public void twice() throws Exception {
++    restart();
++    byte[] access = support().accessBefore;
++    byte[] sentinel = support().sentinelBefore;
++    restart();
++    support().accessBefore = access;
++    support().sentinelBefore = sentinel;
++  }
++
++  @Given("job.json contains null")
++  public void nullRecord() throws Exception {
++    Files.writeString(w.dir.resolve("job.json"), "null");
++  }
++
++  @Given("job.json contains a different jobId from its directory name")
++  public void wrongId() throws Exception {
++    w.change(j -> j.put("jobId", "other-job"));
++  }
++
++  @Given("job.json contains a retained filename with parent traversal")
++  public void traversal() throws Exception {
++    w.change(j -> support().file(j, "AUDIO").put("path", "../outside.m4a"));
++  }
++
++  @Given("the work directory is empty")
++  public void empty() throws Exception {
++    RetentionSupport.erase(w.root.resolve("work"));
++    Files.createDirectories(w.root.resolve("work"));
++  }
++
++  @Given("the work directory is absent")
++  public void noRoot() throws Exception {
++    RetentionSupport.erase(w.root.resolve("work"));
++  }
++
++  @Given("the allowed-users.json file is stored outside the work directory")
++  public void access() {
++    assertThat(w.root.resolve("allowed-users.json")).isRegularFile();
++    assertThat(w.root.resolve("allowed-users.json").startsWith(w.root.resolve("work"))).isFalse();
++  }
++
++  @Given("both expiresAt values in job.json are null")
++  public void nullExpiry() throws Exception {
++    w.change(j -> {
++      for (String kind : List.of("AUDIO", "TRANSCRIPT"))
++        support().file(j, kind).putNull("expiresAt");
++    });
++  }
++
++  @Given("the AUDIO expiresAt in job.json is null")
++  public void nullAudio() throws Exception {
++    w.change(j -> support().file(j, "AUDIO").putNull("expiresAt"));
++  }
++
++  @Given("the job's AUDIO and TRANSCRIPT states are {string} with null sentAt")
++  public void bothStates(String state) throws Exception {
++    for (String kind : List.of("AUDIO", "TRANSCRIPT")) support().state(kind, state, null);
++  }
++
++  @Given(
++      "a directory named {string} under the work directory contains {string} with content {string}")
++  public void unrelated(String dir, String name, String text) throws Exception {
++    Files.writeString(
++        Files.createDirectories(w.root.resolve("work").resolve(dir)).resolve(name), text);
++  }
++
++  @Given(
++      "another published expired job {string} exists on disk for user {long} with summary message id {int}")
++  public void another(String id, long owner, int message) throws Exception {
++    ObjectNode j = w.job();
++    j.put("jobId", id).put("ownerUserId", owner).put("summaryMessageId", message);
++    for (String kind : List.of("AUDIO", "TRANSCRIPT"))
++      support().file(j, kind).put("expiresAt", "2026-11-21T12:00:00Z");
++    Path dir = Files.createDirectories(w.root.resolve("work").resolve(id));
++    Files.writeString(dir.resolve("job.json"), PipelineWorld.JSON.writeValueAsString(j));
++    for (String name : List.of("source.m4a", "transcript.txt"))
++      Files.copy(w.dir.resolve(name), dir.resolve(name));
++  }
++
++  @Given(
++      "the Telegram mock rejects expiry edits for message {int} with HTTP {int} and a Bot API error response")
++  public void reject(int message, int status) {
++    assertThat(status).isEqualTo(400);
++    support().rejectMessage = message;
++  }
++
++  @Given("the Telegram mock holds the document upload response and will reject it with HTTP {int}")
++  public void failed(int code) {
++    assertThat(code).isEqualTo(400);
++    w.hold = true;
++    w.rejectUpload = 1;
++  }
++
++  @When("the Telegram mock releases the rejected upload response")
++  public void release() throws Exception {
++    w.finishUpload();
++  }
++
++  @Given("another allowed user's video link is waiting for a held media-download response")
++  public void download() throws Exception {
++    support().holdDownload = true;
++    w.bot().consume(Updates.privateMessage(w.admin, "/allow 202"));
++    w.events.clear();
++    w.bot().consume(Updates.privateMessage(202, "https://videos.example/live"));
++    assertThat(support().downloadReceived.await(15, TimeUnit.SECONDS)).isTrue();
++    support().captureLive();
++  }
++
++  @Given("that live job's directory contains a partial source file but no job.json")
++  public void partial() {
++    assertThat(support().liveDir.resolve("source.m4a.part")).isRegularFile();
++    assertThat(support().liveDir.resolve("job.json")).doesNotExist();
++  }
++
++  @Given("the media-download fault fixture exits with code 1 for {string}")
++  public void failure(String url) {
++    assertThat(url).isEqualTo("https://videos.example/broken");
++    support().failDownload = true;
++  }
++
++  @When("the user sends a private message with text {string}")
++  public void message(String text) {
++    w.bot().consume(Updates.privateMessage(w.user, text));
++  }
++
++  @When("the Whisper mock releases the successful response")
++  public void releaseWhisper() {
++    w.audio.releaseWhisper.countDown();
++  }
++}
+diff --git a/src/it/java/com/video2podcast/functional/RetentionSupport.java b/src/it/java/com/video2podcast/functional/RetentionSupport.java
+new file mode 100644
+index 0000000..eedacab
+--- /dev/null
++++ b/src/it/java/com/video2podcast/functional/RetentionSupport.java
+@@ -0,0 +1,231 @@
++package com.video2podcast.functional;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++import com.fasterxml.jackson.databind.JsonNode;
++import com.fasterxml.jackson.databind.node.ObjectNode;
++import com.video2podcast.media.ProcessResult;
++import java.nio.file.*;
++import java.time.*;
++import java.util.*;
++import java.util.concurrent.*;
++import java.util.concurrent.atomic.*;
++import org.springframework.boot.test.context.TestConfiguration;
++import org.springframework.context.annotation.Bean;
++import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
++
++/** T14 boundary fixtures. No cleanup, recovery or delivery service is invoked by the tests. */
++final class RetentionSupport {
++  final TranscriptWorld w;
++  Schedule schedule = new Schedule();
++  final List<List<String>> commands = new CopyOnWriteArrayList<>();
++  final CountDownLatch downloadReceived = new CountDownLatch(1);
++  final CountDownLatch releaseDownload = new CountDownLatch(1);
++  final Map<String, byte[]> liveBefore = new TreeMap<>();
++  Map<String, byte[]> restartBefore;
++  byte[] accessBefore, sentinelBefore;
++  volatile Path liveDir;
++  boolean restarting, holdDownload, failDownload;
++  String uploadMethod = "senddocument";
++  int rejectMessage = -1;
++  int restartCommandCount;
++
++  RetentionSupport(TranscriptWorld world) {
++    w = world;
++  }
++
++  void baseline() throws Exception {
++    w.start();
++    remember();
++  }
++
++  void remember() throws Exception {
++    w.before.clear();
++    w.before.putAll(w.snapshot());
++  }
++
++  void tick() throws Exception {
++    remember();
++    int requests = w.events.size();
++    schedule.pass();
++    assertThat(w.events.subList(requests, w.events.size()))
++        .noneMatch(c -> c.method().equals("answercallbackquery"));
++  }
++
++  void restart() throws Exception {
++    restartBefore = w.snapshot();
++    restartCommandCount = commands.size();
++    accessBefore = Files.readAllBytes(w.root.resolve("allowed-users.json"));
++    if (w.sentinel != null) sentinelBefore = Files.readAllBytes(w.sentinel);
++    w.context.close();
++    w.context = null;
++    restarting = true;
++    schedule = new Schedule();
++    w.events.clear();
++    w.telegram.resetRequests();
++    w.start();
++    assertThat(schedule.completed.get()).as("no scheduled pass during startup recovery").isZero();
++    w.before.clear();
++    w.before.putAll(restartBefore);
++  }
++
++  ProcessResult run(List<String> args, Duration timeout) {
++    commands.add(List.copyOf(args));
++    try {
++      if (args.getFirst().equals("yt-dlp")) {
++        if (args.contains("--dump-single-json"))
++          return new ProcessResult(0, "{\"title\":\"Earlier video\",\"duration\":60}", "");
++        Path source = Path.of(args.get(args.indexOf("-o") + 1).replace("%(ext)s", "m4a"));
++        liveDir = source.getParent();
++        if (holdDownload) {
++          Files.writeString(source.resolveSibling("source.m4a.part"), "partial retained bytes");
++          downloadReceived.countDown();
++          assertThat(releaseDownload.await(45, TimeUnit.SECONDS)).as("download released").isTrue();
++        }
++        if (failDownload) return new ProcessResult(1, "", "download fixture failed");
++        Files.copy(w.audio.source, source, StandardCopyOption.REPLACE_EXISTING);
++      } else if (args.getFirst().equals("ffmpeg")) {
++        String output = args.getLast();
++        Path target = Path.of(output.replace("%03d", "000"));
++        Files.createDirectories(target.getParent());
++        Files.copy(
++            Path.of("src/it/resources/media/fixture.wav"),
++            target,
++            StandardCopyOption.REPLACE_EXISTING);
++      } else throw new AssertionError("Unexpected process: " + args);
++      return new ProcessResult(0, "", "");
++    } catch (java.io.IOException | InterruptedException e) {
++      if (e instanceof InterruptedException) Thread.currentThread().interrupt();
++      throw new IllegalStateException(e);
++    }
++  }
++
++  void captureLive() throws Exception {
++    assertThat(liveDir).isDirectory();
++    liveBefore.clear();
++    try (var paths = Files.walk(liveDir)) {
++      for (Path p : paths.filter(Files::isRegularFile).toList())
++        liveBefore.put(liveDir.relativize(p).toString(), Files.readAllBytes(p));
++    }
++    assertThat(liveBefore).isNotEmpty();
++  }
++
++  void liveUnchanged() throws Exception {
++    for (var entry : liveBefore.entrySet())
++      assertThat(Files.readAllBytes(liveDir.resolve(entry.getKey())))
++          .containsExactly(entry.getValue());
++  }
++
++  void awaitUpload() {
++    String kind = uploadMethod.equals("sendaudio") ? "AUDIO" : "TRANSCRIPT";
++    PipelineWorld.until(() -> {
++      try {
++        assertThat(w.file(kind).path("state").asText())
++            .isEqualTo(w.rejectUpload == 0 ? "SENT" : "AVAILABLE");
++        assertThat(w.calls("editMessageReplyMarkup").getLast().json().toString())
++            .contains(
++                w.rejectUpload == 0
++                    ? (kind.equals("AUDIO") ? "Audio sent" : "Transcript sent")
++                    : "Download transcript");
++      } catch (Exception e) {
++        throw new AssertionError(e);
++      }
++    });
++  }
++
++  ObjectNode file(ObjectNode job, String kind) {
++    return (ObjectNode) job.path("files").path(kind);
++  }
++
++  void state(String kind, String state, String sent) throws Exception {
++    w.change(j -> {
++      file(j, kind).put("state", state);
++      if (sent == null) file(j, kind).remove("sentAt");
++      else file(j, kind).put("sentAt", sent);
++    });
++  }
++
++  void assertState(String kind, String state, String sent) throws Exception {
++    JsonNode file = w.file(kind);
++    assertThat(file.path("state").asText()).isEqualTo(state);
++    if (sent == null)
++      assertThat(file.path("sentAt").isNull() || file.path("sentAt").isMissingNode()).isTrue();
++    else if (sent.equals("nonnull"))
++      assertThat(Instant.parse(file.path("sentAt").asText())).isEqualTo(w.clock.instant());
++    else assertThat(file.path("sentAt").asText()).isEqualTo(sent);
++  }
++
++  void kept(String kind) throws Exception {
++    JsonNode prior = PipelineWorld.JSON.readTree(w.before.get("job.json")).path("files").path(kind);
++    assertThat(w.file(kind)).isEqualTo(prior);
++    String name = prior.path("path").asText();
++    assertThat(Files.readAllBytes(w.dir.resolve(name))).containsExactly(w.before.get(name));
++  }
++
++  static void erase(Path root) throws Exception {
++    if (!Files.exists(root)) return;
++    try (var paths = Files.walk(root)) {
++      for (Path p : paths.sorted(Comparator.reverseOrder()).toList()) Files.delete(p);
++    }
++  }
++
++  @TestConfiguration(proxyBeanMethods = false)
++  static class Scheduling {
++    @Bean(name = "taskScheduler")
++    Schedule taskScheduler(
++        @org.springframework.beans.factory.annotation.Qualifier("retentionSchedule")
++            Schedule scheduler) {
++      return scheduler;
++    }
++  }
++
++  /**
++   * Real scheduler thread invokes Spring's registered task; permits only control test
++   * interleavings.
++   */
++  static final class Schedule extends ThreadPoolTaskScheduler {
++    volatile boolean automatic;
++    final Semaphore permits = new Semaphore(0);
++    final Semaphore finished = new Semaphore(0);
++    final AtomicInteger completed = new AtomicInteger();
++    final AtomicInteger registrations = new AtomicInteger();
++    final AtomicReference<Throwable> failure = new AtomicReference<>();
++
++    Schedule() {
++      setThreadNamePrefix("retention-test-schedule-");
++    }
++
++    @Override
++    public ScheduledFuture<?> scheduleWithFixedDelay(Runnable task, Instant start, Duration delay) {
++      registrations.incrementAndGet();
++      assertThat(delay).isEqualTo(Duration.ofMillis(100));
++      return super.scheduleWithFixedDelay(
++          () -> {
++            try {
++              if (!automatic) permits.acquire();
++              task.run();
++              completed.incrementAndGet();
++            } catch (InterruptedException e) {
++              Thread.currentThread().interrupt();
++            } catch (Throwable e) {
++              failure.set(e);
++            } finally {
++              finished.release();
++            }
++          },
++          start,
++          delay);
++    }
++
++    void pass() throws Exception {
++      assertThat(registrations.get())
++          .as("Spring registered exactly one fixed-delay task")
++          .isEqualTo(1);
++      permits.release();
++      assertThat(finished.tryAcquire(15, TimeUnit.SECONDS))
++          .as("registered scheduled pass completed")
++          .isTrue();
++      assertThat(failure.get()).as("scheduled task failure").isNull();
++    }
++  }
++}
+diff --git a/src/it/java/com/video2podcast/functional/TranscriptSetupSteps.java b/src/it/java/com/video2podcast/functional/TranscriptSetupSteps.java
+index fa07828..e8992d2 100644
+--- a/src/it/java/com/video2podcast/functional/TranscriptSetupSteps.java
++++ b/src/it/java/com/video2podcast/functional/TranscriptSetupSteps.java
+@@ -204,6 +204,7 @@ public class TranscriptSetupSteps {
+   @Given("the application starts with the existing job directory")
+   public void startup() {
+     assertThat(w.context).isNull();
++    w.persistedStartup = true;
+     w.start();
+   }
+ 
+diff --git a/src/it/java/com/video2podcast/functional/TranscriptWorld.java b/src/it/java/com/video2podcast/functional/TranscriptWorld.java
+index e887ed1..bb29652 100644
+--- a/src/it/java/com/video2podcast/functional/TranscriptWorld.java
++++ b/src/it/java/com/video2podcast/functional/TranscriptWorld.java
+@@ -49,7 +49,8 @@ public class TranscriptWorld implements AutoCloseable {
+   ConfigurableApplicationContext context;
+   Path root, dir, sentinel;
+   AudioSupport audio;
+-  boolean active, hold, drop, rejectAnswer;
++  RetentionSupport retention;
++  boolean active, hold, drop, rejectAnswer, persistedStartup;
+   int rejectUpload, rejectEdit, tapStart;
+   long user = 101, admin = 999;
+   String originalTitle = "Budget meeting";
+@@ -100,6 +101,12 @@ public class TranscriptWorld implements AutoCloseable {
+     audio = new AudioSupport(this);
+   }
+ 
++  @Before(value = "@T14", order = 10)
++  public void beginRetention() throws Exception {
++    beginAudio();
++    retention = new RetentionSupport(this);
++  }
++
+   void start() {
+     assertThat(active)
+         .as("retained-job scenario is active before starting its application")
+@@ -112,27 +119,53 @@ public class TranscriptWorld implements AutoCloseable {
+     props.put("app.telegram.admin-user-id", Long.toString(admin));
+     props.put("spring.main.banner-mode", "off");
+     props.put("logging.level.root", "WARN");
++    props.put("app.jobs.sweep-interval", retention == null ? "P1D" : "PT0.1S");
++    // T12/T13 describe callbacks against runtime records, including active SENDING claims.
++    // Install those fixtures after startup recovery; T14 explicitly exercises persisted startup.
++    Path staged = root.resolve("runtime-job");
++    if (retention == null && !persistedStartup && Files.exists(dir)) {
++      try {
++        Files.move(dir, staged);
++      } catch (java.io.IOException e) {
++        throw new IllegalStateException(e);
++      }
++    }
+     // Initializer registers only boundary fixtures, leaving all delivery wiring real.
++    var builder = new SpringApplicationBuilder(Video2PodcastApplication.class, Fixtures.class);
++    if (retention != null) builder.sources(RetentionSupport.Scheduling.class);
+     context =
+-        new SpringApplicationBuilder(Video2PodcastApplication.class, Fixtures.class)
++        builder
+             .initializers(c -> {
+               c.getBeanFactory().registerSingleton("transcriptFixtureClock", clock);
++              if (retention != null)
++                c.getBeanFactory().registerSingleton("retentionSchedule", retention.schedule);
+               ProcessRunner runner =
+-                  audio == null
+-                      ? (command, timeout) -> {
+-                        throw new AssertionError(
+-                            "Transcript tap invoked a media process: " + command);
+-                      }
+-                      : audio::run;
++                  retention != null
++                      ? retention::run
++                      : audio == null
++                          ? (command, timeout) -> {
++                            throw new AssertionError(
++                                "Transcript tap invoked a media process: " + command);
++                          }
++                          : audio::run;
+               c.getBeanFactory().registerSingleton("retainedFixtureProcesses", runner);
+             })
+             .run(
+                 props.entrySet().stream()
+                     .map(e -> "--" + e.getKey() + "=" + e.getValue())
+                     .toArray(String[]::new));
+-    for (long id : allowed) bot().consume(Updates.privateMessage(admin, "/allow " + id));
+-    events.clear();
+-    telegram.resetRequests();
++    if (retention == null && !persistedStartup && Files.exists(staged)) {
++      try {
++        Files.move(staged, dir);
++      } catch (java.io.IOException e) {
++        throw new IllegalStateException(e);
++      }
++    }
++    if (retention == null || !retention.restarting) {
++      for (long id : allowed) bot().consume(Updates.privateMessage(admin, "/allow " + id));
++      events.clear();
++      telegram.resetRequests();
++    }
+   }
+ 
+   TelegramBot bot() {
+@@ -195,6 +228,8 @@ public class TranscriptWorld implements AutoCloseable {
+         .put("id", chat)
+         .put("type", type);
+     Update update = PipelineWorld.JSON.treeToValue(node, Update.class);
++    if (retention != null)
++      retention.uploadMethod = data.startsWith("audio:") ? "sendaudio" : "senddocument";
+     boolean awaitFirstUpload = hold && releaseUpload.getCount() != 0 && pending.isEmpty();
+     Future<?> task = updates.submit(() -> bot().consume(update));
+     pending.add(task);
+@@ -209,7 +244,8 @@ public class TranscriptWorld implements AutoCloseable {
+   void finishUpload() throws Exception {
+     releaseUpload.countDown();
+     for (Future<?> task : pending) task.get(WAIT.toMillis(), TimeUnit.MILLISECONDS);
+-    if (audio != null) audio.awaitDelivery();
++    if (retention != null) retention.awaitUpload();
++    else if (audio != null) audio.awaitDelivery();
+   }
+ 
+   List<Call> calls(String method) {
+@@ -279,10 +315,11 @@ public class TranscriptWorld implements AutoCloseable {
+     assertThat(r.getPart("caption")).isNull();
+   }
+ 
+-  @After(value = "@T12 or @T13", order = 100)
++  @After(value = "@T12 or @T13 or @T14", order = 100)
+   public void close() {
+     active = false;
+     releaseUpload.countDown();
++    if (retention != null) retention.releaseDownload.countDown();
+     if (audio != null) audio.releaseWhisper.countDown();
+     updates.shutdown();
+     try {
+@@ -348,7 +385,10 @@ public class TranscriptWorld implements AutoCloseable {
+         persisted = null;
+       }
+       events.add(new Call(method, request, persisted));
+-      if (method.equals(audio == null ? "senddocument" : "sendaudio")) {
++      if (method.equals(
++          retention != null
++              ? retention.uploadMethod
++              : audio == null ? "senddocument" : "sendaudio")) {
+         int attempt = uploads.incrementAndGet();
+         uploadReceived.countDown();
+         if (hold)
+@@ -365,6 +405,10 @@ public class TranscriptWorld implements AutoCloseable {
+         if (audio == null) clock.now = clock.instant().plusSeconds(1);
+         uploadSuccess = clock.instant();
+       }
++      if (retention != null
++          && method.equals("editmessagereplymarkup")
++          && PipelineWorld.json(request.getBodyAsString()).path("message_id").asInt()
++              == retention.rejectMessage) return rejected();
+       if (method.equals("answercallbackquery") && rejectAnswer) return rejected();
+       if (method.equals("editmessagereplymarkup") && edits.incrementAndGet() == rejectEdit)
+         return rejected();

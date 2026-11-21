@@ -227,7 +227,7 @@ Feature: Download a retained transcript once from its summary button
       | state     | outcome                                                               |
       | AVAILABLE | one successful sendDocument and persisted TRANSCRIPT state SENT         |
       | SENT      | only answerCallbackQuery with text Already sent.                        |
-      | SENDING   | only answerCallbackQuery with text Already being sent.                  |
+      | SENDING   | one successful sendDocument and persisted TRANSCRIPT state SENT         |
 
   @R8 @R5 @R3
   Scenario Outline: Elapsed expiry does not reset an existing terminal or in-progress state

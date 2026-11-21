@@ -170,7 +170,7 @@ Sizes: S = 1-2 files, M = 3-5 files.
   - Depends on: T11, T12
   - Files: `media/AudioPreparer.java`, `media/FfmpegRunner.java`, `bot/DeliveryCallbackHandler.java`, `job/DeliveryService.java`, tests
 
-- [~] **T14: Retention sweeper and restart recovery** (M)
+- [x] **T14: Retention sweeper and restart recovery** (M)
   - Acceptance:
     - A `@Scheduled` sweeper (every minute) and a run at startup delete files whose `expiresAt` has passed and mark them `EXPIRED`. A job directory is removed when every file is `SENT` or `EXPIRED`, or when its retention is over. Failed jobs are removed immediately.
     - A job directory that has a file in `SENDING` is never swept (a tap granted before expiry finishes, T12/T13 rule).
@@ -294,6 +294,7 @@ Work that is not scheduled in a phase. Technical debt carries the `[debt]` mark.
 
 - [ ] **TD6 [debt]: Flaky T9 scenario "Broken successful responses are retried rather than called silence"** (S)
   - Update from T13 (2026-11-19): two more single-scenario failures (a T8 scenario and a T10 scenario) in `clean verify` runs started from the orchestrator's sandboxed shell; the T10 log shows `Ollama answered 403 ... "reason":"not_allowed_local","source":"baseline_policy"`: the sandbox network policy sometimes denies calls to localhost. Outside the sandbox the same suite was green. The T9 failure below may have the same cause (check its log for `not_allowed_local`). The owner decided that full gates run outside the sandbox with approval. Logs: `tasks/TD6/failed-run*.log`. The Tester already hardened the fixtures in T13 (`tasks/T13/comms/tester-flaky.md`), so TD6 may shrink to checking the T9 log and the remaining weak waits (and the one-off `OllamaClientTest.anAnswerStoppedAtTheLengthLimitIsAccepted` failure, `header parser received no bytes`).
+  - Update from T14 (2026-11-21): in the Tester's run, two older scenarios (a T9 Whisper one and one with a held Ollama) timed out with `not_allowed_local / baseline_policy` on localhost even though the command was approved outside the sandbox; one T8 scenario failed once before the URL was submitted (a `/allow` reply with a null `ok`). Evidence: `tasks/T14/comms/questions.md`. The orchestrator's own `clean verify` (outside the sandbox) was green. TD6 should treat the platform network policy as the first suspect.
   - Why: one of five full `./mvnw clean verify` runs failed at the step `"chunk-000.wav" is sent exactly twice` (`T9-transcription.feature:122`, example 1.1 `{broken`): the Whisper mock journal had 0 requests after 30 seconds. The rerun was green. A flaky test weakens trust in `verify`.
   - Acceptance:
     - The cause is found (in the test or in the code) and written in `tasks/TD6/evidence.md`: the log of the failed run, the code version, the explanation.
