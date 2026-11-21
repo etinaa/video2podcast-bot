@@ -14,3 +14,6 @@ In the T11 close-out, one of five full `./mvnw clean verify` runs failed: `Trans
 
 ## Agreed task
 See TD6 in `tasks/todo.md`.
+
+## Start (2026-11-21)
+Owner: "Начни TD6". Status set to `[~]`. Team: Tester (investigates and fixes the tests), Developer only if the cause is in production code, two code reviewers. Known at start: `failed-run.log` (the T9 failure) has no `not_allowed_local`; `failed-run-3.log` has one (T13, T10 scenario); T14 added two platform-policy timeouts and one unexplained T8 failure.

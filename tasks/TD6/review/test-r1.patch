@@ -1,0 +1,189 @@
+diff --git a/src/it/java/com/video2podcast/functional/CucumberIT.java b/src/it/java/com/video2podcast/functional/CucumberIT.java
+index 6c2db68..90ce897 100644
+--- a/src/it/java/com/video2podcast/functional/CucumberIT.java
++++ b/src/it/java/com/video2podcast/functional/CucumberIT.java
+@@ -1,6 +1,5 @@
+ package com.video2podcast.functional;
+ 
+-import static io.cucumber.junit.platform.engine.Constants.FILTER_TAGS_PROPERTY_NAME;
+ import static io.cucumber.junit.platform.engine.Constants.GLUE_PROPERTY_NAME;
+ import static io.cucumber.junit.platform.engine.Constants.JUNIT_PLATFORM_NAMING_STRATEGY_PROPERTY_NAME;
+ import static io.cucumber.junit.platform.engine.Constants.PLUGIN_PROPERTY_NAME;
+@@ -18,5 +17,4 @@ import org.junit.platform.suite.api.Suite;
+ @ConfigurationParameter(key = PLUGIN_PROPERTY_NAME, value = "summary")
+ // Keep examples from different outlines distinct in Failsafe XML reports.
+ @ConfigurationParameter(key = JUNIT_PLATFORM_NAMING_STRATEGY_PROPERTY_NAME, value = "long")
+-@ConfigurationParameter(key = FILTER_TAGS_PROPERTY_NAME, value = "not @manual_media")
+ public class CucumberIT {}
+diff --git a/src/it/java/com/video2podcast/functional/MediaAssertionSteps.java b/src/it/java/com/video2podcast/functional/MediaAssertionSteps.java
+index 1b5a43f..cc65605 100644
+--- a/src/it/java/com/video2podcast/functional/MediaAssertionSteps.java
++++ b/src/it/java/com/video2podcast/functional/MediaAssertionSteps.java
+@@ -328,8 +328,11 @@ public class MediaAssertionSteps {
+   @Then("^\"([^\"]+)\" is (?:sent|attempted) exactly twice$")
+   public void twice(String s) {
+     w.transcriptionSettled();
+-    PipelineWorld.until(() ->
+-        assertThat(w.service("whisper").stream().filter(e -> e.chunk().equals(s))).hasSize(2));
++    assertThat(w.service("whisper").stream().filter(e -> e.chunk().equals(s)).toList())
++        .as(
++            "Whisper attempts for %s at %s after transcription settled; Telegram replies: %s",
++            s, w.whisper.baseUrl(), w.calls("sendMessage").stream().map(Event::text).toList())
++        .hasSize(2);
+   }
+ 
+   @Then("{string} is never sent")
+@@ -359,7 +362,12 @@ public class MediaAssertionSteps {
+ 
+   @Then("{string} exists in the job directory despite total elapsed time exceeding 1 second")
+   public void freshWait(String s) {
+-    PipelineWorld.until(() -> assertThat(w.job().resolve(s)).isRegularFile());
++    w.transcriptionSettled();
++    assertThat(w.job().resolve(s))
++        .as(
++            "persisted transcript after transcription settled at %s; Telegram replies: %s",
++            w.whisper.baseUrl(), w.calls("sendMessage").stream().map(Event::text).toList())
++        .isRegularFile();
+     assertThat(System.nanoTime() - w.lastUpdateNanos)
+         .isGreaterThan(Duration.ofSeconds(1).toNanos());
+   }
+diff --git a/src/it/java/com/video2podcast/functional/PipelineWorld.java b/src/it/java/com/video2podcast/functional/PipelineWorld.java
+index 7ff2508..fca4a42 100644
+--- a/src/it/java/com/video2podcast/functional/PipelineWorld.java
++++ b/src/it/java/com/video2podcast/functional/PipelineWorld.java
+@@ -380,6 +380,10 @@ public class PipelineWorld implements AutoCloseable {
+   }
+ 
+   Event latestTerminal() {
++    return latestStatus(Set.of("Done.", "Failed."));
++  }
++
++  Event latestStatus(Set<String> statuses) {
+     List<Event> queued =
+         calls("sendMessage").stream()
+             .filter(e -> e.nanos >= lastUpdateNanos && e.text().startsWith("Queued:"))
+@@ -394,7 +398,7 @@ public class PipelineWorld implements AutoCloseable {
+             e.nanos >= submission.nanos
+                 && e.json().path("chat_id").asLong() == chat
+                 && e.json().path("message_id").asInt() == messageId
+-                && Set.of("Done.", "Failed.").contains(e.text()))
++                && statuses.contains(e.text()))
+         .reduce((previous, current) -> current)
+         .orElse(null);
+   }
+@@ -416,12 +420,18 @@ public class PipelineWorld implements AutoCloseable {
+ 
+   void transcriptionSettled() {
+     until(() ->
+-        assertThat(
+-                !service("ollama").isEmpty()
+-                    || calls("editMessageText").stream().anyMatch(e -> e.text().equals("Failed.")))
++        assertThat(transcriptionHasSettled())
++            .as(
++                "transcription outcome for %s at %s; Telegram replies: %s",
++                lastUrl, whisper.baseUrl(), calls("sendMessage").stream().map(Event::text).toList())
+             .isTrue());
+   }
+ 
++  boolean transcriptionHasSettled() {
++    // Summarizing is emitted only after transcription has persisted and removed temporary audio.
++    return latestStatus(Set.of("Summarizing…", "Done.", "Failed.")) != null;
++  }
++
+   void noUploads() {
+     assertThat(calls("sendAudio")).isEmpty();
+     assertThat(calls("sendDocument")).isEmpty();
+@@ -590,6 +600,10 @@ public class PipelineWorld implements AutoCloseable {
+       context.close();
+       context = null;
+     }
++    List<Map<String, Object>> whisperTimings =
++        whisper == null
++            ? List.of()
++            : whisper.getAllServeEvents().stream().map(PipelineWorld::whisperTiming).toList();
+     for (var s : Arrays.asList(telegram, whisper, ollama, proxy)) if (s != null) s.stop();
+     if (root != null)
+       try {
+@@ -606,12 +620,26 @@ public class PipelineWorld implements AutoCloseable {
+                             : e.service.equals("whisper") ? e.chunk() : ""))
+                 .collect(Collectors.joining("\n")));
+         Files.writeString(root.resolve("settings.json"), stringify(properties));
++        Files.writeString(root.resolve("whisper-timings.json"), stringify(whisperTimings));
+       } catch (IOException e) {
+         throw new UncheckedIOException(e);
+       }
+     active = false;
+   }
+ 
++  private static Map<String, Object> whisperTiming(ServeEvent serve) {
++    Map<String, Object> timing = new LinkedHashMap<>();
++    timing.put("receivedAt", serve.getRequest().getLoggedDateString());
++    timing.put("requestBytes", serve.getRequest().getBody().length);
++    timing.put("status", serve.getResponseDefinition().getStatus());
++    timing.put("configuredDelayMillis", serve.getResponseDefinition().getFixedDelayMilliseconds());
++    timing.put("addedDelayMillis", serve.getTiming().getAddedDelay());
++    timing.put("processMillis", serve.getTiming().getProcessTime());
++    timing.put("responseSendMillis", serve.getTiming().getResponseSendTime());
++    timing.put("totalMillis", serve.getTiming().getTotalTime());
++    return timing;
++  }
++
+   @TestConfiguration(proxyBeanMethods = false)
+   static class Fixtures {
+     @Bean
+diff --git a/src/it/java/com/video2podcast/functional/ScenarioFixtureIT.java b/src/it/java/com/video2podcast/functional/ScenarioFixtureIT.java
+index 511e8ac..eae6ea4 100644
+--- a/src/it/java/com/video2podcast/functional/ScenarioFixtureIT.java
++++ b/src/it/java/com/video2podcast/functional/ScenarioFixtureIT.java
+@@ -47,6 +47,43 @@ class ScenarioFixtureIT {
+     assertThat(w.latestTerminal()).isSameAs(currentTerminal);
+   }
+ 
++  @Test
++  void transcriptionWaitIgnoresEarlierSubmissionOutcomes() {
++    PipelineWorld w = new PipelineWorld();
++    w.lastUpdateNanos = 3;
++    w.events.add(event("editmessagetext", "Failed.", 101, 10, 2));
++    assertThat(w.transcriptionHasSettled()).isFalse();
++    w.events.clear();
++    w.events.add(
++        new PipelineWorld.Event("ollama", "/api/chat", new byte[0], 2, java.time.Instant.EPOCH));
++    assertThat(w.transcriptionHasSettled()).isFalse();
++  }
++
++  @Test
++  void transcriptionWaitRequiresTheCurrentFailedOrSummarizingStatus() {
++    PipelineWorld w = new PipelineWorld();
++    w.lastUpdateNanos = 3;
++    var queued = event("sendmessage", "Queued: position 1", 101, 0, 3);
++    w.events.add(queued);
++    w.responseIds.put(queued, 11);
++    w.events.add(event("editmessagetext", "Failed.", 202, 11, 4));
++    w.events.add(event("editmessagetext", "Failed.", 101, 10, 5));
++    assertThat(w.transcriptionHasSettled()).isFalse();
++    w.events.add(event("editmessagetext", "Failed.", 101, 11, 6));
++    assertThat(w.transcriptionHasSettled()).isTrue();
++    w.events.clear();
++    // An earlier queued job can reach Ollama after the latest submission was accepted.
++    w.events.add(queued);
++    w.events.add(
++        new PipelineWorld.Event("ollama", "/api/chat", new byte[0], 4, java.time.Instant.EPOCH));
++    assertThat(w.transcriptionHasSettled()).isFalse();
++    w.events.add(event("editmessagetext", "Summarizing…", 101, 10, 5));
++    w.events.add(event("editmessagetext", "Summarizing…", 202, 11, 6));
++    assertThat(w.transcriptionHasSettled()).isFalse();
++    w.events.add(event("editmessagetext", "Summarizing…", 101, 11, 7));
++    assertThat(w.transcriptionHasSettled()).isTrue();
++  }
++
+   private static PipelineWorld.Event event(
+       String method, String text, long chat, int message, long nanos) {
+     String body =
+diff --git a/src/it/resources/junit-platform.properties b/src/it/resources/junit-platform.properties
+new file mode 100644
+index 0000000..4f51579
+--- /dev/null
++++ b/src/it/resources/junit-platform.properties
+@@ -0,0 +1,2 @@
++# Default only: -Dcucumber.filter.tags can select a focused group.
++cucumber.filter.tags=not @manual_media
