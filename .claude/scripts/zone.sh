@@ -15,7 +15,7 @@ cd "$(git rev-parse --show-toplevel)"
 
 zone_paths() {
   case "$1" in
-    dev) printf '%s\n' src/main src/test pom.xml config deploy docs/host-setup.md ;;
+    dev) printf '%s\n' src/main src/test pom.xml config deploy docs/host-setup.md Dockerfile compose.yaml .dockerignore .env.example ;;
     test) printf '%s\n' src/it ;;
     design) printf '%s\n' "tasks/$2" tasks/todo.md src/features docs/decisions.md docs/architecture ;;
     tools) printf '%s\n' .claude SPEC.md ;;
