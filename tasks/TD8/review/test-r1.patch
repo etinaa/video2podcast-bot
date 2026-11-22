@@ -1,0 +1,65 @@
+diff --git a/src/it/java/com/video2podcast/functional/AccessGateIT.java b/src/it/java/com/video2podcast/functional/AccessGateIT.java
+index 3fc18ff..472e542 100644
+--- a/src/it/java/com/video2podcast/functional/AccessGateIT.java
++++ b/src/it/java/com/video2podcast/functional/AccessGateIT.java
+@@ -117,7 +117,7 @@ class AccessGateIT extends FunctionalTest {
+             passedGate -> {
+               assertThat(passedGate.get("callback_query_id").asText()).isEqualTo("cb-allowed");
+               assertThat(passedGate.get("text").asText())
+-                  .isEqualTo("Expired, please resend the link.");
++                  .isEqualTo("Files already downloaded or expired, please resend the link.");
+             });
+     assertThat(telegramCalls("sendMessage")).isEmpty();
+   }
+diff --git a/src/it/java/com/video2podcast/functional/AudioAssertionSteps.java b/src/it/java/com/video2podcast/functional/AudioAssertionSteps.java
+index f814c52..f8878a5 100644
+--- a/src/it/java/com/video2podcast/functional/AudioAssertionSteps.java
++++ b/src/it/java/com/video2podcast/functional/AudioAssertionSteps.java
+@@ -358,7 +358,7 @@ public class AudioAssertionSteps {
+     if (outcome.startsWith("one")) {
+       success();
+       sent("SENT");
+-    } else w.refusal("Expired, please resend the link.");
++    } else w.refusal("Files already downloaded or expired, please resend the link.");
+   }
+ 
+   @Then(
+diff --git a/src/it/java/com/video2podcast/functional/AudioButtonIT.java b/src/it/java/com/video2podcast/functional/AudioButtonIT.java
+index 5c376da..dff3e8e 100644
+--- a/src/it/java/com/video2podcast/functional/AudioButtonIT.java
++++ b/src/it/java/com/video2podcast/functional/AudioButtonIT.java
+@@ -55,7 +55,7 @@ class AudioButtonIT extends FunctionalTest {
+         ((com.fasterxml.jackson.databind.node.ObjectNode) j.path("files").path("AUDIO"))
+             .put("expiresAt", w.clock.instant().toString()));
+     w.tap("audio:" + TranscriptWorld.JOB, 101, 701, 101, "private");
+-    w.refusal("Expired, please resend the link.");
++    w.refusal("Files already downloaded or expired, please resend the link.");
+     w.unchanged();
+     assertThat(w.calls("sendAudio")).isEmpty();
+   }
+diff --git a/src/it/java/com/video2podcast/functional/ExpiryIT.java b/src/it/java/com/video2podcast/functional/ExpiryIT.java
+index d321652..769ec9f 100644
+--- a/src/it/java/com/video2podcast/functional/ExpiryIT.java
++++ b/src/it/java/com/video2podcast/functional/ExpiryIT.java
+@@ -61,7 +61,7 @@ class ExpiryIT {
+     w.retention.tick();
+     assertThat(w.dir).doesNotExist();
+     w.tap("audio:" + TranscriptWorld.JOB, 101, 701, 101, "private");
+-    w.refusal("Expired, please resend the link.");
++    w.refusal("Files already downloaded or expired, please resend the link.");
+     assertThat(w.calls("sendAudio")).isEmpty();
+   }
+ }
+diff --git a/src/it/java/com/video2podcast/functional/TranscriptButtonIT.java b/src/it/java/com/video2podcast/functional/TranscriptButtonIT.java
+index f31aabc..0a78161 100644
+--- a/src/it/java/com/video2podcast/functional/TranscriptButtonIT.java
++++ b/src/it/java/com/video2podcast/functional/TranscriptButtonIT.java
+@@ -56,7 +56,7 @@ class TranscriptButtonIT extends FunctionalTest {
+         ((com.fasterxml.jackson.databind.node.ObjectNode) j.path("files").path("TRANSCRIPT"))
+             .put("expiresAt", w.clock.instant().toString()));
+     w.tap("transcript:" + TranscriptWorld.JOB, 101, 701, 101, "private");
+-    w.refusal("Expired, please resend the link.");
++    w.refusal("Files already downloaded or expired, please resend the link.");
+     assertThat(w.calls("sendDocument")).isEmpty();
+     w.unchanged();
+   }

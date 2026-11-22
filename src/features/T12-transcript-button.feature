@@ -100,14 +100,14 @@ Feature: Download a retained transcript once from its summary button
     Examples:
       | expiresAt                      | outcome                                                               |
       | 2026-11-19T12:30:00.000000001Z   | one successful sendDocument and persisted TRANSCRIPT state SENT         |
-      | 2026-11-19T12:30:00Z             | only answerCallbackQuery with text Expired, please resend the link.    |
-      | 2026-11-19T12:29:59Z             | only answerCallbackQuery with text Expired, please resend the link.    |
+      | 2026-11-19T12:30:00Z             | only answerCallbackQuery with text Files already downloaded or expired, please resend the link.    |
+      | 2026-11-19T12:29:59Z             | only answerCallbackQuery with text Files already downloaded or expired, please resend the link.    |
 
   @R5
   Scenario Outline: Missing or unusable retained content reports expiry
     Given <missingContent>
     When the user taps "transcript:11111111-1111-4111-8111-111111111111" on private message 701 in chat 101
-    Then the tap produces only answerCallbackQuery with "Expired, please resend the link."
+    Then the tap produces only answerCallbackQuery with "Files already downloaded or expired, please resend the link."
     And the tap leaves all remaining job files unchanged
     Examples:
       | missingContent                                      |
@@ -121,7 +121,7 @@ Feature: Download a retained transcript once from its summary button
   Scenario Outline: Reject invalid callback job ids without accessing other files
     Given a sentinel file outside the job directory contains "keep me"
     When the user taps "<callbackData>" on private message 701 in chat 101
-    Then the tap produces only answerCallbackQuery with "Expired, please resend the link."
+    Then the tap produces only answerCallbackQuery with "Files already downloaded or expired, please resend the link."
     And the job files and sentinel file are unchanged
     Examples:
       | callbackData                                                |
@@ -245,7 +245,7 @@ Feature: Download a retained transcript once from its summary button
   Scenario: A missing transcript file expires its available entry
     Given transcript.txt is absent
     When the user taps "transcript:11111111-1111-4111-8111-111111111111" on private message 701 in chat 101
-    Then the tap produces only answerCallbackQuery with "Expired, please resend the link."
+    Then the tap produces only answerCallbackQuery with "Files already downloaded or expired, please resend the link."
     And job.json records TRANSCRIPT state "EXPIRED" and null sentAt
     And the AUDIO entry and remaining source file are unchanged
 

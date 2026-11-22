@@ -281,7 +281,7 @@ Feature: Reclaim retained job files and recover downloads after restart
     Given the application clock is "2026-11-21T13:00:00Z"
     And a scheduled minute has elapsed and the job directory no longer exists
     When the user taps "<kind>:11111111-1111-4111-8111-111111111111" on private message 701 in chat 101
-    Then the tap produces only answerCallbackQuery with "Expired, please resend the link."
+    Then the tap produces only answerCallbackQuery with "Files already downloaded or expired, please resend the link."
     And the Telegram mock receives no sendAudio or sendDocument
     Examples:
       | kind       |
@@ -306,7 +306,7 @@ Feature: Reclaim retained job files and recover downloads after restart
     And the Telegram mock receives a reply-markup edit for message 702 with "Audio expired" and "Transcript expired"
     And no Telegram message contains the transport diagnostic or a filesystem path
     When the user taps "transcript:11111111-1111-4111-8111-111111111111" on private message 701 in chat 101
-    Then the tap produces only answerCallbackQuery with "Expired, please resend the link."
+    Then the tap produces only answerCallbackQuery with "Files already downloaded or expired, please resend the link."
 
   @R1 @R2 @R3
   Scenario: Runtime cleanup preserves an unfinished publication with null deadlines

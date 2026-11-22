@@ -313,3 +313,12 @@ Work that is not scheduled in a phase. Technical debt carries the `[debt]` mark.
   - Verify: `./mvnw verify -Dno-it` and `./mvnw clean verify`, `-Pmutation` at least 85%. Checkpoint 4 is repeated by the owner with the video above. Technical task: Developer and Tester, both code reviewers; no Analyst, no Architect.
   - Depends on: T8, T11
   - Files: `media/YtDlpClient.java`, `media/DefaultProcessRunner.java`, `bot/UrlMessageHandler.java` (and `job/PipelineService.java` if needed), unit tests, tests under `src/it` if the fixtures need the new output shape, `tasks/TD7/evidence.md`
+- [~] **TD8: Tap on a deleted or expired job says the file may already be downloaded** (S)
+  - Found at Checkpoint 4 (2026-11-22): after both files are delivered, the sweeper deletes the job directory (SPEC). A repeated tap then answers "Expired, please resend the link.", which is misleading when the file was already downloaded. The bot cannot tell the two cases apart, because `job.json` is deleted with the directory.
+  - Acceptance:
+    - The refusal text for a missing, expired or unusable job becomes `Files already downloaded or expired, please resend the link.` (constant `DeliveryCallbackHandler.EXPIRED`). It is the same text for the transcript and audio buttons.
+    - Nothing else changes: the other refusals (`This button is not for you.`, `Already sent.`, `Already being sent.`, `Something went wrong, please try again.`), the order of checks, the stored data and the deletion rules stay as they are.
+    - The existing unit tests and the T12, T13 and T14 scenarios that name the old text are updated to the new text; the SPEC and `docs/` mentions of the old text are updated if there are any.
+  - Verify: `./mvnw verify -Dno-it`, `./mvnw clean verify`, `-Pmutation` at least 85%. The owner checks the new text in Telegram during Checkpoint 4. Technical task: Developer and Tester, both code reviewers; no Analyst, no Architect.
+  - Depends on: T12, T13, T14
+  - Files: `bot/DeliveryCallbackHandler.java`, its unit tests, `src/features/T12-transcript-button.feature`, `T13-audio-button.feature`, `T14-retention.feature` (the Tester updates the matching steps under `src/it`), `SPEC.md` if it quotes the text

@@ -1,0 +1,68 @@
+diff --git a/src/main/java/com/video2podcast/bot/DeliveryCallbackHandler.java b/src/main/java/com/video2podcast/bot/DeliveryCallbackHandler.java
+index 648b1ec..8c745b0 100644
+--- a/src/main/java/com/video2podcast/bot/DeliveryCallbackHandler.java
++++ b/src/main/java/com/video2podcast/bot/DeliveryCallbackHandler.java
+@@ -28,7 +28,7 @@ public class DeliveryCallbackHandler {
+ 
+   static final String SENDING = "Sending transcript…";
+   static final String PREPARING = "Preparing audio…";
+-  static final String EXPIRED = "Expired, please resend the link.";
++  static final String EXPIRED = "Files already downloaded or expired, please resend the link.";
+   static final String NOT_OWNER = "This button is not for you.";
+   static final String ALREADY_SENT = "Already sent.";
+   static final String IN_PROGRESS = "Already being sent.";
+diff --git a/src/test/java/com/video2podcast/bot/AudioButtonTest.java b/src/test/java/com/video2podcast/bot/AudioButtonTest.java
+index a292b94..fa31cb2 100644
+--- a/src/test/java/com/video2podcast/bot/AudioButtonTest.java
++++ b/src/test/java/com/video2podcast/bot/AudioButtonTest.java
+@@ -308,7 +308,8 @@ class AudioButtonTest {
+ 
+     handler(StubAudioPreparer.unchanged()).handle(tap(OWNER));
+ 
+-    assertThat(answers()).containsExactly("Expired, please resend the link.");
++    assertThat(answers())
++        .containsExactly("Files already downloaded or expired, please resend the link.");
+     assertThat(queue.tasks).isEmpty();
+   }
+ 
+diff --git a/src/test/java/com/video2podcast/bot/DeliveryCallbackHandlerTest.java b/src/test/java/com/video2podcast/bot/DeliveryCallbackHandlerTest.java
+index 4ad27ed..502dd58 100644
+--- a/src/test/java/com/video2podcast/bot/DeliveryCallbackHandlerTest.java
++++ b/src/test/java/com/video2podcast/bot/DeliveryCallbackHandlerTest.java
+@@ -153,7 +153,8 @@ class DeliveryCallbackHandlerTest {
+ 
+     handler.handle(tap(OWNER, ID));
+ 
+-    assertThat(answerTexts()).containsExactly("Expired, please resend the link.");
++    assertThat(answerTexts())
++        .containsExactly("Files already downloaded or expired, please resend the link.");
+     assertThat(gateway.documents).isEmpty();
+     assertThat(gateway.buttonEdits).isEmpty();
+   }
+@@ -166,9 +167,9 @@ class DeliveryCallbackHandlerTest {
+ 
+     assertThat(answerTexts())
+         .containsExactly(
+-            "Expired, please resend the link.",
+-            "Expired, please resend the link.",
+-            "Expired, please resend the link.");
++            "Files already downloaded or expired, please resend the link.",
++            "Files already downloaded or expired, please resend the link.",
++            "Files already downloaded or expired, please resend the link.");
+   }
+ 
+   @Test
+diff --git a/src/test/java/com/video2podcast/bot/TranscriptButtonTest.java b/src/test/java/com/video2podcast/bot/TranscriptButtonTest.java
+index a55fc60..6731530 100644
+--- a/src/test/java/com/video2podcast/bot/TranscriptButtonTest.java
++++ b/src/test/java/com/video2podcast/bot/TranscriptButtonTest.java
+@@ -175,7 +175,8 @@ class TranscriptButtonTest {
+ 
+     handler.handle(tap(USER));
+ 
+-    assertThat(answers()).containsExactly("Expired, please resend the link.");
++    assertThat(answers())
++        .containsExactly("Files already downloaded or expired, please resend the link.");
+     assertThat(gateway.documents).isEmpty();
+   }
+ }
