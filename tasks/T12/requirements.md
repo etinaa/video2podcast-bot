@@ -58,7 +58,7 @@ An allowed user receives the already-generated English transcript only after tap
 ### R8 — Use persisted state without regenerating content
 
 - A preexisting unexpired AVAILABLE job on disk can be delivered after application startup with no link resubmission, Whisper/Ollama request or media work. A preexisting SENT job cannot be sent again.
-- Persisted SENDING jobs remain in progress in T12. Resetting them on startup, removing corrupt directories and sweeping expired jobs belong to T14.
+- T14 alignment (2026-11-21): runtime SENDING files remain in progress and return `Already being sent.`. At explicit application startup, T14 resets persisted SENDING to AVAILABLE before cleanup; an unexpired retained transcript then uploads on a fresh owner tap and reaches SENT. Ordinary callback fixtures are installed after startup to represent live runtime state. Corrupt-directory removal and expiry sweeping follow the T14 requirements.
 - Delivery uses stored per-file expiry, never createdAt plus one hour or a fresh retention window on tap. Delivery does not extend retention.
 
 ### R9 — Verify through the external boundary and retain project gates
