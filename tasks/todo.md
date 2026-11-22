@@ -202,14 +202,16 @@ Sizes: S = 1-2 files, M = 3-5 files.
 
 ## Phase 5: Packaging and hardening
 
-- [ ] **T15: Dockerfile, Podman compose file, and host setup docs** (M)
+- [~] **T15: Dockerfile, Podman compose file, and host setup docs** (M)
   - Acceptance:
-    - A multi-stage `Dockerfile` (JDK 27) with `yt-dlp` and `ffmpeg`, running as a non-root user.
-    - `compose.yaml` (runs with `podman compose` / `podman-compose`, no Docker-only extensions) with the `bot` service, a work volume, a separate data volume for `allowed-users.json`, `host.containers.internal` access, env vars from `.env`, and no published ports.
-    - `.env.example` lists every variable (no secrets), and `.gitignore` excludes `.env`. `docs/host-setup.md` covers the full setup.
-  - Verify: `podman compose build` succeeds, and `podman compose up -d` starts the bot, which reaches host Ollama and Whisper (`podman compose logs bot` shows the health check passing).
+    - A multi-stage `Dockerfile` (JDK 27) with `yt-dlp` (latest at build time) and `ffmpeg`, running as a non-root user. The image starts the bot with the default (non-`dev`) profile.
+    - `compose.yaml` (runs with `podman compose` / `podman-compose`, no Docker-only extensions) with the `bot` service, a named work volume (`/work`), a separate named data volume for `allowed-users.json` (`/data`), `host.containers.internal` access to Ollama and Whisper, env vars from `.env`, and no published ports.
+    - `.env.example` lists every variable the bot reads (names and defaults from `application.yml`; no secrets), and `.gitignore` excludes `.env` (already does; keep it). `docs/host-setup.md` covers the full setup, including how to build, start, update `yt-dlp` and read the logs.
+    - Reachability of host Ollama (11434) and Whisper (8081) from the container is checked on this machine. If services bound to `127.0.0.1` are not visible from the Podman VM, `docs/host-setup.md` gives the settings that make them reachable (Whisper `--host 0.0.0.0`, Ollama `OLLAMA_HOST=0.0.0.0`, firewall limits for the ports) and the "not verified" paragraph there is replaced by the result. The commands and results go into `tasks/T15/evidence.md`.
+  - Verify: `podman compose build` succeeds, and `podman compose up -d` starts the bot: `podman compose logs bot` shows Spring Boot started and long polling running. The container reaches host Ollama and Whisper (command and output in `evidence.md`). The owner sends one link to the containerized bot and gets the summary. The startup health check that the original text mentioned belongs to T16 (`HealthChecks`), so T15 does not require it.
   - Depends on: T11
-  - Files: `Dockerfile`, `compose.yaml`, `.env.example`, `.gitignore`, `docs/host-setup.md`
+  - Files: `Dockerfile`, `compose.yaml`, `.env.example`, `.gitignore`, `.dockerignore`, `docs/host-setup.md`, `tasks/T15/evidence.md`
+  - Technical task: Developer and Tester, both code reviewers; no Analyst, no Architect.
 
 - [ ] **T16: Failure-mode and restart integration tests** (M)
   - Acceptance:
