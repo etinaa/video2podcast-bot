@@ -73,8 +73,10 @@ final class RetentionSupport {
     commands.add(List.copyOf(args));
     try {
       if (args.getFirst().equals("yt-dlp")) {
-        if (args.contains("--dump-single-json"))
-          return new ProcessResult(0, "{\"title\":\"Earlier video\",\"duration\":60}", "");
+        if (PipelineWorld.stage(args).equals("metadata"))
+          // --print omits absent fields: a single video has no playlist_index or collection _type.
+          return new ProcessResult(
+              0, "{\"title\":\"Earlier video\",\"duration\":60,\"is_live\":false}", "");
         Path source = Path.of(args.get(args.indexOf("-o") + 1).replace("%(ext)s", "m4a"));
         liveDir = source.getParent();
         if (holdDownload) {
