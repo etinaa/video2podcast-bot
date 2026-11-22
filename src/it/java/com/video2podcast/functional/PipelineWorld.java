@@ -74,6 +74,8 @@ public class PipelineWorld implements AutoCloseable {
       stderr = "download failed /tmp/secret",
       missing;
   boolean timeout, splitThree;
+  boolean refuseWhisperDuringWork, refuseOllamaDuringWork;
+  FailureModeWorld health;
   int exitCode = 1, summaryId = 701;
   long seconds = 300;
   String extension = "m4a",
@@ -123,6 +125,7 @@ public class PipelineWorld implements AutoCloseable {
     context =
         new SpringApplicationBuilder(Video2PodcastApplication.class, Fixtures.class)
             .initializers(c -> {
+              if (health != null) health.attachLogs();
               c.getBeanFactory().registerSingleton("pipelineFixtureClock", clock);
               c.getBeanFactory()
                   .registerSingleton("pipelineFixtureProcesses", (ProcessRunner) this::run);
@@ -131,7 +134,8 @@ public class PipelineWorld implements AutoCloseable {
                 properties.entrySet().stream()
                     .map(e -> "--" + e.getKey() + "=" + e.getValue())
                     .toArray(String[]::new));
-    if (allowed) allow(user);
+    if (health != null) health.contextReady();
+    else if (allowed) allow(user);
   }
 
   void allow(long id) {
@@ -228,6 +232,15 @@ public class PipelineWorld implements AutoCloseable {
   }
 
   ProcessResult run(List<String> original, Duration limit) {
+    if (refuseWhisperDuringWork) {
+      refuseWhisperDuringWork = false;
+      whisper.stop();
+    }
+    if (refuseOllamaDuringWork) {
+      refuseOllamaDuringWork = false;
+      ollama.stop();
+    }
+    if (health != null) health.process(original);
     commands.add(List.copyOf(original));
     String stage = stage(original);
     try {
@@ -796,6 +809,12 @@ public class PipelineWorld implements AutoCloseable {
 
     public ResponseDefinition transform(ServeEvent serve) {
       Request r = serve.getRequest();
+      // Probes are separate from inference journals, sequences and WAV assertions.
+      if (!name.equals("telegram")
+          && !name.equals("media")
+          && r.getMethod().getName().equals("GET")) {
+        return health == null ? aResponse().withStatus(404).build() : health.probe(name, r);
+      }
       Event event = new Event(name, r.getUrl(), r.getBody(), System.nanoTime(), clock.instant());
       starts.put(serve.getId(), event.nanos);
       events.add(event);
@@ -815,7 +834,19 @@ public class PipelineWorld implements AutoCloseable {
       Answer answer;
       if (name.equals("media")) return serve.getResponseDefinition();
       if (name.equals("telegram")) {
+        if (health != null && r.getUrl().endsWith("/senddocument")) {
+          return aResponse()
+              .withHeader("Content-Type", "application/json")
+              .withBody(
+                  "{\"ok\":true,\"result\":{\"message_id\":900,\"date\":1700000000,\"chat\":{\"id\":101,\"type\":\"private\"}}}")
+              .build();
+        }
         JsonNode n = event.json();
+        if (r.getUrl().endsWith("/answercallbackquery"))
+          return aResponse()
+              .withHeader("Content-Type", "application/json")
+              .withBody("{\"ok\":true,\"result\":true}")
+              .build();
         boolean send = r.getUrl().endsWith("/sendmessage");
         boolean summary = send && n.has("reply_markup");
         if (reject.test(n) || (rejectSummary && summary))

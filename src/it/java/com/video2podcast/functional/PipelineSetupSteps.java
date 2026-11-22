@@ -84,16 +84,13 @@ public class PipelineSetupSteps {
 
   @Given("the Whisper base URL points to a local port that refuses connections")
   public void refusedWhisper() throws Exception {
-    try (var s = new java.net.ServerSocket(0)) {
-      w.prop("app.whisper.base-url", "http://127.0.0.1:" + s.getLocalPort());
-    }
+    // Healthy preflight; close the listener when media work starts to fail inference only.
+    w.refuseWhisperDuringWork = true;
   }
 
   @Given("the Ollama base URL points to a local port that refuses connections")
   public void refused() throws Exception {
-    try (var s = new java.net.ServerSocket(0)) {
-      w.prop("app.ollama.base-url", "http://127.0.0.1:" + s.getLocalPort());
-    }
+    w.refuseOllamaDuringWork = true;
   }
 
   @Given("^the Whisper mock holds (?:its first|the first job's) answer$")
@@ -694,11 +691,8 @@ public class PipelineSetupSteps {
     else if (s.contains("download timeout")) timeout("download");
     else if (s.contains("empty speech")) w.defaultWhisper = Answer.json("{\"text\":\"\"}");
     else if (s.contains("Whisper")) {
-      if (s.contains("connection refusal")) {
-        try (var socket = new java.net.ServerSocket(0)) {
-          w.prop("app.whisper.base-url", "http://127.0.0.1:" + socket.getLocalPort());
-        }
-      } else w.defaultWhisper = Answer.failure("status 500");
+      if (s.contains("connection refusal")) refusedWhisper();
+      else w.defaultWhisper = Answer.failure("status 500");
     } else if (s.contains("Ollama connection")) refused();
     else if (s.contains("Ollama empty")) laterEmpty();
     else if (s.contains("Ollama silently")) truncatedStage("second map");

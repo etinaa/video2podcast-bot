@@ -307,6 +307,9 @@ final class AudioSupport implements AutoCloseable {
     }
 
     public ResponseDefinition transform(ServeEvent event) {
+      // Reachability must not consume the held inference response or signal inference receipt.
+      if (event.getRequest().getMethod().getName().equals("GET"))
+        return aResponse().withStatus(404).build();
       if (whisper) {
         whisperReceived.countDown();
         try {

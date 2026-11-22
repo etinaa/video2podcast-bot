@@ -29,6 +29,10 @@ public class WhoamiSteps {
   @When("the user sends {string} in a private chat")
   public void sendsInPrivateChat(String text) {
     if (pipeline.active) {
+      if (pipeline.health != null) {
+        pipeline.health.send(pipeline.user, text);
+        return;
+      }
       pipeline.send(text);
       return;
     }

@@ -84,6 +84,60 @@ class ScenarioFixtureIT {
     assertThat(w.transcriptionHasSettled()).isTrue();
   }
 
+  @Test
+  void startupProbeDeadlinesExcludeSlowApplicationBoot() {
+    FailureModeWorld health =
+        new FailureModeWorld(new PipelineWorld()) {
+          @Override
+          void startupFinished() {}
+        };
+    try {
+      long probeStart = java.time.Duration.ofSeconds(11).toNanos();
+      health.startup = java.time.Duration.ofSeconds(1).toNanos();
+      health.observation = health.startup;
+      for (String service : java.util.List.of("whisper", "ollama")) {
+        health.probes.add(
+            new FailureModeWorld.Probe(
+                service,
+                service.equals("whisper") ? "/" : "/api/version",
+                new byte[0],
+                probeStart));
+        var policy = new FailureModeWorld.Policy();
+        policy.hold = new PipelineWorld.Hold();
+        health.policies.put(service, policy);
+        health.logs.add(
+            new FailureModeWorld.Log(
+                "Health check: " + service + " unreachable (no answer in time)",
+                false,
+                probeStart + java.time.Duration.ofSeconds(1).toNanos()));
+      }
+      new FailureModeSteps(health).startupDeadline();
+      health.logs.clear();
+      health.heldService = "whisper";
+      health.held = health.policies.get("whisper").hold;
+      health.pendingAt(probeStart + java.time.Duration.ofMillis(100).toNanos(), true);
+    } finally {
+      health.updates.shutdownNow();
+    }
+  }
+
+  @Test
+  void t11WhisperRefusalOccursAfterMediaPreparationAndReachesTranscription() throws Exception {
+    try (PipelineWorld w = new PipelineWorld()) {
+      w.begin();
+      w.fake = true;
+      new PipelineSetupSteps(w).failure("connection refusal on both Whisper attempts");
+      w.send("http://videos.example/t11-refusal");
+      assertThat(w.finishOne().text()).isEqualTo("Failed.");
+      w.reply(FailureModeWorld.WHISPER);
+      assertThat(w.commands.stream().map(PipelineWorld::stage).toList())
+          .containsExactly("metadata", "download", "WAV", "split");
+      assertThat(w.calls("editMessageText")).anyMatch(e -> e.text().equals("Transcribing 1/1…"));
+      assertThat(w.service("ollama")).isEmpty();
+      assertThat(w.dirs()).isEmpty();
+    }
+  }
+
   private static PipelineWorld.Event event(
       String method, String text, long chat, int message, long nanos) {
     String body =

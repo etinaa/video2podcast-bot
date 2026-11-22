@@ -279,8 +279,17 @@ public class TranscriptWorld implements AutoCloseable {
   }
 
   void noModels() {
-    assertThat(whisper.getAllServeEvents()).isEmpty();
-    assertThat(ollama.getAllServeEvents()).isEmpty();
+    // Startup reachability GETs are expected; delivery must never invoke a model operation.
+    assertThat(whisper.getAllServeEvents())
+        .allSatisfy(e -> {
+          assertThat(e.getRequest().getMethod().getName()).isEqualTo("GET");
+          assertThat(e.getRequest().getUrl()).isEqualTo("/");
+        });
+    assertThat(ollama.getAllServeEvents())
+        .allSatisfy(e -> {
+          assertThat(e.getRequest().getMethod().getName()).isEqualTo("GET");
+          assertThat(e.getRequest().getUrl()).isEqualTo("/api/version");
+        });
   }
 
   JsonNode keyboard(Call call) {
