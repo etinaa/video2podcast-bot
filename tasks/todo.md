@@ -225,10 +225,11 @@ Sizes: S = 1-2 files, M = 3-5 files.
   - Files: `job/HealthChecks.java` (and a small client method per service if needed), `bot/UrlMessageHandler.java` or the pipeline entry, `config/`, unit tests, `FailureModesIT.java` and its steps, `src/features/T16-failure-modes.feature`, `docs/decisions.md`, `docs/host-setup.md`
   - Product task: Analyst, Architect, Developer, Tester and both code reviewers.
 
-- [ ] **T17: Real-world smoke tests (short and 3-hour video)** (S)
+- [~] **T17: Real-world smoke tests (short and 3-hour video)** (S)
   - Acceptance:
-    - A short video: audio is delivered unchanged. A video of about 3 hours: the audio is compressed, uploaded without a size error, and the transcript is complete.
+    - A short video (link from the owner): audio is delivered unchanged. A video of about 3 hours (link from the owner): the audio is compressed, uploaded without a size error, and the transcript is complete.
     - Times and peak memory for each stage are recorded in `docs/host-setup.md`, along with any tuning (chunk size, `num_ctx`, `keep_alive`, or falling back to `qwen3:14b`).
+    - The 50 MiB limit (`LIMIT_BYTES = 52 428 800`) is checked against Telegram's real upload limit (50 000 000 bytes). If a file between the two is refused, the constant is fixed as a separate `dev` change with review.
     - All success criteria in `SPEC.md` are checked off.
   - Verify: manual run, with results in the docs. The owner confirms.
   - Depends on: T16
