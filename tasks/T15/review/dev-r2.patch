@@ -1,0 +1,227 @@
+diff --git a/.dockerignore b/.dockerignore
+new file mode 100644
+index 0000000..209ae56
+--- /dev/null
++++ b/.dockerignore
+@@ -0,0 +1,26 @@
++.git
++.gitignore
++.idea
++.vscode
++.claude
++.agents
++.env
++.env.*
++!.env.example
++target
++work
++data
++tasks
++docs
++screenshorts
++src/test
++src/it
++src/features
++*.log
++.DS_Store
++skills-lock.json
++mvnw.cmd
++run.sh
++Dockerfile
++compose.yaml
++.dockerignore
+diff --git a/.env.example b/.env.example
+index d80d29c..4118611 100644
+--- a/.env.example
++++ b/.env.example
+@@ -1,6 +1,37 @@
+ # Copy to .env and fill in. .env is ignored by git; never commit real values.
++# Used by ./run.sh and by `podman compose` (env_file). Variables left commented out use the default
++# shown, which is the one from src/main/resources/application.yml (in the container).
+ 
+ # Token from @BotFather
+ TELEGRAM_BOT_TOKEN=
+ # Your numeric Telegram user id (send /whoami to the bot to find it)
+ ADMIN_USER_ID=
++
++# Set to false to start without the Telegram connection (tests and diagnostics)
++# TELEGRAM_ENABLED=true
++# Base URL of the Telegram Bot API; empty means the official cloud API
++# TELEGRAM_API_URL=
++
++# File with the allowed users (the /data volume in the container)
++# ACCESS_FILE=/data/allowed-users.json
++# Minimum time between two access requests from the same user (ISO-8601 duration)
++# ACCESS_REQUEST_COOLDOWN=PT24H
++
++# Ollama on the host
++# OLLAMA_BASE_URL=http://host.containers.internal:11434
++# OLLAMA_MODEL=qwen3:32b
++# OLLAMA_NUM_CTX=8192
++# OLLAMA_TIMEOUT=PT10M
++
++# whisper-server on the host
++# WHISPER_BASE_URL=http://host.containers.internal:8081
++# WHISPER_TIMEOUT=PT10M
++
++# Job working directory (the /work volume in the container)
++# WORK_DIR=/work
++# MAX_VIDEO_DURATION=PT3H
++# JOB_RETENTION=PT1H
++# METADATA_TIMEOUT=PT1M
++# DOWNLOAD_TIMEOUT=PT30M
++# FFMPEG_TIMEOUT=PT30M
++# JOB_SWEEP_INTERVAL=PT1M
+diff --git a/Dockerfile b/Dockerfile
+new file mode 100644
+index 0000000..5588c7e
+--- /dev/null
++++ b/Dockerfile
+@@ -0,0 +1,47 @@
++# Build stage: compiles the bot with the Maven wrapper (JDK 27).
++FROM docker.io/library/eclipse-temurin:27-jdk AS build
++WORKDIR /build
++COPY .mvn .mvn
++COPY mvnw pom.xml ./
++COPY config config
++COPY src/main src/main
++RUN --mount=type=cache,target=/root/.m2 \
++    sh mvnw -B -ntp package -DskipTests -Dno-it
++
++# Runtime stage: JRE 27, ffmpeg and the latest yt-dlp (its SHA-256 is checked against the checksum
++# file of the same release before the binary runs; a mismatch fails the build), running as a non-root user.
++FROM docker.io/library/eclipse-temurin:27-jre
++
++# Changing this value forces the yt-dlp download to run again (see docs/host-setup.md).
++ARG YT_DLP_REFRESH=0
++RUN apt-get update \
++    && apt-get install -y --no-install-recommends ffmpeg ca-certificates curl \
++    && rm -rf /var/lib/apt/lists/* \
++    && case "$(uname -m)" in \
++         aarch64|arm64) asset=yt-dlp_linux_aarch64 ;; \
++         *) asset=yt-dlp_linux ;; \
++       esac \
++    && echo "yt-dlp refresh: ${YT_DLP_REFRESH}" \
++    && tag="$(curl -fsSL -o /dev/null -w '%{url_effective}' https://github.com/yt-dlp/yt-dlp/releases/latest | sed 's|.*/||')" \
++    && test -n "${tag}" \
++    && echo "yt-dlp release: ${tag}" \
++    && base="https://github.com/yt-dlp/yt-dlp/releases/download/${tag}" \
++    && mkdir /tmp/yt-dlp \
++    && curl -fsSL -o "/tmp/yt-dlp/${asset}" "${base}/${asset}" \
++    && curl -fsSL -o /tmp/yt-dlp/SHA2-256SUMS "${base}/SHA2-256SUMS" \
++    && (cd /tmp/yt-dlp && grep -E "^[0-9a-f]{64}  ${asset}\$" SHA2-256SUMS | sha256sum -c -) \
++    && install -m 0755 "/tmp/yt-dlp/${asset}" /usr/local/bin/yt-dlp \
++    && rm -rf /tmp/yt-dlp \
++    && yt-dlp --version
++
++RUN groupadd --system --gid 10001 bot \
++    && useradd --system --uid 10001 --gid bot --no-create-home --shell /usr/sbin/nologin bot \
++    && mkdir -p /app /work /data \
++    && chown bot:bot /work /data
++
++COPY --from=build /build/target/video2podcast-bot.jar /app/video2podcast-bot.jar
++
++USER bot
++WORKDIR /app
++# No Spring profile is set: the default (non-dev) profile applies.
++ENTRYPOINT ["java", "-jar", "/app/video2podcast-bot.jar"]
+diff --git a/compose.yaml b/compose.yaml
+new file mode 100644
+index 0000000..ade2cd0
+--- /dev/null
++++ b/compose.yaml
+@@ -0,0 +1,18 @@
++# Run with: podman compose up -d --build
++# Settings come from .env (copy .env.example). Whisper and Ollama run on the host and are reached
++# at host.containers.internal (the application.yml defaults), so no ports are published.
++services:
++  bot:
++    build:
++      context: .
++    image: video2podcast-bot:latest
++    env_file:
++      - .env
++    volumes:
++      - work:/work
++      - data:/data
++    restart: unless-stopped
++
++volumes:
++  work:
++  data:
+diff --git a/docs/host-setup.md b/docs/host-setup.md
+index fcb769a..60fa413 100644
+--- a/docs/host-setup.md
++++ b/docs/host-setup.md
+@@ -16,7 +16,7 @@ curl -L --fail -o ~/models/whisper/ggml-large-v3-turbo.bin \
+   https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin   # about 1.5 GB
+ ```
+ 
+-`ffmpeg` and `yt-dlp` on the host are only needed for local runs. The container image will contain its own copies (T15).
++`ffmpeg` and `yt-dlp` on the host are only needed for local runs. The container image contains its own copies of both.
+ 
+ ## Run
+ 
+@@ -25,7 +25,7 @@ curl -L --fail -o ~/models/whisper/ggml-large-v3-turbo.bin \
+ whisper-server -m ~/models/whisper/ggml-large-v3-turbo.bin --host 127.0.0.1 --port 8081 -l en -t 8
+ ```
+ 
+-Reachability from the container is **not verified yet** (this machine uses Podman 6.2.0 with `podman machine`, 8 CPUs, 6 GiB). `host.containers.internal` is expected to reach the host, but whether services bound to `127.0.0.1` are visible from the Podman VM is not confirmed. If they are not, bind `whisper-server` with `--host 0.0.0.0` and start Ollama with `OLLAMA_HOST=0.0.0.0`, and restrict the ports with the macOS firewall. T15 settles this.
++Reachability from the container: checked on this machine (Podman 6.2.0, `podman machine` with applehv, 8 CPUs, 6 GiB). With `whisper-server` bound to `127.0.0.1:8081` and Ollama bound to `127.0.0.1:11434` on the host, a container request to `http://host.containers.internal:8081/` and to `http://host.containers.internal:11434/api/tags` both answer HTTP 200. No `0.0.0.0` binding and no `OLLAMA_HOST` change is needed here. If a different Podman setup cannot reach them, bind `whisper-server` with `--host 0.0.0.0` and start Ollama with `OLLAMA_HOST=0.0.0.0`, and restrict the ports with the macOS firewall.
+ 
+ Check that both are up:
+ 
+@@ -34,6 +34,53 @@ curl -s http://127.0.0.1:8081/ -o /dev/null -w "%{http_code}\n"   # 200
+ curl -s http://localhost:11434/api/tags                           # lists qwen3:32b
+ ```
+ 
++## Container: build, start, update, logs
++
++The bot image is built from `Dockerfile` (JDK 27 build, JRE 27 runtime with `ffmpeg` and the latest `yt-dlp`, non-root user, default profile). `compose.yaml` runs one service, `bot`, with two named volumes: `work` (`/work`, job files, cleaned by the bot) and `data` (`/data`, `allowed-users.json`, never touched by job cleanup). No ports are published.
++
++One-time Podman setup (the container needs Podman and the `podman-compose` provider that `podman compose` calls):
++
++```bash
++brew install podman podman-compose
++podman machine init --cpus 8 --memory 6144   # 8 CPUs and 6 GiB, as on the verified machine
++podman machine start
++```
++
++Then, for each build and start:
++
++```bash
++podman machine start                       # once per boot, if the machine is not running
++cp .env.example .env                       # then set TELEGRAM_BOT_TOKEN and ADMIN_USER_ID
++podman compose build                       # build the image
++podman compose up -d                       # start the bot (or: podman compose up -d --build)
++podman compose logs -f bot                 # follow the logs
++podman compose down                        # stop and remove the container (volumes stay)
++```
++
++Only one bot may poll Telegram per token. Stop `./run.sh` before `podman compose up`, and the other way round.
++
++Settings are read from `.env`; `.env.example` lists every variable with its default. Whisper and Ollama default to `http://host.containers.internal:8081` and `:11434`, so `.env` normally needs only the two required values. Do not copy the `localhost` values used by `./run.sh` into a `.env` that the container reads.
++
++### Update yt-dlp
++
++`yt-dlp` is downloaded at image build time, so a site change that breaks downloads is fixed by rebuilding without the cache for that step:
++
++```bash
++podman compose build --no-cache
++podman compose up -d
++podman compose exec bot yt-dlp --version   # the version now in the container
++```
++
++`--no-cache` also rebuilds the Maven stage; to refresh only `yt-dlp`, use `podman compose build --build-arg YT_DLP_REFRESH=$(date +%s)`.
++
++### Logs and data
++
++```bash
++podman compose logs --tail 200 bot
++podman volume ls                            # work and data volumes (prefixed with the project name)
++podman compose exec bot ls /work /data
++```
++
+ ## whisper-server contract
+ 
+ Captured against the real server with a 7-second WAV (`say` + `ffmpeg -ar 16000 -ac 1 -c:a pcm_s16le`).

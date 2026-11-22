@@ -1,0 +1,18 @@
+VERDICT: CHANGES_REQUESTED
+
+## Findings
+- [Important] Dockerfile:24 - The build downloads a mutable release binary and immediately executes it as root (`yt-dlp --version`) without verifying its checksum or signature. Printing a version is execution, not an integrity check: a substituted release asset can modify the runtime image and later access the Telegram token and mounted job/access data. Keep the required latest-at-build behavior, but resolve a release once, fetch its binary and signed checksum manifest from that same release, verify the manifest against a pinned trusted signing key, and verify the selected binary before executing it. Upstream publishes checksum manifests and detached signatures: [yt-dlp release files](https://github.com/yt-dlp/yt-dlp#release-files).
+- [Important] docs/host-setup.md:42 - The new container setup starts at `podman machine start`, but the Install section never installs Podman or a compose provider and never initializes a machine. Following the advertised full setup on a fresh Mac therefore stops before the image can be built; even installing Podman alone does not provide the external compose implementation. Document installation of Podman and the intended `podman-compose` provider, one-time `podman machine init` (including the intended VM resources), and then the existing start/build commands. Official references: [Podman installation and machine initialization](https://podman.io/docs/installation), [external compose provider requirement](https://docs.podman.io/en/latest/markdown/podman-compose.1.html).
+
+## Requirements
+- R1 (multi-stage JDK/JRE 27, latest yt-dlp, ffmpeg, non-root, default profile): met - Dockerfile implements these; orchestrator evidence confirms build/start and uid 10001. Download verification still needs the security fix above.
+- R2 (Podman-compatible bot service, separate named work/data volumes, host access, .env, no ports): met - compose uses standard keys; supplied evidence confirms host reachability, writable volumes and no published ports.
+- R3 (complete .env.example, ignored secrets, full setup/update/log documentation): not met - all 19 application.yml variables are listed, optional defaults match, and .env remains gitignored, but first-time Podman/provider/VM setup is missing.
+- R4 (machine-specific host-service reachability documented with evidence): met - docs and evidence consistently report HTTP 200 for loopback-bound Whisper/Ollama through host.containers.internal; fallback binding guidance is retained.
+
+## Review scope and verification
+Reviewed the supplied dev-r1.patch and the complete touched files; checked their Git blob hashes against the patch to avoid reviewing concurrent working-tree changes. T15 is explicitly technical: no task requirements/architecture documents or T15 feature scenarios exist or are required by the brief. No Java changes or unit-test changes are present.
+
+No real secret is added in the patch. `.dockerignore` excludes `.env`, `.env.*`, Git metadata and runtime data. Its denylist does not exclude every possible key/backup filename, but the Dockerfile's explicit COPY inputs do not copy arbitrary repository-root files into either image stage; no concrete secret leak was found. The runtime jar is root-owned and the process runs as bot; the supplied evidence confirms /work and /data ownership and write access. No Docker-only compose extensions were found.
+
+Accepted orchestrator verification: spotless:check and verify -Dno-it pass (803 tests), Podman compose build/start pass, host reachability succeeds, and the owner's real-link check succeeds. Did not run Maven or change implementation files.

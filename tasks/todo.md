@@ -202,7 +202,7 @@ Sizes: S = 1-2 files, M = 3-5 files.
 
 ## Phase 5: Packaging and hardening
 
-- [~] **T15: Dockerfile, Podman compose file, and host setup docs** (M)
+- [x] **T15: Dockerfile, Podman compose file, and host setup docs** (M)
   - Acceptance:
     - A multi-stage `Dockerfile` (JDK 27) with `yt-dlp` (latest at build time) and `ffmpeg`, running as a non-root user. The image starts the bot with the default (non-`dev`) profile.
     - `compose.yaml` (runs with `podman compose` / `podman-compose`, no Docker-only extensions) with the `bot` service, a named work volume (`/work`), a separate named data volume for `allowed-users.json` (`/data`), `host.containers.internal` access to Ollama and Whisper, env vars from `.env`, and no published ports.
