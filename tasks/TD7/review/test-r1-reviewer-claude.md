@@ -1,0 +1,13 @@
+VERDICT: APPROVED
+
+## Findings
+- [Suggestion] src/it/java/com/video2podcast/functional/MetadataProjectionIT.java:93-123 - the guard probe runs its own `yt-dlp --dump-single-json` command, not the application's. It proves the fixture's full metadata is over 8 MiB, which is its job, but it does not prove the application stopped using the full dump. If the app went back to `--dump-single-json` the test would still fail through the cap, so this is covered indirectly. Optionally also assert that no recorded metadata command contains `--dump-single-json`. Not blocking.
+- [Suggestion] src/it/java/com/video2podcast/functional/MetadataProjectionIT.java:114 - the probe has a fixed 30 s timeout. Parsing a 9 MiB page can be slow on a loaded CI host. Reuse `PipelineWorld.WAIT` if it is accessible. Not blocking.
+- [Suggestion] src/it/java/com/video2podcast/functional/MetadataProjectionIT.java:23-24 - the two `world.fixture(...)` calls stub /first and /second, which the XSPF playlist never requests (it points at `.m4a` directly). They make both tracks valid, as the tester report says, so this is harmless. A one-line comment would make the intent clear.
+
+## Requirements
+- Large metadata (full JSON over 8 MiB through the real yt-dlp, with the new `--print` shape): met. `largeUnusedDescriptionDoesNotPreventSummaryDelivery` checks the fixture size on every run, then expects `Done.`, the title, `Duration: 59s`, both buttons, one Whisper and one Ollama call, and no uploads. On the old code the metadata cut would give `Failed.`, so it does not pass trivially.
+- Collection regression (review round 1 of the dev zone): met. `playlistOnlyLinkIsRejectedBeforeProcessingItsFirstVideo` uses a real two-track XSPF playlist, so the real `--print` output has `playlist_index` and no `_type`. It requires `Failed.` and the reply "This link is not a supported video.", with no download command, Whisper, Ollama, summary or upload. Both tracks are valid, so processing the first one would fail the test.
+- Fixture compatibility: met. `RetentionSupport` now recognises metadata with `PipelineWorld.stage(args).equals("metadata")` (`--skip-download`) and returns the selected shape with `is_live` and without `playlist_index` and `_type`. This fixes the four T14 failures. A grep of `src/it` and `src/features` shows no other use of `--dump-single-json` except the intentional probe.
+- No network and no secrets: met. The tests use local WireMock and the real local yt-dlp and ffmpeg. The 392-entry `./mvnw clean verify` passed with 0 failures.
+- Boundaries: met. The patch touches only `src/it`, and no feature, production or unit test file changed.

@@ -303,3 +303,13 @@ Work that is not scheduled in a phase. Technical debt carries the `[debt]` mark.
   - Verify: the failed scenario and the whole T9 group pass 20 times in a row (`-Dcucumber.filter.tags=@T9` in a loop, result in `evidence.md`), then `./mvnw clean verify` is green with the JaCoCo, Spotless, SpotBugs and PMD gates unchanged. Technical task: the Tester investigates and fixes the tests; the Developer joins only if the cause is in the code; both code reviewers review; no Analyst, no Architect (scenarios and contracts do not change).
   - Depends on: T11
   - Files: `src/it/java/com/video2podcast/functional/*` (steps and scenario world), if needed `job/`, `transcript/`, `tasks/TD6/evidence.md`
+- [x] **TD7 [debt]: yt-dlp metadata over 8 MiB is cut silently, and failed jobs leave no log** (S)
+  - Found at Checkpoint 4 (2026-11-22): a real public YouTube video (156 s) answers `yt-dlp --dump-single-json` with 11.7 MB. `DefaultProcessRunner` keeps only the first `MAX_OUTPUT_BYTES` (8 MiB) and drops the rest, so the JSON is cut, `YtDlpClient.parse` fails with `FAILED`, and the user gets "Could not process this video." No line appears in the bot log: a `JobFailure` is never logged with its cause.
+  - Acceptance:
+    - `fetchMetadata` asks yt-dlp only for the fields it needs (`title`, `duration`, `is_live`, `_type`) with `--print` and a JSON field selection, so the output stays small whatever the video has. The same checks as now (collections, live, duration, title, TOO_LONG) still hold. The command is verified by hand with the real `yt-dlp` on the video above and on a short video; the commands and results go into `tasks/TD7/evidence.md`.
+    - A runner output over the limit is not cut silently: the call fails visibly (a log line with the command name and the limit, and a `FAILED` result), never a parse of a truncated text.
+    - Every `JobFailure` that ends a job is logged once at WARN with the job id, the kind and the cause message (no URL, no file paths, no full stderr), by the code that reports the failure to the user.
+    - Unit tests: metadata whose full JSON is over 8 MiB (through the new `--print` shape), output over the limit gives a visible failure, the failure log line. The behaviour for every other input is unchanged.
+  - Verify: `./mvnw verify -Dno-it` and `./mvnw clean verify`, `-Pmutation` at least 85%. Checkpoint 4 is repeated by the owner with the video above. Technical task: Developer and Tester, both code reviewers; no Analyst, no Architect.
+  - Depends on: T8, T11
+  - Files: `media/YtDlpClient.java`, `media/DefaultProcessRunner.java`, `bot/UrlMessageHandler.java` (and `job/PipelineService.java` if needed), unit tests, tests under `src/it` if the fixtures need the new output shape, `tasks/TD7/evidence.md`

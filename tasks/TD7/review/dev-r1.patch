@@ -1,0 +1,407 @@
+diff --git a/src/main/java/com/video2podcast/bot/UrlMessageHandler.java b/src/main/java/com/video2podcast/bot/UrlMessageHandler.java
+index 3d7390f..f3ca32d 100644
+--- a/src/main/java/com/video2podcast/bot/UrlMessageHandler.java
++++ b/src/main/java/com/video2podcast/bot/UrlMessageHandler.java
+@@ -15,6 +15,7 @@ import java.util.concurrent.RejectedExecutionException;
+ import java.util.concurrent.TimeUnit;
+ import java.util.concurrent.TimeoutException;
+ import java.util.concurrent.atomic.AtomicReference;
++import java.util.regex.Pattern;
+ import org.slf4j.Logger;
+ import org.slf4j.LoggerFactory;
+ 
+@@ -26,6 +27,8 @@ public class UrlMessageHandler {
+ 
+   private static final Logger LOG = LoggerFactory.getLogger(UrlMessageHandler.class);
+ 
++  private static final int CAUSE_LIMIT = 200;
++  private static final Pattern UNSAFE_WORD = Pattern.compile("\\S*[/\\\\]\\S*");
+   private static final Duration STATUS_WAIT = Duration.ofSeconds(30);
+ 
+   private final TelegramGateway gateway;
+@@ -92,7 +95,7 @@ public class UrlMessageHandler {
+     }
+     statusId.complete(id);
+     future.whenCompleteAsync(
+-        (result, error) -> finish(sender.chatId(), id, failure.get(), error),
++        (result, error) -> finish(request.jobId(), sender.chatId(), id, failure.get(), error),
+         Thread::startVirtualThread);
+   }
+ 
+@@ -133,17 +136,47 @@ public class UrlMessageHandler {
+   }
+ 
+   /** Runs after the job has left the queue. Every Telegram problem is logged and dropped. */
+-  private void finish(long chatId, int statusId, JobFailure failure, Throwable error) {
++  private void finish(
++      String jobId, long chatId, int statusId, JobFailure failure, Throwable error) {
+     JobFailure outcome =
+         failure == null && error != null ? JobFailure.of(JobFailure.Kind.FAILED, error) : failure;
+     if (outcome == null) {
+       editStatus(chatId, statusId, "Done.");
+     } else {
++      logFailure(jobId, outcome);
+       tellFailure(chatId, outcome);
+       editStatus(chatId, statusId, "Failed.");
+     }
+   }
+ 
++  /**
++   * The kind and the cause as its class and a sanitized first message line: any word with a slash
++   * (a URL or a path) is replaced and the text is cut, so no stderr dump gets into the log.
++   */
++  private static void logFailure(String jobId, JobFailure failure) {
++    if (LOG.isWarnEnabled()) {
++      LOG.warn("Job {} failed: {} (cause: {})", jobId, failure.kind(), describeCause(failure));
++    }
++  }
++
++  private static String describeCause(JobFailure failure) {
++    Throwable cause = failure.getCause();
++    if (cause == null) {
++      return "none";
++    }
++    String name = cause.getClass().getSimpleName();
++    String message = cause.getMessage();
++    if (message == null || message.isBlank()) {
++      return name;
++    }
++    String line = message.strip().lines().findFirst().orElse("");
++    String safe = UNSAFE_WORD.matcher(line).replaceAll("<redacted>").strip();
++    if (safe.length() > CAUSE_LIMIT) {
++      safe = safe.substring(0, CAUSE_LIMIT) + "...";
++    }
++    return name + ": " + safe;
++  }
++
+   private void tellFailure(long chatId, JobFailure failure) {
+     try {
+       gateway.sendMessage(chatId, Html.escape(failure.getMessage()), List.of());
+diff --git a/src/main/java/com/video2podcast/media/DefaultProcessRunner.java b/src/main/java/com/video2podcast/media/DefaultProcessRunner.java
+index 83822be..3d17a3f 100644
+--- a/src/main/java/com/video2podcast/media/DefaultProcessRunner.java
++++ b/src/main/java/com/video2podcast/media/DefaultProcessRunner.java
+@@ -9,13 +9,19 @@ import java.nio.charset.StandardCharsets;
+ import java.time.Duration;
+ import java.util.List;
+ import java.util.concurrent.TimeUnit;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
+ 
+ /**
+  * Runs a process without a shell, reads both output streams on their own threads and kills the
+- * whole process tree when the timeout ends. Nothing here waits without a bound.
++ * whole process tree when the timeout ends. Nothing here waits without a bound. A stdout above the
++ * limit fails the call, because a cut text is never a valid answer; a cut stderr only loses log
++ * detail.
+  */
+ public class DefaultProcessRunner implements ProcessRunner {
+ 
++  private static final Logger LOG = LoggerFactory.getLogger(DefaultProcessRunner.class);
++
+   static final int MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
+   private static final Duration CLEANUP_BUDGET = Duration.ofSeconds(5);
+   private static final long GRACE_NANOS = TimeUnit.MILLISECONDS.toNanos(200);
+@@ -24,6 +30,7 @@ public class DefaultProcessRunner implements ProcessRunner {
+   private static final class Reader implements Runnable {
+     private final InputStream in;
+     private final ByteArrayOutputStream buffer = new ByteArrayOutputStream();
++    private boolean truncated;
+ 
+     Reader(InputStream in) {
+       this.in = in;
+@@ -48,6 +55,13 @@ public class DefaultProcessRunner implements ProcessRunner {
+       if (room > 0) {
+         buffer.write(data, 0, Math.min(room, length));
+       }
++      if (length > room) {
++        truncated = true;
++      }
++    }
++
++    synchronized boolean truncated() {
++      return truncated;
+     }
+ 
+     synchronized String text() {
+@@ -127,6 +141,9 @@ public class DefaultProcessRunner implements ProcessRunner {
+         child.close();
+         join(outThread, System.nanoTime() + GRACE_NANOS);
+         join(errThread, System.nanoTime() + GRACE_NANOS);
++        if (out.truncated()) {
++          throw outputTooLarge(args);
++        }
+         return new ProcessResult(child.exitCode(), out.text(), err.text());
+       } catch (InterruptedException e) {
+         Thread.currentThread().interrupt();
+@@ -136,6 +153,15 @@ public class DefaultProcessRunner implements ProcessRunner {
+     }
+   }
+ 
++  private static JobFailure outputTooLarge(List<String> args) {
++    if (LOG.isWarnEnabled()) {
++      LOG.warn("{} wrote more than {} bytes to stdout", args.get(0), MAX_OUTPUT_BYTES);
++    }
++    return JobFailure.of(
++        JobFailure.Kind.FAILED,
++        new IllegalStateException("stdout is over " + MAX_OUTPUT_BYTES + " bytes"));
++  }
++
+   private static Thread daemon(Runnable task, String name) {
+     Thread thread = new Thread(task, name);
+     thread.setDaemon(true);
+diff --git a/src/main/java/com/video2podcast/media/YtDlpClient.java b/src/main/java/com/video2podcast/media/YtDlpClient.java
+index 3bbccac..7fb4a6e 100644
+--- a/src/main/java/com/video2podcast/media/YtDlpClient.java
++++ b/src/main/java/com/video2podcast/media/YtDlpClient.java
+@@ -23,6 +23,9 @@ public class YtDlpClient {
+ 
+   private static final Logger LOG = LoggerFactory.getLogger(YtDlpClient.class);
+ 
++  /** Only the fields {@link #parse} reads; a full dump of a long video is over 10 MB. */
++  private static final String PRINT_FIELDS = "%(.{title,duration,is_live,_type})j";
++
+   private static final int LOG_LIMIT = 2000;
+   private static final Set<String> COLLECTIONS = Set.of("playlist", "multi_video");
+ 
+@@ -51,7 +54,8 @@ public class YtDlpClient {
+                 "1",
+                 "--no-warnings",
+                 "--skip-download",
+-                "--dump-single-json",
++                "--print",
++                PRINT_FIELDS,
+                 "--",
+                 url),
+             jobs.metadataTimeout());
+diff --git a/src/test/java/com/video2podcast/bot/UrlMessageHandlerTest.java b/src/test/java/com/video2podcast/bot/UrlMessageHandlerTest.java
+index db71fc3..73da14c 100644
+--- a/src/test/java/com/video2podcast/bot/UrlMessageHandlerTest.java
++++ b/src/test/java/com/video2podcast/bot/UrlMessageHandlerTest.java
+@@ -8,6 +8,10 @@ import static org.mockito.Mockito.mock;
+ import static org.mockito.Mockito.never;
+ import static org.mockito.Mockito.verify;
+ 
++import ch.qos.logback.classic.Level;
++import ch.qos.logback.classic.Logger;
++import ch.qos.logback.classic.spi.ILoggingEvent;
++import ch.qos.logback.core.read.ListAppender;
+ import com.video2podcast.job.JobFailure;
+ import com.video2podcast.job.JobProgress;
+ import com.video2podcast.job.JobQueue;
+@@ -27,6 +31,7 @@ import java.util.function.BooleanSupplier;
+ import org.junit.jupiter.api.AfterEach;
+ import org.junit.jupiter.api.Test;
+ import org.mockito.ArgumentCaptor;
++import org.slf4j.LoggerFactory;
+ 
+ class UrlMessageHandlerTest {
+ 
+@@ -210,6 +215,83 @@ class UrlMessageHandlerTest {
+             "send Queued: position 1", "send No speech was found in this video.", "edit Failed.");
+   }
+ 
++  @Test
++  void aFailedJobIsLoggedOnceWithItsIdKindAndASanitizedCauseMessage() throws Exception {
++    Logger logger = (Logger) LoggerFactory.getLogger(UrlMessageHandler.class);
++    ListAppender<ILoggingEvent> appender = new ListAppender<>();
++    appender.start();
++    logger.addAppender(appender);
++    try {
++      doThrow(
++              JobFailure.of(
++                  JobFailure.Kind.FAILED,
++                  new IllegalStateException(
++                      "bad /secret/path at https://x.y/z\nsecond line C:\\dir\\f")))
++          .when(pipeline)
++          .run(any(), any());
++
++      handler.handle(SENDER, URL);
++
++      await(() -> gateway.edits.size() == 1);
++    } finally {
++      logger.detachAppender(appender);
++    }
++    ArgumentCaptor<JobRequest> request = ArgumentCaptor.forClass(JobRequest.class);
++    verify(pipeline).run(request.capture(), any());
++    assertThat(appender.list)
++        .filteredOn(e -> e.getLevel() == Level.WARN)
++        .extracting(ILoggingEvent::getFormattedMessage)
++        .containsExactly(
++            "Job "
++                + request.getValue().jobId()
++                + " failed: FAILED (cause: IllegalStateException: bad <redacted> at <redacted>)");
++  }
++
++  @Test
++  void aLongCauseMessageIsCutAndABlankOneIsLeftOut() throws Exception {
++    Logger logger = (Logger) LoggerFactory.getLogger(UrlMessageHandler.class);
++    ListAppender<ILoggingEvent> appender = new ListAppender<>();
++    appender.start();
++    logger.addAppender(appender);
++    try {
++      doThrow(JobFailure.of(JobFailure.Kind.FAILED, new IllegalStateException("x".repeat(500))))
++          .doThrow(JobFailure.of(JobFailure.Kind.FAILED, new IllegalStateException("  ")))
++          .when(pipeline)
++          .run(any(), any());
++
++      handler.handle(SENDER, URL);
++      await(() -> gateway.edits.size() == 1);
++      handler.handle(SENDER, URL);
++      await(() -> gateway.edits.size() == 2);
++    } finally {
++      logger.detachAppender(appender);
++    }
++    assertThat(appender.list)
++        .extracting(ILoggingEvent::getFormattedMessage)
++        .anyMatch(m -> m.endsWith("(cause: IllegalStateException: " + "x".repeat(200) + "...)"))
++        .anyMatch(m -> m.endsWith("(cause: IllegalStateException)"));
++  }
++
++  @Test
++  void aFailureWithoutACauseIsLoggedAsSuch() throws Exception {
++    Logger logger = (Logger) LoggerFactory.getLogger(UrlMessageHandler.class);
++    ListAppender<ILoggingEvent> appender = new ListAppender<>();
++    appender.start();
++    logger.addAppender(appender);
++    try {
++      doThrow(JobFailure.of(JobFailure.Kind.NO_SPEECH)).when(pipeline).run(any(), any());
++
++      handler.handle(SENDER, URL);
++
++      await(() -> gateway.edits.size() == 1);
++    } finally {
++      logger.detachAppender(appender);
++    }
++    assertThat(appender.list)
++        .extracting(ILoggingEvent::getFormattedMessage)
++        .anyMatch(m -> m.endsWith(" failed: NO_SPEECH (cause: none)"));
++  }
++
+   @Test
+   void theFailureMessageIsHtmlEscaped() throws Exception {
+     doThrow(new JobFailure(JobFailure.Kind.FAILED, "a <b> & c")).when(pipeline).run(any(), any());
+diff --git a/src/test/java/com/video2podcast/media/DefaultProcessRunnerTest.java b/src/test/java/com/video2podcast/media/DefaultProcessRunnerTest.java
+index 8feb3f1..9e31713 100644
+--- a/src/test/java/com/video2podcast/media/DefaultProcessRunnerTest.java
++++ b/src/test/java/com/video2podcast/media/DefaultProcessRunnerTest.java
+@@ -3,6 +3,9 @@ package com.video2podcast.media;
+ import static org.assertj.core.api.Assertions.assertThat;
+ import static org.assertj.core.api.Assertions.assertThatThrownBy;
+ 
++import ch.qos.logback.classic.Logger;
++import ch.qos.logback.classic.spi.ILoggingEvent;
++import ch.qos.logback.core.read.ListAppender;
+ import com.video2podcast.job.JobFailure;
+ import com.video2podcast.job.JobFailure.Kind;
+ import java.io.IOException;
+@@ -13,6 +16,7 @@ import java.util.List;
+ import java.util.Optional;
+ import org.junit.jupiter.api.Test;
+ import org.junit.jupiter.api.io.TempDir;
++import org.slf4j.LoggerFactory;
+ 
+ /** Uses {@code /bin/sh} as the controlled helper process; no media tools are needed. */
+ class DefaultProcessRunnerTest {
+@@ -48,28 +52,59 @@ class DefaultProcessRunnerTest {
+   }
+ 
+   @Test
+-  void outputIsCappedButStillDrained() {
++  void stdoutOverTheCapFailsVisiblyAfterItIsDrained() {
++    ListAppender<ILoggingEvent> log = capture();
++    try {
++      assertThatThrownBy(() ->
++              runner.run(sh("head -c 9000000 /dev/zero | tr '\\0' a"), Duration.ofSeconds(60)))
++          .isInstanceOfSatisfying(
++              JobFailure.class, f -> assertThat(f.kind()).isEqualTo(Kind.FAILED))
++          .hasRootCauseMessage(
++              "stdout is over " + DefaultProcessRunner.MAX_OUTPUT_BYTES + " bytes");
++    } finally {
++      release(log);
++    }
++
++    assertThat(log.list)
++        .extracting(ILoggingEvent::getFormattedMessage)
++        .containsExactly(
++            "/bin/sh wrote more than "
++                + DefaultProcessRunner.MAX_OUTPUT_BYTES
++                + " bytes to stdout");
++  }
++
++  @Test
++  void stdoutOfExactlyTheCapIsKept() {
+     ProcessResult result =
+-        runner.run(sh("head -c 9000000 /dev/zero | tr '\\0' a"), Duration.ofSeconds(60));
++        runner.run(
++            sh("head -c " + DefaultProcessRunner.MAX_OUTPUT_BYTES + " /dev/zero | tr '\\0' a"),
++            Duration.ofSeconds(60));
+ 
+-    assertThat(result.exitCode()).isZero();
+     assertThat(result.stdout()).hasSize(DefaultProcessRunner.MAX_OUTPUT_BYTES);
+   }
+ 
+   @Test
+-  void bothStreamsAreCappedAndDrainedWhenBothExceedTheCap() {
++  void stderrOverTheCapIsCutButStillDrainedAndDoesNotFail() {
+     ProcessResult result =
+         runner.run(
+-            sh(
+-                "head -c 9000000 /dev/zero | tr '\\0' a; "
+-                    + "head -c 9000000 /dev/zero | tr '\\0' b >&2"),
+-            Duration.ofSeconds(60));
++            sh("echo ok; head -c 9000000 /dev/zero | tr '\\0' b >&2"), Duration.ofSeconds(60));
+ 
+     assertThat(result.exitCode()).isZero();
+-    assertThat(result.stdout()).hasSize(DefaultProcessRunner.MAX_OUTPUT_BYTES);
++    assertThat(result.stdout()).isEqualTo("ok\n");
+     assertThat(result.stderr()).hasSize(DefaultProcessRunner.MAX_OUTPUT_BYTES);
+   }
+ 
++  private static ListAppender<ILoggingEvent> capture() {
++    ListAppender<ILoggingEvent> appender = new ListAppender<>();
++    appender.start();
++    ((Logger) LoggerFactory.getLogger(DefaultProcessRunner.class)).addAppender(appender);
++    return appender;
++  }
++
++  private static void release(ListAppender<ILoggingEvent> appender) {
++    ((Logger) LoggerFactory.getLogger(DefaultProcessRunner.class)).detachAppender(appender);
++  }
++
+   @Test
+   void timeoutKillsTheWholeTree() throws Exception {
+     Path pidFile = dir.resolve("child.pid");
+diff --git a/src/test/java/com/video2podcast/media/YtDlpClientTest.java b/src/test/java/com/video2podcast/media/YtDlpClientTest.java
+index e1ff281..28174d0 100644
+--- a/src/test/java/com/video2podcast/media/YtDlpClientTest.java
++++ b/src/test/java/com/video2podcast/media/YtDlpClientTest.java
+@@ -67,12 +67,27 @@ class YtDlpClientTest {
+             "1",
+             "--no-warnings",
+             "--skip-download",
+-            "--dump-single-json",
++            "--print",
++            "%(.{title,duration,is_live,_type})j",
+             "--",
+             URL);
+     assertThat(runner.timeouts.get(0)).isEqualTo(Duration.ofMinutes(1));
+   }
+ 
++  /** A real 156 s video answers a full {@code --dump-single-json} with 11.7 MB. */
++  @Test
++  void metadataOfAVideoWhoseFullJsonIsOverTheOutputLimitIsStillRead() {
++    FakeProcessRunner runner =
++        new FakeProcessRunner((args, timeout) ->
++            args.contains("--dump-single-json")
++                ? ok("x".repeat(DefaultProcessRunner.MAX_OUTPUT_BYTES + 1))
++                : ok("{\"title\": \"T\", \"duration\": 156, \"is_live\": false}"));
++
++    VideoMetadata meta = client(runner).fetchMetadata(URL);
++
++    assertThat(meta).isEqualTo(new VideoMetadata("T", Duration.ofSeconds(156)));
++  }
++
+   private static final AppProperties.Jobs TWO_HOURS =
+       new AppProperties.Jobs(
+           Path.of("w"),
