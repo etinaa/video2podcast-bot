@@ -25,7 +25,7 @@ A Telegram bot that summarizes a video and, on request, delivers its audio and t
 3. Telegram integration uses long polling. No public endpoint or webhook is needed, and nothing is exposed to the internet.
 4. Everything runs locally on the owner's Mac (Apple M3 Max, 64 GB RAM) with no paid external APIs. Ollama and whisper.cpp run on the host with Apple GPU (Metal) acceleration. Only the bot runs in a container, managed with Podman (`podman compose`).
 5. The source audio and the transcript are kept in a per-job working directory between the summary and the button taps, so the audio does not have to be downloaded again. A small `job.json` file in that directory stores the job state, so the button still works after a bot restart. No database.
-6. Working files are kept for 1 hour (`JOB_RETENTION`, default `PT1H`), counted from the moment the summary message is sent. When the hour ends, everything in the job directory is deleted, including any file that was not requested. After that a button tap reports that the files have expired and asks the user to resend the link. A file that was already delivered stays in the chat.
+6. Working files are kept for 1 hour (`JOB_RETENTION`, default `PT1H`), counted from the moment the summary message is sent. When the hour ends, everything in the job directory is deleted, including any file that was not requested. After that a button tap says the files were already downloaded or have expired and asks the user to resend the link. A file that was already delivered stays in the chat.
 7. Jobs run one at a time (a simple queue), because the local models are the bottleneck. Audio preparation goes through the same queue.
 8. The transcript `.txt` is written to the job directory when transcription finishes, and sent only when its button is tapped.
 
@@ -200,7 +200,7 @@ While work is running, one status message is edited with the current stage (queu
 3. Tapping **Download audio** sends a playable audio message. The audio file is identical to the downloaded source when it is 50 MB or smaller and in a sendable format (no re-encoding). Tapping **Download transcript** sends a `.txt` document with the full English transcript. Either button works without the other having been tapped.
 4. For a video of exactly 3 hours, tapping the button sends audio under 50 MB, compressed, with no Telegram size error. A video over 3 hours is rejected before download with a clear message.
 5. The transcript is in English and covers the full audio (no missing chunks).
-6. Tapping either button twice sends that file once. Tapping after the retention period, or after the working files are gone, gives an "expired, please resend the link" message.
+6. Tapping either button twice sends that file once. Tapping after the retention period, or after the working files are gone, gives a "Files already downloaded or expired, please resend the link." message.
 7. The buttons still work after a bot restart (job state is restored from `job.json`).
 8. A message or button tap from a non-allowlisted user does no processing. The user gets only the refusal, the access-request reply, or the `/whoami` reply.
 9. An unknown user's `/start` sends the owner a request with **Approve** and **Deny** buttons. After Approve the user can use the bot and is notified. After Deny the user is notified and can't request again for 24 hours.
