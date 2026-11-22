@@ -1,0 +1,18 @@
+# Run with: podman compose up -d --build
+# Settings come from .env (copy .env.example). Whisper and Ollama run on the host and are reached
+# at host.containers.internal (the application.yml defaults), so no ports are published.
+services:
+  bot:
+    build:
+      context: .
+    image: video2podcast-bot:latest
+    env_file:
+      - .env
+    volumes:
+      - work:/work
+      - data:/data
+    restart: unless-stopped
+
+volumes:
+  work:
+  data:

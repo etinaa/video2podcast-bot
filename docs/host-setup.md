@@ -16,7 +16,7 @@ curl -L --fail -o ~/models/whisper/ggml-large-v3-turbo.bin \
   https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin   # about 1.5 GB
 ```
 
-`ffmpeg` and `yt-dlp` on the host are only needed for local runs. The container image will contain its own copies (T15).
+`ffmpeg` and `yt-dlp` on the host are only needed for local runs. The container image contains its own copies of both.
 
 ## Run
 
@@ -25,13 +25,60 @@ curl -L --fail -o ~/models/whisper/ggml-large-v3-turbo.bin \
 whisper-server -m ~/models/whisper/ggml-large-v3-turbo.bin --host 127.0.0.1 --port 8081 -l en -t 8
 ```
 
-Reachability from the container is **not verified yet** (this machine uses Podman 6.2.0 with `podman machine`, 8 CPUs, 6 GiB). `host.containers.internal` is expected to reach the host, but whether services bound to `127.0.0.1` are visible from the Podman VM is not confirmed. If they are not, bind `whisper-server` with `--host 0.0.0.0` and start Ollama with `OLLAMA_HOST=0.0.0.0`, and restrict the ports with the macOS firewall. T15 settles this.
+Reachability from the container: checked on this machine (Podman 6.2.0, `podman machine` with applehv, 8 CPUs, 6 GiB). With `whisper-server` bound to `127.0.0.1:8081` and Ollama bound to `127.0.0.1:11434` on the host, a container request to `http://host.containers.internal:8081/` and to `http://host.containers.internal:11434/api/tags` both answer HTTP 200. No `0.0.0.0` binding and no `OLLAMA_HOST` change is needed here. If a different Podman setup cannot reach them, bind `whisper-server` with `--host 0.0.0.0` and start Ollama with `OLLAMA_HOST=0.0.0.0`, and restrict the ports with the macOS firewall.
 
 Check that both are up:
 
 ```bash
 curl -s http://127.0.0.1:8081/ -o /dev/null -w "%{http_code}\n"   # 200
 curl -s http://localhost:11434/api/tags                           # lists qwen3:32b
+```
+
+## Container: build, start, update, logs
+
+The bot image is built from `Dockerfile` (JDK 27 build, JRE 27 runtime with `ffmpeg` and the latest `yt-dlp`, non-root user, default profile). `compose.yaml` runs one service, `bot`, with two named volumes: `work` (`/work`, job files, cleaned by the bot) and `data` (`/data`, `allowed-users.json`, never touched by job cleanup). No ports are published.
+
+One-time Podman setup (the container needs Podman and the `podman-compose` provider that `podman compose` calls):
+
+```bash
+brew install podman podman-compose
+podman machine init --cpus 8 --memory 6144   # 8 CPUs and 6 GiB, as on the verified machine
+podman machine start
+```
+
+Then, for each build and start:
+
+```bash
+podman machine start                       # once per boot, if the machine is not running
+cp .env.example .env                       # then set TELEGRAM_BOT_TOKEN and ADMIN_USER_ID
+podman compose build                       # build the image
+podman compose up -d                       # start the bot (or: podman compose up -d --build)
+podman compose logs -f bot                 # follow the logs
+podman compose down                        # stop and remove the container (volumes stay)
+```
+
+Only one bot may poll Telegram per token. Stop `./run.sh` before `podman compose up`, and the other way round.
+
+Settings are read from `.env`; `.env.example` lists every variable with its default. Whisper and Ollama default to `http://host.containers.internal:8081` and `:11434`, so `.env` normally needs only the two required values. Do not copy the `localhost` values used by `./run.sh` into a `.env` that the container reads.
+
+### Update yt-dlp
+
+`yt-dlp` is downloaded at image build time, so a site change that breaks downloads is fixed by rebuilding without the cache for that step:
+
+```bash
+podman compose build --no-cache
+podman compose up -d
+podman compose exec bot yt-dlp --version   # the version now in the container
+```
+
+`--no-cache` also rebuilds the Maven stage; to refresh only `yt-dlp`, use `podman compose build --build-arg YT_DLP_REFRESH=$(date +%s)`.
+
+### Logs and data
+
+```bash
+podman compose logs --tail 200 bot
+podman volume ls                            # work and data volumes (prefixed with the project name)
+podman compose exec bot ls /work /data
 ```
 
 ## whisper-server contract
