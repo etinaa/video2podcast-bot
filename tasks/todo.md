@@ -213,14 +213,17 @@ Sizes: S = 1-2 files, M = 3-5 files.
   - Files: `Dockerfile`, `compose.yaml`, `.env.example`, `.gitignore`, `.dockerignore`, `docs/host-setup.md`, `tasks/T15/evidence.md`
   - Technical task: Developer and Tester, both code reviewers; no Analyst, no Architect.
 
-- [ ] **T16: Failure-mode and restart integration tests** (M)
+- [~] **T16: Service health checks and failure-mode tests** (M)
   - Acceptance:
-    - Startup health check and per-job checks report "Ollama unreachable" or "Whisper unreachable" to the user, without hanging.
-    - Functional tests (`*IT`) cover the failure paths that earlier tasks did not: Whisper or Ollama down, private/unsupported/too-long URL, non-allowlisted callbacks, restart with pending access requests.
-    - The JaCoCo gate requires at least 90% line coverage and 90% branch coverage across all production code, including `access` and `config`, measured from unit tests only. `./mvnw clean verify` generates `target/site/jacoco/index.html` and enforces both `COVEREDRATIO` minimums of `0.90` through `jacoco:check`; either threshold being missed fails the build. Integration-test coverage does not count toward the gate.
-  - Verify: `./mvnw verify` passes with the gate on.
+    - **Startup check:** when the bot starts, it probes Whisper and Ollama (short timeout, a few seconds) and logs one line per service: reachable, or unreachable with the reason (no URLs with credentials, no stack trace). The bot starts either way and never hangs on an unreachable service.
+    - **Per-job check:** after a link is accepted and before anything is downloaded, the bot probes both services in the same way. If one is unreachable, the user gets the existing message (`The transcription server is unreachable.` or `The summary server is unreachable.`, both if both), the job is not queued further, the working directory is removed, and nothing is downloaded. The check takes seconds at most, and it does not block other users' messages and button taps.
+    - Failures that happen later in a job (a service going down mid-job) keep the behaviour from T9 and T10; nothing is changed there.
+    - Functional tests (`*IT`) cover the failure paths that earlier tasks did not: Whisper down, Ollama down, both down (at link time, with no download), a private, unsupported and too-long URL (only the paths not yet covered), callbacks from a non-allowlisted user, and a restart with pending access requests. The Analyst lists in `requirements.md` which of these are already covered by T4-T14 scenarios, so the Tester adds only what is missing.
+    - The JaCoCo gate (90% line and 90% branch, unit tests only) stays on in `pom.xml` and passes; no test needs network access.
+  - Verify: `./mvnw clean verify` and `-Pmutation` (at least 85%) pass. The owner stops Whisper and then Ollama and checks the message in Telegram.
   - Depends on: T14, T15
-  - Files: `job/HealthChecks.java`, `FailureModesIT.java`, `pom.xml`
+  - Files: `job/HealthChecks.java` (and a small client method per service if needed), `bot/UrlMessageHandler.java` or the pipeline entry, `config/`, unit tests, `FailureModesIT.java` and its steps, `src/features/T16-failure-modes.feature`, `docs/decisions.md`, `docs/host-setup.md`
+  - Product task: Analyst, Architect, Developer, Tester and both code reviewers.
 
 - [ ] **T17: Real-world smoke tests (short and 3-hour video)** (S)
   - Acceptance:
