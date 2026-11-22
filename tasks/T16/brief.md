@@ -11,3 +11,5 @@ Questions and answers:
 Decisions made by the orchestrator and shown to the owner (no objection): the existing message texts are reused; the per-job check does not block other users or the queue; a service going down mid-job keeps the T9/T10 behaviour; deferred jobs and the 2-hour retry stay in T18.
 
 Agreed task: see T16 in `tasks/todo.md`.
+
+Owner decision on Q-analyst-2 (2026-11-22): the per-job probes run on the processing worker right before execution (after queueing); a down service delays the next queued job by at most 4 seconds. This supersedes "does not block the queue" above. See tasks/T16/comms/questions.md.
