@@ -196,8 +196,8 @@ Sizes: S = 1-2 files, M = 3-5 files.
   - Files: `job/DeadLetterQueue.java`, `job/DeferredJobRunner.java`, `job/PipelineService.java`, `config/AppProperties.java`, `application.yml`, `SPEC.md`, tests
 
 ### Checkpoint 4: Full flow
-- [ ] All tests pass
-- [ ] Manual: link, summary, tap transcript, tap audio, and the job directory is deleted. A second job left alone is deleted after 1 hour.
+- [x] All tests pass
+- [x] Manual: link, summary, tap transcript, tap audio, and the job directory is deleted. A second job left alone is deleted after 1 hour.
 - [ ] Review with human before proceeding
 
 ## Phase 5: Packaging and hardening
