@@ -358,7 +358,7 @@ public class AudioAssertionSteps {
     if (outcome.startsWith("one")) {
       success();
       sent("SENT");
-    } else w.refusal("Expired, please resend the link.");
+    } else w.refusal("Files already downloaded or expired, please resend the link.");
   }
 
   @Then(

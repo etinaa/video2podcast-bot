@@ -117,7 +117,7 @@ class AccessGateIT extends FunctionalTest {
             passedGate -> {
               assertThat(passedGate.get("callback_query_id").asText()).isEqualTo("cb-allowed");
               assertThat(passedGate.get("text").asText())
-                  .isEqualTo("Expired, please resend the link.");
+                  .isEqualTo("Files already downloaded or expired, please resend the link.");
             });
     assertThat(telegramCalls("sendMessage")).isEmpty();
   }

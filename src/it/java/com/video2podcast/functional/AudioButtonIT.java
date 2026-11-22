@@ -55,7 +55,7 @@ class AudioButtonIT extends FunctionalTest {
         ((com.fasterxml.jackson.databind.node.ObjectNode) j.path("files").path("AUDIO"))
             .put("expiresAt", w.clock.instant().toString()));
     w.tap("audio:" + TranscriptWorld.JOB, 101, 701, 101, "private");
-    w.refusal("Expired, please resend the link.");
+    w.refusal("Files already downloaded or expired, please resend the link.");
     w.unchanged();
     assertThat(w.calls("sendAudio")).isEmpty();
   }

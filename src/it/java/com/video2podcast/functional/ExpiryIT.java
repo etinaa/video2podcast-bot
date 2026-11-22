@@ -61,7 +61,7 @@ class ExpiryIT {
     w.retention.tick();
     assertThat(w.dir).doesNotExist();
     w.tap("audio:" + TranscriptWorld.JOB, 101, 701, 101, "private");
-    w.refusal("Expired, please resend the link.");
+    w.refusal("Files already downloaded or expired, please resend the link.");
     assertThat(w.calls("sendAudio")).isEmpty();
   }
 }
