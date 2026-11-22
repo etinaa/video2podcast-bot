@@ -70,6 +70,9 @@ public class HealthChecks {
   }
 
   private Health await() throws InterruptedException {
+    if (Thread.interrupted()) {
+      throw new InterruptedException();
+    }
     FutureTask<ProbeResult> w = new FutureTask<>(() -> whisper.probe(timeout));
     FutureTask<ProbeResult> o = new FutureTask<>(() -> ollama.probe(timeout));
     Thread.ofVirtual().name("health-whisper").start(w);
