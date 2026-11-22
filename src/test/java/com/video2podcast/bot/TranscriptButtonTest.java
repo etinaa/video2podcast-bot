@@ -175,7 +175,8 @@ class TranscriptButtonTest {
 
     handler.handle(tap(USER));
 
-    assertThat(answers()).containsExactly("Expired, please resend the link.");
+    assertThat(answers())
+        .containsExactly("Files already downloaded or expired, please resend the link.");
     assertThat(gateway.documents).isEmpty();
   }
 }

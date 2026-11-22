@@ -308,7 +308,8 @@ class AudioButtonTest {
 
     handler(StubAudioPreparer.unchanged()).handle(tap(OWNER));
 
-    assertThat(answers()).containsExactly("Expired, please resend the link.");
+    assertThat(answers())
+        .containsExactly("Files already downloaded or expired, please resend the link.");
     assertThat(queue.tasks).isEmpty();
   }
 

@@ -153,7 +153,8 @@ class DeliveryCallbackHandlerTest {
 
     handler.handle(tap(OWNER, ID));
 
-    assertThat(answerTexts()).containsExactly("Expired, please resend the link.");
+    assertThat(answerTexts())
+        .containsExactly("Files already downloaded or expired, please resend the link.");
     assertThat(gateway.documents).isEmpty();
     assertThat(gateway.buttonEdits).isEmpty();
   }
@@ -166,9 +167,9 @@ class DeliveryCallbackHandlerTest {
 
     assertThat(answerTexts())
         .containsExactly(
-            "Expired, please resend the link.",
-            "Expired, please resend the link.",
-            "Expired, please resend the link.");
+            "Files already downloaded or expired, please resend the link.",
+            "Files already downloaded or expired, please resend the link.",
+            "Files already downloaded or expired, please resend the link.");
   }
 
   @Test

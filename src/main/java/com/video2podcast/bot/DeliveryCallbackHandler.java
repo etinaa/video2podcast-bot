@@ -28,7 +28,7 @@ public class DeliveryCallbackHandler {
 
   static final String SENDING = "Sending transcript…";
   static final String PREPARING = "Preparing audio…";
-  static final String EXPIRED = "Expired, please resend the link.";
+  static final String EXPIRED = "Files already downloaded or expired, please resend the link.";
   static final String NOT_OWNER = "This button is not for you.";
   static final String ALREADY_SENT = "Already sent.";
   static final String IN_PROGRESS = "Already being sent.";
