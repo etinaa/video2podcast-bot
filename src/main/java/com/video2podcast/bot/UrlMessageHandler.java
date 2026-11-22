@@ -15,6 +15,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -26,6 +27,8 @@ public class UrlMessageHandler {
 
   private static final Logger LOG = LoggerFactory.getLogger(UrlMessageHandler.class);
 
+  private static final int CAUSE_LIMIT = 200;
+  private static final Pattern UNSAFE_WORD = Pattern.compile("\\S*[/\\\\]\\S*");
   private static final Duration STATUS_WAIT = Duration.ofSeconds(30);
 
   private final TelegramGateway gateway;
@@ -92,7 +95,7 @@ public class UrlMessageHandler {
     }
     statusId.complete(id);
     future.whenCompleteAsync(
-        (result, error) -> finish(sender.chatId(), id, failure.get(), error),
+        (result, error) -> finish(request.jobId(), sender.chatId(), id, failure.get(), error),
         Thread::startVirtualThread);
   }
 
@@ -125,23 +128,51 @@ public class UrlMessageHandler {
     } catch (JobFailure f) {
       failure.set(f);
     } catch (RuntimeException e) {
-      if (LOG.isErrorEnabled()) {
-        LOG.error("Job {} failed unexpectedly", request.jobId(), e);
-      }
+      // PipelineService has logged the stack trace; finish logs the failure.
       failure.set(JobFailure.of(JobFailure.Kind.FAILED, e));
     }
   }
 
   /** Runs after the job has left the queue. Every Telegram problem is logged and dropped. */
-  private void finish(long chatId, int statusId, JobFailure failure, Throwable error) {
+  private void finish(
+      String jobId, long chatId, int statusId, JobFailure failure, Throwable error) {
     JobFailure outcome =
         failure == null && error != null ? JobFailure.of(JobFailure.Kind.FAILED, error) : failure;
     if (outcome == null) {
       editStatus(chatId, statusId, "Done.");
     } else {
+      logFailure(jobId, outcome);
       tellFailure(chatId, outcome);
       editStatus(chatId, statusId, "Failed.");
     }
+  }
+
+  /**
+   * The kind and the cause as its class and a sanitized first message line: any word with a slash
+   * (a URL or a path) is replaced and the text is cut, so no stderr dump gets into the log.
+   */
+  private static void logFailure(String jobId, JobFailure failure) {
+    if (LOG.isWarnEnabled()) {
+      LOG.warn("Job {} failed: {} (cause: {})", jobId, failure.kind(), describeCause(failure));
+    }
+  }
+
+  private static String describeCause(JobFailure failure) {
+    Throwable cause = failure.getCause();
+    if (cause == null) {
+      return "none";
+    }
+    String name = cause.getClass().getSimpleName();
+    String message = cause.getMessage();
+    if (message == null || message.isBlank()) {
+      return name;
+    }
+    String line = message.strip().lines().findFirst().orElse("");
+    String safe = UNSAFE_WORD.matcher(line).replaceAll("<redacted>").strip();
+    if (safe.length() > CAUSE_LIMIT) {
+      safe = safe.substring(0, CAUSE_LIMIT) + "...";
+    }
+    return name + ": " + safe;
   }
 
   private void tellFailure(long chatId, JobFailure failure) {

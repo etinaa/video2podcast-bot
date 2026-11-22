@@ -3,6 +3,9 @@ package com.video2podcast.media;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.video2podcast.job.JobFailure;
 import com.video2podcast.job.JobFailure.Kind;
 import java.io.IOException;
@@ -13,6 +16,7 @@ import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.slf4j.LoggerFactory;
 
 /** Uses {@code /bin/sh} as the controlled helper process; no media tools are needed. */
 class DefaultProcessRunnerTest {
@@ -48,25 +52,45 @@ class DefaultProcessRunnerTest {
   }
 
   @Test
-  void outputIsCappedButStillDrained() {
-    ProcessResult result =
-        runner.run(sh("head -c 9000000 /dev/zero | tr '\\0' a"), Duration.ofSeconds(60));
+  void stdoutOverTheCapFailsVisiblyAfterItIsDrained() {
+    ListAppender<ILoggingEvent> log = capture();
+    try {
+      assertThatThrownBy(() ->
+              runner.run(sh("head -c 9000000 /dev/zero | tr '\\0' a"), Duration.ofSeconds(60)))
+          .isInstanceOfSatisfying(
+              JobFailure.class, f -> assertThat(f.kind()).isEqualTo(Kind.FAILED))
+          .hasRootCauseMessage(
+              "stdout is over " + DefaultProcessRunner.MAX_OUTPUT_BYTES + " bytes");
+    } finally {
+      release(log);
+    }
 
-    assertThat(result.exitCode()).isZero();
+    assertThat(log.list)
+        .extracting(ILoggingEvent::getFormattedMessage)
+        .containsExactly(
+            "/bin/sh wrote more than "
+                + DefaultProcessRunner.MAX_OUTPUT_BYTES
+                + " bytes to stdout");
+  }
+
+  @Test
+  void stdoutOfExactlyTheCapIsKept() {
+    ProcessResult result =
+        runner.run(
+            sh("head -c " + DefaultProcessRunner.MAX_OUTPUT_BYTES + " /dev/zero | tr '\\0' a"),
+            Duration.ofSeconds(60));
+
     assertThat(result.stdout()).hasSize(DefaultProcessRunner.MAX_OUTPUT_BYTES);
   }
 
   @Test
-  void bothStreamsAreCappedAndDrainedWhenBothExceedTheCap() {
+  void stderrOverTheCapIsCutButStillDrainedAndDoesNotFail() {
     ProcessResult result =
         runner.run(
-            sh(
-                "head -c 9000000 /dev/zero | tr '\\0' a; "
-                    + "head -c 9000000 /dev/zero | tr '\\0' b >&2"),
-            Duration.ofSeconds(60));
+            sh("echo ok; head -c 9000000 /dev/zero | tr '\\0' b >&2"), Duration.ofSeconds(60));
 
     assertThat(result.exitCode()).isZero();
-    assertThat(result.stdout()).hasSize(DefaultProcessRunner.MAX_OUTPUT_BYTES);
+    assertThat(result.stdout()).isEqualTo("ok\n");
     assertThat(result.stderr()).hasSize(DefaultProcessRunner.MAX_OUTPUT_BYTES);
   }
 
@@ -236,5 +260,16 @@ class DefaultProcessRunnerTest {
     if (pid > 0) {
       ProcessHandle.of(pid).ifPresent(ProcessHandle::destroyForcibly);
     }
+  }
+
+  private static ListAppender<ILoggingEvent> capture() {
+    ListAppender<ILoggingEvent> appender = new ListAppender<>();
+    appender.start();
+    ((Logger) LoggerFactory.getLogger(DefaultProcessRunner.class)).addAppender(appender);
+    return appender;
+  }
+
+  private static void release(ListAppender<ILoggingEvent> appender) {
+    ((Logger) LoggerFactory.getLogger(DefaultProcessRunner.class)).detachAppender(appender);
   }
 }

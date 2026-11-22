@@ -67,10 +67,46 @@ class YtDlpClientTest {
             "1",
             "--no-warnings",
             "--skip-download",
-            "--dump-single-json",
+            "--print",
+            "%(.{title,duration,is_live,_type,playlist_index})j",
             "--",
             URL);
     assertThat(runner.timeouts.get(0)).isEqualTo(Duration.ofMinutes(1));
+  }
+
+  /**
+   * Real yt-dlp 2026.10.26 output for a playlist-only link, see tasks/TD7/comms/dev-evidence.md.
+   */
+  @Test
+  void anEntryOfAPlaylistOnlyLinkIsUnsupported() {
+    FakeProcessRunner runner =
+        FakeProcessRunner.returning(
+            ok("{\"title\": \"T\", \"duration\": 234, \"is_live\": false, \"playlist_index\": 1}"));
+
+    assertKind(() -> client(runner).fetchMetadata(URL), Kind.UNSUPPORTED);
+  }
+
+  @Test
+  void aNullPlaylistIndexCountsAsACollectionEntryToo() {
+    FakeProcessRunner runner =
+        FakeProcessRunner.returning(
+            ok("{\"title\": \"T\", \"duration\": 5, \"playlist_index\": null}"));
+
+    assertKind(() -> client(runner).fetchMetadata(URL), Kind.UNSUPPORTED);
+  }
+
+  /** A real 156 s video answers a full {@code --dump-single-json} with 11.7 MB. */
+  @Test
+  void metadataOfAVideoWhoseFullJsonIsOverTheOutputLimitIsStillRead() {
+    FakeProcessRunner runner =
+        new FakeProcessRunner((args, timeout) ->
+            args.contains("--dump-single-json")
+                ? ok("x".repeat(DefaultProcessRunner.MAX_OUTPUT_BYTES + 1))
+                : ok("{\"title\": \"T\", \"duration\": 156, \"is_live\": false}"));
+
+    VideoMetadata meta = client(runner).fetchMetadata(URL);
+
+    assertThat(meta).isEqualTo(new VideoMetadata("T", Duration.ofSeconds(156)));
   }
 
   private static final AppProperties.Jobs TWO_HOURS =

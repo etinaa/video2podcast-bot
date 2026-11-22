@@ -8,6 +8,10 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.video2podcast.job.JobFailure;
 import com.video2podcast.job.JobProgress;
 import com.video2podcast.job.JobQueue;
@@ -27,6 +31,7 @@ import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.slf4j.LoggerFactory;
 
 class UrlMessageHandlerTest {
 
@@ -208,6 +213,83 @@ class UrlMessageHandlerTest {
     assertThat(gateway.calls)
         .containsExactly(
             "send Queued: position 1", "send No speech was found in this video.", "edit Failed.");
+  }
+
+  @Test
+  void aFailedJobIsLoggedOnceWithItsIdKindAndASanitizedCauseMessage() throws Exception {
+    Logger logger = (Logger) LoggerFactory.getLogger(UrlMessageHandler.class);
+    ListAppender<ILoggingEvent> appender = new ListAppender<>();
+    appender.start();
+    logger.addAppender(appender);
+    try {
+      doThrow(
+              JobFailure.of(
+                  JobFailure.Kind.FAILED,
+                  new IllegalStateException(
+                      "bad /secret/path at https://x.y/z\nsecond line C:\\dir\\f")))
+          .when(pipeline)
+          .run(any(), any());
+
+      handler.handle(SENDER, URL);
+
+      await(() -> gateway.edits.size() == 1);
+    } finally {
+      logger.detachAppender(appender);
+    }
+    ArgumentCaptor<JobRequest> request = ArgumentCaptor.forClass(JobRequest.class);
+    verify(pipeline).run(request.capture(), any());
+    assertThat(appender.list)
+        .filteredOn(e -> e.getLevel() == Level.WARN)
+        .extracting(ILoggingEvent::getFormattedMessage)
+        .containsExactly(
+            "Job "
+                + request.getValue().jobId()
+                + " failed: FAILED (cause: IllegalStateException: bad <redacted> at <redacted>)");
+  }
+
+  @Test
+  void aLongCauseMessageIsCutAndABlankOneIsLeftOut() throws Exception {
+    Logger logger = (Logger) LoggerFactory.getLogger(UrlMessageHandler.class);
+    ListAppender<ILoggingEvent> appender = new ListAppender<>();
+    appender.start();
+    logger.addAppender(appender);
+    try {
+      doThrow(JobFailure.of(JobFailure.Kind.FAILED, new IllegalStateException("x".repeat(500))))
+          .doThrow(JobFailure.of(JobFailure.Kind.FAILED, new IllegalStateException("  ")))
+          .when(pipeline)
+          .run(any(), any());
+
+      handler.handle(SENDER, URL);
+      await(() -> gateway.edits.size() == 1);
+      handler.handle(SENDER, URL);
+      await(() -> gateway.edits.size() == 2);
+    } finally {
+      logger.detachAppender(appender);
+    }
+    assertThat(appender.list)
+        .extracting(ILoggingEvent::getFormattedMessage)
+        .anyMatch(m -> m.endsWith("(cause: IllegalStateException: " + "x".repeat(200) + "...)"))
+        .anyMatch(m -> m.endsWith("(cause: IllegalStateException)"));
+  }
+
+  @Test
+  void aFailureWithoutACauseIsLoggedAsSuch() throws Exception {
+    Logger logger = (Logger) LoggerFactory.getLogger(UrlMessageHandler.class);
+    ListAppender<ILoggingEvent> appender = new ListAppender<>();
+    appender.start();
+    logger.addAppender(appender);
+    try {
+      doThrow(JobFailure.of(JobFailure.Kind.NO_SPEECH)).when(pipeline).run(any(), any());
+
+      handler.handle(SENDER, URL);
+
+      await(() -> gateway.edits.size() == 1);
+    } finally {
+      logger.detachAppender(appender);
+    }
+    assertThat(appender.list)
+        .extracting(ILoggingEvent::getFormattedMessage)
+        .anyMatch(m -> m.endsWith(" failed: NO_SPEECH (cause: none)"));
   }
 
   @Test

@@ -9,12 +9,18 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Runs a process without a shell, reads both output streams on their own threads and kills the
- * whole process tree when the timeout ends. Nothing here waits without a bound.
+ * whole process tree when the timeout ends. Nothing here waits without a bound. A stdout above the
+ * limit fails the call, because a cut text is never a valid answer; a cut stderr only loses log
+ * detail.
  */
 public class DefaultProcessRunner implements ProcessRunner {
+
+  private static final Logger LOG = LoggerFactory.getLogger(DefaultProcessRunner.class);
 
   static final int MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
   private static final Duration CLEANUP_BUDGET = Duration.ofSeconds(5);
@@ -24,6 +30,7 @@ public class DefaultProcessRunner implements ProcessRunner {
   private static final class Reader implements Runnable {
     private final InputStream in;
     private final ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+    private boolean truncated;
 
     Reader(InputStream in) {
       this.in = in;
@@ -48,6 +55,13 @@ public class DefaultProcessRunner implements ProcessRunner {
       if (room > 0) {
         buffer.write(data, 0, Math.min(room, length));
       }
+      if (length > room) {
+        truncated = true;
+      }
+    }
+
+    synchronized boolean truncated() {
+      return truncated;
     }
 
     synchronized String text() {
@@ -127,6 +141,9 @@ public class DefaultProcessRunner implements ProcessRunner {
         child.close();
         join(outThread, System.nanoTime() + GRACE_NANOS);
         join(errThread, System.nanoTime() + GRACE_NANOS);
+        if (out.truncated()) {
+          throw outputTooLarge(args);
+        }
         return new ProcessResult(child.exitCode(), out.text(), err.text());
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
@@ -134,6 +151,15 @@ public class DefaultProcessRunner implements ProcessRunner {
         throw JobFailure.of(JobFailure.Kind.FAILED, e);
       }
     }
+  }
+
+  private static JobFailure outputTooLarge(List<String> args) {
+    if (LOG.isWarnEnabled()) {
+      LOG.warn("{} wrote more than {} bytes to stdout", args.get(0), MAX_OUTPUT_BYTES);
+    }
+    return JobFailure.of(
+        JobFailure.Kind.FAILED,
+        new IllegalStateException("stdout is over " + MAX_OUTPUT_BYTES + " bytes"));
   }
 
   private static Thread daemon(Runnable task, String name) {

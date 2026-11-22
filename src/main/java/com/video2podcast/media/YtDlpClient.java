@@ -23,6 +23,14 @@ public class YtDlpClient {
 
   private static final Logger LOG = LoggerFactory.getLogger(YtDlpClient.class);
 
+  /**
+   * Only the fields {@link #parse} reads; a full dump of a long video is over 10 MB. {@code
+   * --print} shows the selected entry, not the playlist around it, so a collection is recognised by
+   * {@code playlist_index}, which yt-dlp sets on an entry of a playlist-only link and not on a
+   * single video (also not on {@code watch?v=..&list=..} with {@code --no-playlist}).
+   */
+  private static final String PRINT_FIELDS = "%(.{title,duration,is_live,_type,playlist_index})j";
+
   private static final int LOG_LIMIT = 2000;
   private static final Set<String> COLLECTIONS = Set.of("playlist", "multi_video");
 
@@ -51,7 +59,8 @@ public class YtDlpClient {
                 "1",
                 "--no-warnings",
                 "--skip-download",
-                "--dump-single-json",
+                "--print",
+                PRINT_FIELDS,
                 "--",
                 url),
             jobs.metadataTimeout());
@@ -121,7 +130,8 @@ public class YtDlpClient {
     if (root == null || !root.isObject()) {
       throw JobFailure.of(JobFailure.Kind.FAILED);
     }
-    if (COLLECTIONS.contains(root.path("_type").asText(""))) {
+    if (COLLECTIONS.contains(root.path("_type").asText(""))
+        || !root.path("playlist_index").isMissingNode()) {
       throw JobFailure.of(JobFailure.Kind.UNSUPPORTED);
     }
     JsonNode title = root.path("title");
