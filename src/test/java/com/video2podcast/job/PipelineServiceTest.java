@@ -54,6 +54,7 @@ class PipelineServiceTest {
   private final FfmpegRunner ffmpeg = mock(FfmpegRunner.class);
   private final TranscriptionClient transcription = mock(TranscriptionClient.class);
   private final SummaryService summary = mock(SummaryService.class);
+  private final HealthChecks health = mock(HealthChecks.class);
   private final MutableClock clock = new MutableClock(Instant.parse("2026-11-19T10:05:00Z"));
   private final List<String> events = new ArrayList<>();
   private final FakePublisher publisher = new FakePublisher();
@@ -109,7 +110,8 @@ class PipelineServiceTest {
   void setUp() throws IOException {
     store = new JobStore(work, clock);
     pipeline =
-        new PipelineService(ytDlp, ffmpeg, transcription, summary, store, publisher, clock, JOBS);
+        new PipelineService(
+            ytDlp, ffmpeg, transcription, summary, store, publisher, clock, JOBS, health);
     dir = store.directory(JOB_ID);
     Path source = dir.resolve("source.m4a");
     Path wav = dir.resolve("audio.wav");
@@ -336,7 +338,8 @@ class PipelineServiceTest {
           }
         };
     pipeline =
-        new PipelineService(ytDlp, ffmpeg, transcription, summary, failing, publisher, clock, JOBS);
+        new PipelineService(
+            ytDlp, ffmpeg, transcription, summary, failing, publisher, clock, JOBS, health);
 
     assertThatThrownBy(() -> pipeline.run(REQUEST, progress))
         .isInstanceOfSatisfying(
@@ -359,7 +362,7 @@ class PipelineServiceTest {
         };
     pipeline =
         new PipelineService(
-            ytDlp, ffmpeg, transcription, summary, vanishing, publisher, clock, JOBS);
+            ytDlp, ffmpeg, transcription, summary, vanishing, publisher, clock, JOBS, health);
 
     assertThatThrownBy(() -> pipeline.run(REQUEST, progress)).isInstanceOf(JobFailure.class);
 
@@ -381,10 +384,40 @@ class PipelineServiceTest {
         .discard(JOB_ID);
     pipeline =
         new PipelineService(
-            ytDlp, ffmpeg, transcription, summary, stubborn, publisher, clock, JOBS);
+            ytDlp, ffmpeg, transcription, summary, stubborn, publisher, clock, JOBS, health);
 
     assertThatThrownBy(() -> pipeline.run(REQUEST, progress)).isSameAs(failure);
 
     verify(stubborn).discard(JOB_ID);
+  }
+
+  @Test
+  void anUnreachableServiceFailsTheJobBeforeAnyWork() {
+    JobFailure down = JobFailure.unreachable(true, false);
+    org.mockito.Mockito.doThrow(down).when(health).requireReachable();
+
+    assertThatThrownBy(() -> pipeline.run(REQUEST, progress)).isSameAs(down);
+
+    assertThat(events).isEmpty();
+    assertThat(dir).doesNotExist();
+    verify(ytDlp, never()).fetchMetadata(any());
+    verify(ytDlp, never()).downloadAudio(any(), any());
+  }
+
+  @Test
+  void theCheckRunsBeforeTheDirectoryAndTheFirstStageReport() {
+    org.mockito.Mockito.doAnswer(
+            call -> {
+              assertThat(dir).doesNotExist();
+              events.add("health");
+              return null;
+            })
+        .when(health)
+        .requireReachable();
+
+    pipeline.run(REQUEST, progress);
+
+    assertThat(events).first().isEqualTo("health");
+    assertThat(events.get(1)).isEqualTo("downloading");
   }
 }

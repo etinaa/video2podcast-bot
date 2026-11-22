@@ -2,6 +2,8 @@ package com.video2podcast.transcript;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.video2podcast.config.AppProperties;
+import com.video2podcast.job.HttpProbe;
+import com.video2podcast.job.ProbeResult;
 import com.video2podcast.storage.Json;
 import java.io.FileNotFoundException;
 import java.io.IOException;
@@ -32,6 +34,7 @@ public class WhisperClient {
 
   private final HttpClient http;
   private final URI endpoint;
+  private final URI root;
   private final Duration timeout;
 
   public WhisperClient(AppProperties.Whisper config) {
@@ -48,6 +51,7 @@ public class WhisperClient {
     String base = config.baseUrl();
     String trimmed = base.endsWith("/") ? base.substring(0, base.length() - 1) : base;
     this.endpoint = URI.create(trimmed + "/inference");
+    this.root = URI.create(trimmed + "/");
     this.timeout = config.timeout();
     this.http = http;
   }
@@ -55,6 +59,11 @@ public class WhisperClient {
   /** For tests: the transport the requests go through. */
   HttpClient httpClient() {
     return http;
+  }
+
+  /** {@code GET /}: any HTTP answer means the server is reachable. */
+  public ProbeResult probe(Duration timeout) {
+    return HttpProbe.get(http, root, timeout);
   }
 
   /** Returns the raw "text" field of the answer, not normalized. */

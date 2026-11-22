@@ -48,6 +48,26 @@ public class JobFailure extends RuntimeException {
     return new JobFailure(kind, messageOf(kind), cause);
   }
 
+  /**
+   * The failure for a service that did not answer the check before a job.
+   *
+   * @throws IllegalArgumentException if both arguments are false
+   */
+  public static JobFailure unreachable(boolean whisperDown, boolean ollamaDown) {
+    if (whisperDown && ollamaDown) {
+      return new JobFailure(
+          Kind.SERVICE_UNREACHABLE,
+          messageOf(Kind.SERVICE_UNREACHABLE) + " " + messageOf(Kind.SUMMARY_UNREACHABLE));
+    }
+    if (whisperDown) {
+      return of(Kind.SERVICE_UNREACHABLE);
+    }
+    if (ollamaDown) {
+      return of(Kind.SUMMARY_UNREACHABLE);
+    }
+    throw new IllegalArgumentException("no service is down");
+  }
+
   public static JobFailure unsupportedLiveStream() {
     return new JobFailure(Kind.UNSUPPORTED, "Live streams are not supported.");
   }

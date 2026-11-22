@@ -19,6 +19,8 @@ app:
   whisper:
     base-url: ${WHISPER_BASE_URL:http://host.containers.internal:8081}
     timeout: ${WHISPER_TIMEOUT:PT10M}
+  health:
+    timeout: ${HEALTH_TIMEOUT:PT3S}
   jobs:
     work-dir: ${WORK_DIR:/work}
     max-video-duration: ${MAX_VIDEO_DURATION:PT3H}

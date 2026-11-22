@@ -7,6 +7,7 @@ import com.video2podcast.bot.TelegramGateway;
 import com.video2podcast.bot.UrlMessageHandler;
 import com.video2podcast.job.ButtonRefresher;
 import com.video2podcast.job.DeliveryService;
+import com.video2podcast.job.HealthChecks;
 import com.video2podcast.job.JobQueue;
 import com.video2podcast.job.JobStore;
 import com.video2podcast.job.PipelineService;
@@ -50,9 +51,10 @@ public class PipelineConfig {
       JobStore store,
       SummaryPublisher publisher,
       Clock clock,
+      HealthChecks health,
       AppProperties props) {
     return new PipelineService(
-        ytDlp, ffmpeg, transcription, summary, store, publisher, clock, props.jobs());
+        ytDlp, ffmpeg, transcription, summary, store, publisher, clock, props.jobs(), health);
   }
 
   @Bean

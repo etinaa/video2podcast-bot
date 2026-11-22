@@ -29,7 +29,8 @@ class MediaConfigTest {
             Duration.ofMinutes(1),
             Duration.ofMinutes(30),
             Duration.ofMinutes(30),
-            Duration.ofMinutes(1)));
+            Duration.ofMinutes(1)),
+        new AppProperties.Health(Duration.ofSeconds(3)));
   }
 
   private ApplicationContextRunner runner() {

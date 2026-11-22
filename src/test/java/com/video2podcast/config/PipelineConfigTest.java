@@ -8,6 +8,7 @@ import com.video2podcast.bot.TelegramGateway;
 import com.video2podcast.bot.UrlMessageHandler;
 import com.video2podcast.job.ButtonRefresher;
 import com.video2podcast.job.DeliveryService;
+import com.video2podcast.job.HealthChecks;
 import com.video2podcast.job.JobQueue;
 import com.video2podcast.job.JobStore;
 import com.video2podcast.job.PipelineService;
@@ -39,7 +40,8 @@ class PipelineConfigTest {
             Duration.ofMinutes(1),
             Duration.ofMinutes(30),
             Duration.ofMinutes(30),
-            Duration.ofMinutes(1)));
+            Duration.ofMinutes(1)),
+        new AppProperties.Health(Duration.ofSeconds(3)));
   }
 
   private ApplicationContextRunner runner(boolean enabled) {
@@ -55,6 +57,7 @@ class PipelineConfigTest {
         .withBean(JobStore.class, () -> mock(JobStore.class))
         .withBean(JobQueue.class, () -> mock(JobQueue.class))
         .withBean(UrlValidator.class, UrlValidator::new)
+        .withBean(HealthChecks.class, () -> mock(HealthChecks.class))
         .withBean(Clock.class, Clock::systemUTC)
         .withPropertyValues("app.telegram.enabled=" + enabled);
   }

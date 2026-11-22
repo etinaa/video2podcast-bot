@@ -36,6 +36,7 @@ public class PipelineService {
   private final SummaryPublisher publisher;
   private final Clock clock;
   private final AppProperties.Jobs jobs;
+  private final HealthChecks health;
 
   public PipelineService(
       YtDlpClient ytDlp,
@@ -45,7 +46,8 @@ public class PipelineService {
       JobStore store,
       SummaryPublisher publisher,
       Clock clock,
-      AppProperties.Jobs jobs) {
+      AppProperties.Jobs jobs,
+      HealthChecks health) {
     this.ytDlp = ytDlp;
     this.ffmpeg = ffmpeg;
     this.transcription = transcription;
@@ -54,13 +56,15 @@ public class PipelineService {
     this.publisher = publisher;
     this.clock = clock;
     this.jobs = jobs;
+    this.health = health;
   }
 
   /**
    * Runs one job to the point where the summary message is sent and its retention has started. On
    * every failure the job directory is deleted before the exception leaves.
    *
-   * @throws JobFailure the failure of a stage unchanged, or {@code FAILED} for anything else
+   * @throws JobFailure the failure of a stage unchanged, {@code SERVICE_UNREACHABLE} or {@code
+   *     SUMMARY_UNREACHABLE} raised before the work starts, or {@code FAILED} for anything else
    */
   public void run(JobRequest request, JobProgress progress) {
     try {
@@ -78,6 +82,7 @@ public class PipelineService {
   }
 
   private void execute(JobRequest request, JobProgress progress) {
+    health.requireReachable();
     String jobId = request.jobId();
     Path dir = store.directory(jobId);
     try {

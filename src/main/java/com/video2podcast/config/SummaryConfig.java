@@ -10,7 +10,7 @@ import org.springframework.context.annotation.Configuration;
 public class SummaryConfig {
 
   @Bean
-  LlmClient llmClient(AppProperties props) {
+  OllamaClient llmClient(AppProperties props) {
     return new OllamaClient(props.ollama());
   }
 

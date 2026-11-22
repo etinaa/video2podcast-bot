@@ -31,6 +31,7 @@ class AppPropertiesTest {
     assertThat(props.whisper().timeout()).isEqualTo(Duration.ofMinutes(10));
     assertThat(props.access().file()).isEqualTo(Path.of("/data/allowed-users.json"));
     assertThat(props.access().requestCooldown()).isEqualTo(Duration.ofHours(24));
+    assertThat(props.health().timeout()).isEqualTo(Duration.ofSeconds(3));
     assertThat(props.jobs().workDir()).isEqualTo(Path.of("/work"));
     assertThat(props.jobs().maxVideoDuration()).isEqualTo(Duration.ofHours(3));
     assertThat(props.jobs().retention()).isEqualTo(Duration.ofHours(1));

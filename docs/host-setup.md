@@ -81,6 +81,17 @@ podman volume ls                            # work and data volumes (prefixed wi
 podman compose exec bot ls /work /data
 ```
 
+### Service checks
+
+At startup the bot logs one line per service and starts anyway:
+
+```
+Health check: whisper reachable
+Health check: ollama unreachable (connection refused)
+```
+
+Before every job the bot checks both services again (`GET /` on whisper-server, `GET /api/version` on Ollama; any HTTP answer counts as reachable). If one does not answer, the job fails before any download with "The transcription server is unreachable." and/or "The summary server is unreachable.". `HEALTH_TIMEOUT` (default `PT3S`) is how long one probe may take; a down service delays the next queued job by at most that plus one second.
+
 ## whisper-server contract
 
 Captured against the real server with a 7-second WAV (`say` + `ffmpeg -ar 16000 -ac 1 -c:a pcm_s16le`).

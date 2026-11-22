@@ -15,6 +15,7 @@ import com.github.tomakehurst.wiremock.WireMockServer;
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
 import com.github.tomakehurst.wiremock.http.Fault;
 import com.video2podcast.config.AppProperties;
+import com.video2podcast.job.ProbeResult;
 import com.video2podcast.storage.Json;
 import java.io.IOException;
 import java.net.ServerSocket;
@@ -400,5 +401,43 @@ class OllamaClientTest {
   void theSmallestPositiveTimeoutIsAccepted() {
     new OllamaClient(
         new AppProperties.Ollama("http://localhost:1", "m", 8192, Duration.ofNanos(1)));
+  }
+
+  @Test
+  void probeGetsTheVersionPathAndAnyStatusIsReachable() {
+    server.stubFor(
+        com.github.tomakehurst.wiremock.client.WireMock.get(urlEqualTo("/api/version"))
+            .willReturn(aResponse().withStatus(500).withBody("secret-body")));
+
+    assertThat(client().probe(Duration.ofSeconds(2)).reachable()).isTrue();
+
+    server.verify(
+        com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor(
+            urlEqualTo("/api/version")));
+  }
+
+  @Test
+  void probeReportsAClosedPort() throws IOException {
+    int port;
+    try (ServerSocket socket = new ServerSocket(0)) {
+      port = socket.getLocalPort();
+    }
+
+    ProbeResult result =
+        new OllamaClient(config("http://localhost:" + port, Duration.ofSeconds(5)))
+            .probe(Duration.ofSeconds(2));
+
+    assertThat(result.reachable()).isFalse();
+    assertThat(result.reason()).doesNotContain("localhost").doesNotContain(String.valueOf(port));
+  }
+
+  @Test
+  void probeReportsNoAnswerInTime() {
+    server.stubFor(
+        com.github.tomakehurst.wiremock.client.WireMock.get(urlEqualTo("/api/version"))
+            .willReturn(aResponse().withFixedDelay(1500)));
+
+    assertThat(client().probe(Duration.ofMillis(200)))
+        .isEqualTo(ProbeResult.down("no answer in time"));
   }
 }

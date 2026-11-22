@@ -80,4 +80,26 @@ class JobFailureTest {
     assertThat(failure.kind()).isEqualTo(JobFailure.Kind.FAILED);
     assertThat(failure).hasMessage("x").hasNoCause();
   }
+
+  @Test
+  void unreachableNamesTheServicesThatAreDown() {
+    JobFailure whisper = JobFailure.unreachable(true, false);
+    assertThat(whisper.kind()).isEqualTo(JobFailure.Kind.SERVICE_UNREACHABLE);
+    assertThat(whisper).hasMessage("The transcription server is unreachable.").hasNoCause();
+
+    JobFailure ollama = JobFailure.unreachable(false, true);
+    assertThat(ollama.kind()).isEqualTo(JobFailure.Kind.SUMMARY_UNREACHABLE);
+    assertThat(ollama).hasMessage("The summary server is unreachable.");
+
+    JobFailure both = JobFailure.unreachable(true, true);
+    assertThat(both.kind()).isEqualTo(JobFailure.Kind.SERVICE_UNREACHABLE);
+    assertThat(both)
+        .hasMessage("The transcription server is unreachable. The summary server is unreachable.");
+  }
+
+  @Test
+  void unreachableNeedsAServiceThatIsDown() {
+    org.assertj.core.api.Assertions.assertThatThrownBy(() -> JobFailure.unreachable(false, false))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
 }

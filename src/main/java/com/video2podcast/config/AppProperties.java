@@ -6,7 +6,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 
 @ConfigurationProperties(prefix = "app")
 public record AppProperties(
-    Telegram telegram, Access access, Ollama ollama, Whisper whisper, Jobs jobs) {
+    Telegram telegram, Access access, Ollama ollama, Whisper whisper, Jobs jobs, Health health) {
 
   /** {@code apiUrl} overrides the Telegram Bot API base URL (blank means the real API). */
   public record Telegram(String botToken, long adminUserId, boolean enabled, String apiUrl) {}
@@ -21,6 +21,9 @@ public record AppProperties(
 
   /** {@code timeout} is how long one chunk may wait for its answer. */
   public record Whisper(String baseUrl, Duration timeout) {}
+
+  /** {@code timeout} is how long one service check may take, at startup and before each job. */
+  public record Health(Duration timeout) {}
 
   public record Jobs(
       Path workDir,

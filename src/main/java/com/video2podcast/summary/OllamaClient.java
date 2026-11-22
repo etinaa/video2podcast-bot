@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.video2podcast.config.AppProperties;
+import com.video2podcast.job.HttpProbe;
+import com.video2podcast.job.ProbeResult;
 import com.video2podcast.storage.Json;
 import java.io.IOException;
 import java.net.ConnectException;
@@ -31,6 +33,7 @@ public final class OllamaClient implements LlmClient {
 
   private final HttpClient http;
   private final URI endpoint;
+  private final URI version;
   private final AppProperties.Ollama config;
 
   public OllamaClient(AppProperties.Ollama config) {
@@ -53,6 +56,7 @@ public final class OllamaClient implements LlmClient {
     String base = config.baseUrl();
     String trimmed = base.endsWith("/") ? base.substring(0, base.length() - 1) : base;
     this.endpoint = URI.create(trimmed + "/api/chat");
+    this.version = URI.create(trimmed + "/api/version");
     this.config = config;
     this.http = http;
   }
@@ -60,6 +64,11 @@ public final class OllamaClient implements LlmClient {
   /** For tests: the transport the requests go through. */
   HttpClient httpClient() {
     return http;
+  }
+
+  /** {@code GET /api/version}: any HTTP answer means the server is reachable. */
+  public ProbeResult probe(Duration timeout) {
+    return HttpProbe.get(http, version, timeout);
   }
 
   @Override

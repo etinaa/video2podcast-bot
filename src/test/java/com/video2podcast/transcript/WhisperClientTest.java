@@ -18,6 +18,7 @@ import com.github.tomakehurst.wiremock.http.Fault;
 import com.github.tomakehurst.wiremock.verification.LoggedRequest;
 import com.video2podcast.config.AppProperties;
 import com.video2podcast.job.JobFailure;
+import com.video2podcast.job.ProbeResult;
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.http.HttpClient;
@@ -277,5 +278,54 @@ class WhisperClientTest {
     } finally {
       Thread.interrupted();
     }
+  }
+
+  @Test
+  void probeGetsTheRootAndAnyStatusIsReachable() {
+    server.stubFor(
+        com.github.tomakehurst.wiremock.client.WireMock.get(urlEqualTo("/"))
+            .willReturn(aResponse().withStatus(503).withBody("secret-body")));
+
+    assertThat(client().probe(Duration.ofSeconds(2)).reachable()).isTrue();
+
+    server.verify(com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor(urlEqualTo("/")));
+  }
+
+  @Test
+  void probeReportsAClosedPort() throws IOException {
+    int port;
+    try (ServerSocket socket = new ServerSocket(0)) {
+      port = socket.getLocalPort();
+    }
+
+    ProbeResult result =
+        client("http://localhost:" + port, Duration.ofSeconds(5)).probe(Duration.ofSeconds(2));
+
+    assertThat(result.reachable()).isFalse();
+    assertThat(result.reason()).doesNotContain("localhost").doesNotContain(String.valueOf(port));
+  }
+
+  @Test
+  void probeReportsNoAnswerInTime() {
+    server.stubFor(
+        com.github.tomakehurst.wiremock.client.WireMock.get(urlEqualTo("/"))
+            .willReturn(aResponse().withFixedDelay(1500)));
+
+    ProbeResult result = client().probe(Duration.ofMillis(200));
+
+    assertThat(result).isEqualTo(ProbeResult.down("no answer in time"));
+  }
+
+  @Test
+  void probeKeepsTheRootWhenTheBaseUrlEndsWithASlash() {
+    server.stubFor(
+        com.github.tomakehurst.wiremock.client.WireMock.get(urlEqualTo("/"))
+            .willReturn(aResponse().withStatus(200)));
+
+    assertThat(
+            client("http://localhost:" + server.port() + "/", Duration.ofSeconds(5))
+                .probe(Duration.ofSeconds(2))
+                .reachable())
+        .isTrue();
   }
 }
