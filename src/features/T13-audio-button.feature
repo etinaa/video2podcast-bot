@@ -444,3 +444,20 @@ Feature: Prepare retained audio on demand and deliver it once
     And job.json records AUDIO state "AVAILABLE" and null sentAt
     And "out.m4a" does not exist in the job directory after delivery
     And the source bytes and transcript bytes are unchanged
+
+  @T17 @R2
+  Scenario Outline: A player-incompatible codec inside an M4A or MP3 name is converted
+    Given the retained audio source is a real ffmpeg-generated 60 second "<source>" below 1000000 bytes with <streams>
+    When the user taps "audio:11111111-1111-4111-8111-111111111111" on private message 701 in chat 101
+    Then the Telegram mock receives one successful sendAudio
+    And the uploaded bytes form a nonempty M4A with AAC audio and no video stream
+    And the uploaded audio has 2 channels at most
+    And the sendAudio multipart caption is exactly "Converted to M4A, 128 kbps."
+    And "out.m4a" does not exist in the job directory after delivery
+    And the source bytes are unchanged
+    And job.json records AUDIO state "SENT" and nonnull sentAt
+    Examples:
+      | source     | streams                                     |
+      | source.m4a | an E-AC-3 5.1 audio stream in an MP4 container |
+      | source.m4a | an Opus audio stream in an MP4 container       |
+      | source.mp3 | an AAC audio stream in an ADTS container       |
