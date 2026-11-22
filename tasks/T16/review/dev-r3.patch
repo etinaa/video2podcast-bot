@@ -1,0 +1,14 @@
+diff --git a/src/main/java/com/video2podcast/job/HealthChecks.java b/src/main/java/com/video2podcast/job/HealthChecks.java
+index 47f9a73..eeb1c39 100644
+--- a/src/main/java/com/video2podcast/job/HealthChecks.java
++++ b/src/main/java/com/video2podcast/job/HealthChecks.java
+@@ -70,6 +70,9 @@ public class HealthChecks {
+   }
+ 
+   private Health await() throws InterruptedException {
++    if (Thread.interrupted()) {
++      throw new InterruptedException();
++    }
+     FutureTask<ProbeResult> w = new FutureTask<>(() -> whisper.probe(timeout));
+     FutureTask<ProbeResult> o = new FutureTask<>(() -> ollama.probe(timeout));
+     Thread.ofVirtual().name("health-whisper").start(w);

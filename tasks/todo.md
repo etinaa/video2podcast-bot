@@ -213,7 +213,7 @@ Sizes: S = 1-2 files, M = 3-5 files.
   - Files: `Dockerfile`, `compose.yaml`, `.env.example`, `.gitignore`, `.dockerignore`, `docs/host-setup.md`, `tasks/T15/evidence.md`
   - Technical task: Developer and Tester, both code reviewers; no Analyst, no Architect.
 
-- [~] **T16: Service health checks and failure-mode tests** (M)
+- [x] **T16: Service health checks and failure-mode tests** (M)
   - Acceptance:
     - **Startup check:** when the bot starts, it probes Whisper and Ollama (short timeout, a few seconds) and logs one line per service: reachable, or unreachable with the reason (no URLs with credentials, no stack trace). The bot starts either way and never hangs on an unreachable service.
     - **Per-job check:** after a link is accepted and before anything is downloaded, the bot probes both services in the same way. If one is unreachable, the user gets the existing message (`The transcription server is unreachable.` or `The summary server is unreachable.`, both if both), the job is not queued further, the working directory is removed, and nothing is downloaded. The check takes seconds at most, and it does not block other users' messages and button taps.

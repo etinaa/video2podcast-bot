@@ -1,0 +1,1252 @@
+diff --git a/.env.example b/.env.example
+index 4118611..205e9de 100644
+--- a/.env.example
++++ b/.env.example
+@@ -27,6 +27,9 @@ ADMIN_USER_ID=
+ # WHISPER_BASE_URL=http://host.containers.internal:8081
+ # WHISPER_TIMEOUT=PT10M
+ 
++# Service check at startup and before every job (how long one probe may take)
++# HEALTH_TIMEOUT=PT3S
++
+ # Job working directory (the /work volume in the container)
+ # WORK_DIR=/work
+ # MAX_VIDEO_DURATION=PT3H
+diff --git a/docs/host-setup.md b/docs/host-setup.md
+index 60fa413..d5c4a45 100644
+--- a/docs/host-setup.md
++++ b/docs/host-setup.md
+@@ -81,6 +81,17 @@ podman volume ls                            # work and data volumes (prefixed wi
+ podman compose exec bot ls /work /data
+ ```
+ 
++### Service checks
++
++At startup the bot logs one line per service and starts anyway:
++
++```
++Health check: whisper reachable
++Health check: ollama unreachable (connection refused)
++```
++
++Before every job the bot checks both services again (`GET /` on whisper-server, `GET /api/version` on Ollama; any HTTP answer counts as reachable). If one does not answer, the job fails before any download with "The transcription server is unreachable." and/or "The summary server is unreachable.". `HEALTH_TIMEOUT` (default `PT3S`) is how long one probe may take; a down service delays the next queued job by at most that plus one second.
++
+ ## whisper-server contract
+ 
+ Captured against the real server with a 7-second WAV (`say` + `ffmpeg -ar 16000 -ac 1 -c:a pcm_s16le`).
+diff --git a/src/main/java/com/video2podcast/config/AppProperties.java b/src/main/java/com/video2podcast/config/AppProperties.java
+index a17b1b2..171e560 100644
+--- a/src/main/java/com/video2podcast/config/AppProperties.java
++++ b/src/main/java/com/video2podcast/config/AppProperties.java
+@@ -6,7 +6,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
+ 
+ @ConfigurationProperties(prefix = "app")
+ public record AppProperties(
+-    Telegram telegram, Access access, Ollama ollama, Whisper whisper, Jobs jobs) {
++    Telegram telegram, Access access, Ollama ollama, Whisper whisper, Jobs jobs, Health health) {
+ 
+   /** {@code apiUrl} overrides the Telegram Bot API base URL (blank means the real API). */
+   public record Telegram(String botToken, long adminUserId, boolean enabled, String apiUrl) {}
+@@ -22,6 +22,9 @@ public record AppProperties(
+   /** {@code timeout} is how long one chunk may wait for its answer. */
+   public record Whisper(String baseUrl, Duration timeout) {}
+ 
++  /** {@code timeout} is how long one service check may take, at startup and before each job. */
++  public record Health(Duration timeout) {}
++
+   public record Jobs(
+       Path workDir,
+       Duration maxVideoDuration,
+diff --git a/src/main/java/com/video2podcast/config/HealthConfig.java b/src/main/java/com/video2podcast/config/HealthConfig.java
+new file mode 100644
+index 0000000..b908bed
+--- /dev/null
++++ b/src/main/java/com/video2podcast/config/HealthConfig.java
+@@ -0,0 +1,28 @@
++package com.video2podcast.config;
++
++import com.video2podcast.job.HealthChecks;
++import com.video2podcast.summary.OllamaClient;
++import com.video2podcast.transcript.WhisperClient;
++import java.time.Duration;
++import org.springframework.boot.ApplicationRunner;
++import org.springframework.context.annotation.Bean;
++import org.springframework.context.annotation.Configuration;
++
++/** Wires the service checks; the startup check never delays or stops the bot. */
++@Configuration(proxyBeanMethods = false)
++public class HealthConfig {
++
++  @Bean
++  HealthChecks healthChecks(WhisperClient whisper, OllamaClient ollama, AppProperties props) {
++    Duration timeout = props.health().timeout();
++    if (timeout == null || timeout.isZero() || timeout.isNegative()) {
++      throw new IllegalArgumentException("app.health.timeout must be positive");
++    }
++    return new HealthChecks(whisper::probe, ollama::probe, timeout);
++  }
++
++  @Bean
++  ApplicationRunner startupHealthCheck(HealthChecks health) {
++    return args -> Thread.ofVirtual().name("startup-health-check").start(health::logStartup);
++  }
++}
+diff --git a/src/main/java/com/video2podcast/config/PipelineConfig.java b/src/main/java/com/video2podcast/config/PipelineConfig.java
+index a05f28a..e08954c 100644
+--- a/src/main/java/com/video2podcast/config/PipelineConfig.java
++++ b/src/main/java/com/video2podcast/config/PipelineConfig.java
+@@ -7,6 +7,7 @@ import com.video2podcast.bot.TelegramGateway;
+ import com.video2podcast.bot.UrlMessageHandler;
+ import com.video2podcast.job.ButtonRefresher;
+ import com.video2podcast.job.DeliveryService;
++import com.video2podcast.job.HealthChecks;
+ import com.video2podcast.job.JobQueue;
+ import com.video2podcast.job.JobStore;
+ import com.video2podcast.job.PipelineService;
+@@ -50,9 +51,10 @@ public class PipelineConfig {
+       JobStore store,
+       SummaryPublisher publisher,
+       Clock clock,
++      HealthChecks health,
+       AppProperties props) {
+     return new PipelineService(
+-        ytDlp, ffmpeg, transcription, summary, store, publisher, clock, props.jobs());
++        ytDlp, ffmpeg, transcription, summary, store, publisher, clock, props.jobs(), health);
+   }
+ 
+   @Bean
+diff --git a/src/main/java/com/video2podcast/config/SummaryConfig.java b/src/main/java/com/video2podcast/config/SummaryConfig.java
+index 7dd8390..9f05ff5 100644
+--- a/src/main/java/com/video2podcast/config/SummaryConfig.java
++++ b/src/main/java/com/video2podcast/config/SummaryConfig.java
+@@ -10,7 +10,7 @@ import org.springframework.context.annotation.Configuration;
+ public class SummaryConfig {
+ 
+   @Bean
+-  LlmClient llmClient(AppProperties props) {
++  OllamaClient llmClient(AppProperties props) {
+     return new OllamaClient(props.ollama());
+   }
+ 
+diff --git a/src/main/java/com/video2podcast/job/Health.java b/src/main/java/com/video2podcast/job/Health.java
+new file mode 100644
+index 0000000..298c571
+--- /dev/null
++++ b/src/main/java/com/video2podcast/job/Health.java
+@@ -0,0 +1,9 @@
++package com.video2podcast.job;
++
++/** The outcome of one check of both services. */
++public record Health(ProbeResult whisper, ProbeResult ollama) {
++
++  public boolean allReachable() {
++    return whisper.reachable() && ollama.reachable();
++  }
++}
+diff --git a/src/main/java/com/video2podcast/job/HealthChecks.java b/src/main/java/com/video2podcast/job/HealthChecks.java
+new file mode 100644
+index 0000000..2a3729e
+--- /dev/null
++++ b/src/main/java/com/video2podcast/job/HealthChecks.java
+@@ -0,0 +1,107 @@
++package com.video2podcast.job;
++
++import java.time.Duration;
++import java.util.concurrent.ExecutionException;
++import java.util.concurrent.ExecutorService;
++import java.util.concurrent.Executors;
++import java.util.concurrent.Future;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.TimeoutException;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
++/** Checks that Whisper and Ollama answer, at startup (log only) and before every job. */
++public class HealthChecks {
++
++  private static final Logger LOG = LoggerFactory.getLogger(HealthChecks.class);
++  private static final Duration GRACE = Duration.ofSeconds(1);
++
++  private final ServiceProbe whisper;
++  private final ServiceProbe ollama;
++  private final Duration timeout;
++
++  public HealthChecks(ServiceProbe whisper, ServiceProbe ollama, Duration timeout) {
++    this.whisper = whisper;
++    this.ollama = ollama;
++    this.timeout = timeout;
++  }
++
++  /**
++   * Runs both probes in parallel and waits at most the timeout plus one second. A probe that throws
++   * or does not finish in time counts as down.
++   */
++  public Health check() {
++    try {
++      return await();
++    } catch (InterruptedException e) {
++      Thread.currentThread().interrupt();
++      ProbeResult interrupted = ProbeResult.down("interrupted");
++      return new Health(interrupted, interrupted);
++    }
++  }
++
++  /** Logs one line per service. Never throws. */
++  public void logStartup() {
++    try {
++      Health health = check();
++      log("whisper", health.whisper());
++      log("ollama", health.ollama());
++    } catch (RuntimeException e) {
++      if (LOG.isWarnEnabled()) {
++        LOG.warn("Health check: failed ({})", e.getClass().getSimpleName());
++      }
++    }
++  }
++
++  /**
++   * @throws JobFailure {@code SERVICE_UNREACHABLE} or {@code SUMMARY_UNREACHABLE} when a service is
++   *     down, {@code FAILED} when the calling thread is interrupted
++   */
++  public void requireReachable() {
++    Health health;
++    try {
++      health = await();
++    } catch (InterruptedException e) {
++      Thread.currentThread().interrupt();
++      throw JobFailure.of(JobFailure.Kind.FAILED, e);
++    }
++    if (!health.allReachable()) {
++      throw JobFailure.unreachable(!health.whisper().reachable(), !health.ollama().reachable());
++    }
++  }
++
++  private Health await() throws InterruptedException {
++    try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
++      Future<ProbeResult> w = executor.submit(() -> whisper.probe(timeout));
++      Future<ProbeResult> o = executor.submit(() -> ollama.probe(timeout));
++      long deadline = System.nanoTime() + timeout.plus(GRACE).toNanos();
++      ProbeResult wr = result(w, deadline);
++      ProbeResult or = result(o, deadline);
++      return new Health(wr, or);
++    }
++  }
++
++  private static ProbeResult result(Future<ProbeResult> future, long deadline)
++      throws InterruptedException {
++    try {
++      ProbeResult result =
++          future.get(Math.max(0, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
++      return result == null ? ProbeResult.down("check failed") : result;
++    } catch (TimeoutException e) {
++      future.cancel(true);
++      return ProbeResult.down("no answer in time");
++    } catch (ExecutionException e) {
++      return ProbeResult.down("check failed");
++    }
++  }
++
++  private static void log(String service, ProbeResult result) {
++    if (result.reachable()) {
++      if (LOG.isInfoEnabled()) {
++        LOG.info("Health check: {} reachable", service);
++      }
++    } else if (LOG.isWarnEnabled()) {
++      LOG.warn("Health check: {} unreachable ({})", service, result.reason());
++    }
++  }
++}
+diff --git a/src/main/java/com/video2podcast/job/HttpProbe.java b/src/main/java/com/video2podcast/job/HttpProbe.java
+new file mode 100644
+index 0000000..e773cbb
+--- /dev/null
++++ b/src/main/java/com/video2podcast/job/HttpProbe.java
+@@ -0,0 +1,37 @@
++package com.video2podcast.job;
++
++import java.io.IOException;
++import java.net.ConnectException;
++import java.net.URI;
++import java.net.http.HttpClient;
++import java.net.http.HttpRequest;
++import java.net.http.HttpResponse.BodyHandlers;
++import java.net.http.HttpTimeoutException;
++import java.nio.channels.UnresolvedAddressException;
++import java.time.Duration;
++
++/** The shared {@code GET} probe of the service clients: any HTTP status means reachable. */
++public final class HttpProbe {
++
++  private HttpProbe() {}
++
++  /** Never throws for an unreachable service; the reason is a fixed phrase. */
++  public static ProbeResult get(HttpClient http, URI uri, Duration timeout) {
++    try {
++      HttpRequest request = HttpRequest.newBuilder(uri).timeout(timeout).GET().build();
++      http.send(request, BodyHandlers.discarding());
++      return ProbeResult.up();
++    } catch (ConnectException e) {
++      return ProbeResult.down("connection refused");
++    } catch (UnresolvedAddressException e) {
++      return ProbeResult.down("host not found");
++    } catch (HttpTimeoutException e) {
++      return ProbeResult.down("no answer in time");
++    } catch (IOException e) {
++      return ProbeResult.down("i/o error (" + e.getClass().getSimpleName() + ")");
++    } catch (InterruptedException e) {
++      Thread.currentThread().interrupt();
++      return ProbeResult.down("interrupted");
++    }
++  }
++}
+diff --git a/src/main/java/com/video2podcast/job/JobFailure.java b/src/main/java/com/video2podcast/job/JobFailure.java
+index f73925a..d4b6eb3 100644
+--- a/src/main/java/com/video2podcast/job/JobFailure.java
++++ b/src/main/java/com/video2podcast/job/JobFailure.java
+@@ -48,6 +48,26 @@ public class JobFailure extends RuntimeException {
+     return new JobFailure(kind, messageOf(kind), cause);
+   }
+ 
++  /**
++   * The failure for a service that did not answer the check before a job.
++   *
++   * @throws IllegalArgumentException if both arguments are false
++   */
++  public static JobFailure unreachable(boolean whisperDown, boolean ollamaDown) {
++    if (whisperDown && ollamaDown) {
++      return new JobFailure(
++          Kind.SERVICE_UNREACHABLE,
++          messageOf(Kind.SERVICE_UNREACHABLE) + " " + messageOf(Kind.SUMMARY_UNREACHABLE));
++    }
++    if (whisperDown) {
++      return of(Kind.SERVICE_UNREACHABLE);
++    }
++    if (ollamaDown) {
++      return of(Kind.SUMMARY_UNREACHABLE);
++    }
++    throw new IllegalArgumentException("no service is down");
++  }
++
+   public static JobFailure unsupportedLiveStream() {
+     return new JobFailure(Kind.UNSUPPORTED, "Live streams are not supported.");
+   }
+diff --git a/src/main/java/com/video2podcast/job/PipelineService.java b/src/main/java/com/video2podcast/job/PipelineService.java
+index 4006ebd..b48cf41 100644
+--- a/src/main/java/com/video2podcast/job/PipelineService.java
++++ b/src/main/java/com/video2podcast/job/PipelineService.java
+@@ -36,6 +36,7 @@ public class PipelineService {
+   private final SummaryPublisher publisher;
+   private final Clock clock;
+   private final AppProperties.Jobs jobs;
++  private final HealthChecks health;
+ 
+   public PipelineService(
+       YtDlpClient ytDlp,
+@@ -45,7 +46,8 @@ public class PipelineService {
+       JobStore store,
+       SummaryPublisher publisher,
+       Clock clock,
+-      AppProperties.Jobs jobs) {
++      AppProperties.Jobs jobs,
++      HealthChecks health) {
+     this.ytDlp = ytDlp;
+     this.ffmpeg = ffmpeg;
+     this.transcription = transcription;
+@@ -54,13 +56,15 @@ public class PipelineService {
+     this.publisher = publisher;
+     this.clock = clock;
+     this.jobs = jobs;
++    this.health = health;
+   }
+ 
+   /**
+    * Runs one job to the point where the summary message is sent and its retention has started. On
+    * every failure the job directory is deleted before the exception leaves.
+    *
+-   * @throws JobFailure the failure of a stage unchanged, or {@code FAILED} for anything else
++   * @throws JobFailure the failure of a stage unchanged, {@code SERVICE_UNREACHABLE} or {@code
++   *     SUMMARY_UNREACHABLE} raised before the work starts, or {@code FAILED} for anything else
+    */
+   public void run(JobRequest request, JobProgress progress) {
+     try {
+@@ -78,6 +82,7 @@ public class PipelineService {
+   }
+ 
+   private void execute(JobRequest request, JobProgress progress) {
++    health.requireReachable();
+     String jobId = request.jobId();
+     Path dir = store.directory(jobId);
+     try {
+diff --git a/src/main/java/com/video2podcast/job/ProbeResult.java b/src/main/java/com/video2podcast/job/ProbeResult.java
+new file mode 100644
+index 0000000..1f89712
+--- /dev/null
++++ b/src/main/java/com/video2podcast/job/ProbeResult.java
+@@ -0,0 +1,13 @@
++package com.video2podcast.job;
++
++/** {@code reason} is empty when reachable, otherwise a fixed phrase without URL or stack trace. */
++public record ProbeResult(boolean reachable, String reason) {
++
++  public static ProbeResult up() {
++    return new ProbeResult(true, "");
++  }
++
++  public static ProbeResult down(String reason) {
++    return new ProbeResult(false, reason);
++  }
++}
+diff --git a/src/main/java/com/video2podcast/job/ServiceProbe.java b/src/main/java/com/video2podcast/job/ServiceProbe.java
+new file mode 100644
+index 0000000..631891e
+--- /dev/null
++++ b/src/main/java/com/video2podcast/job/ServiceProbe.java
+@@ -0,0 +1,11 @@
++package com.video2podcast.job;
++
++import java.time.Duration;
++
++/** One reachability check of an external service. */
++@FunctionalInterface
++public interface ServiceProbe {
++
++  /** Never throws for an unreachable service; returns the result instead. */
++  ProbeResult probe(Duration timeout);
++}
+diff --git a/src/main/java/com/video2podcast/summary/OllamaClient.java b/src/main/java/com/video2podcast/summary/OllamaClient.java
+index eaba593..838d975 100644
+--- a/src/main/java/com/video2podcast/summary/OllamaClient.java
++++ b/src/main/java/com/video2podcast/summary/OllamaClient.java
+@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
+ import com.fasterxml.jackson.databind.node.ArrayNode;
+ import com.fasterxml.jackson.databind.node.ObjectNode;
+ import com.video2podcast.config.AppProperties;
++import com.video2podcast.job.HttpProbe;
++import com.video2podcast.job.ProbeResult;
+ import com.video2podcast.storage.Json;
+ import java.io.IOException;
+ import java.net.ConnectException;
+@@ -31,6 +33,7 @@ public final class OllamaClient implements LlmClient {
+ 
+   private final HttpClient http;
+   private final URI endpoint;
++  private final URI version;
+   private final AppProperties.Ollama config;
+ 
+   public OllamaClient(AppProperties.Ollama config) {
+@@ -53,6 +56,7 @@ public final class OllamaClient implements LlmClient {
+     String base = config.baseUrl();
+     String trimmed = base.endsWith("/") ? base.substring(0, base.length() - 1) : base;
+     this.endpoint = URI.create(trimmed + "/api/chat");
++    this.version = URI.create(trimmed + "/api/version");
+     this.config = config;
+     this.http = http;
+   }
+@@ -62,6 +66,11 @@ public final class OllamaClient implements LlmClient {
+     return http;
+   }
+ 
++  /** {@code GET /api/version}: any HTTP answer means the server is reachable. */
++  public ProbeResult probe(Duration timeout) {
++    return HttpProbe.get(http, version, timeout);
++  }
++
+   @Override
+   public LlmReply complete(String system, String user, int maxOutputTokens) throws LlmException {
+     HttpResponse<String> response = send(system, user, maxOutputTokens);
+diff --git a/src/main/java/com/video2podcast/transcript/WhisperClient.java b/src/main/java/com/video2podcast/transcript/WhisperClient.java
+index 4f7cb07..e83897a 100644
+--- a/src/main/java/com/video2podcast/transcript/WhisperClient.java
++++ b/src/main/java/com/video2podcast/transcript/WhisperClient.java
+@@ -2,6 +2,8 @@ package com.video2podcast.transcript;
+ 
+ import com.fasterxml.jackson.databind.JsonNode;
+ import com.video2podcast.config.AppProperties;
++import com.video2podcast.job.HttpProbe;
++import com.video2podcast.job.ProbeResult;
+ import com.video2podcast.storage.Json;
+ import java.io.FileNotFoundException;
+ import java.io.IOException;
+@@ -32,6 +34,7 @@ public class WhisperClient {
+ 
+   private final HttpClient http;
+   private final URI endpoint;
++  private final URI root;
+   private final Duration timeout;
+ 
+   public WhisperClient(AppProperties.Whisper config) {
+@@ -48,6 +51,7 @@ public class WhisperClient {
+     String base = config.baseUrl();
+     String trimmed = base.endsWith("/") ? base.substring(0, base.length() - 1) : base;
+     this.endpoint = URI.create(trimmed + "/inference");
++    this.root = URI.create(trimmed + "/");
+     this.timeout = config.timeout();
+     this.http = http;
+   }
+@@ -57,6 +61,11 @@ public class WhisperClient {
+     return http;
+   }
+ 
++  /** {@code GET /}: any HTTP answer means the server is reachable. */
++  public ProbeResult probe(Duration timeout) {
++    return HttpProbe.get(http, root, timeout);
++  }
++
+   /** Returns the raw "text" field of the answer, not normalized. */
+   public String transcribe(Path chunk) throws WhisperException {
+     String boundary = "----v2p" + UUID.randomUUID().toString().replace("-", "");
+diff --git a/src/main/resources/application.yml b/src/main/resources/application.yml
+index 84720cd..8e35fbe 100644
+--- a/src/main/resources/application.yml
++++ b/src/main/resources/application.yml
+@@ -19,6 +19,8 @@ app:
+   whisper:
+     base-url: ${WHISPER_BASE_URL:http://host.containers.internal:8081}
+     timeout: ${WHISPER_TIMEOUT:PT10M}
++  health:
++    timeout: ${HEALTH_TIMEOUT:PT3S}
+   jobs:
+     work-dir: ${WORK_DIR:/work}
+     max-video-duration: ${MAX_VIDEO_DURATION:PT3H}
+diff --git a/src/test/java/com/video2podcast/config/AppPropertiesTest.java b/src/test/java/com/video2podcast/config/AppPropertiesTest.java
+index ddf9562..7a4f42b 100644
+--- a/src/test/java/com/video2podcast/config/AppPropertiesTest.java
++++ b/src/test/java/com/video2podcast/config/AppPropertiesTest.java
+@@ -31,6 +31,7 @@ class AppPropertiesTest {
+     assertThat(props.whisper().timeout()).isEqualTo(Duration.ofMinutes(10));
+     assertThat(props.access().file()).isEqualTo(Path.of("/data/allowed-users.json"));
+     assertThat(props.access().requestCooldown()).isEqualTo(Duration.ofHours(24));
++    assertThat(props.health().timeout()).isEqualTo(Duration.ofSeconds(3));
+     assertThat(props.jobs().workDir()).isEqualTo(Path.of("/work"));
+     assertThat(props.jobs().maxVideoDuration()).isEqualTo(Duration.ofHours(3));
+     assertThat(props.jobs().retention()).isEqualTo(Duration.ofHours(1));
+diff --git a/src/test/java/com/video2podcast/config/HealthConfigTest.java b/src/test/java/com/video2podcast/config/HealthConfigTest.java
+new file mode 100644
+index 0000000..a5960c5
+--- /dev/null
++++ b/src/test/java/com/video2podcast/config/HealthConfigTest.java
+@@ -0,0 +1,66 @@
++package com.video2podcast.config;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.mockito.Mockito.mock;
++
++import com.video2podcast.job.HealthChecks;
++import com.video2podcast.summary.OllamaClient;
++import com.video2podcast.transcript.WhisperClient;
++import java.time.Duration;
++import org.junit.jupiter.api.Test;
++import org.springframework.boot.ApplicationArguments;
++import org.springframework.boot.ApplicationRunner;
++import org.springframework.boot.test.context.runner.ApplicationContextRunner;
++
++class HealthConfigTest {
++
++  private static AppProperties props(Duration timeout) {
++    return new AppProperties(null, null, null, null, null, new AppProperties.Health(timeout));
++  }
++
++  private ApplicationContextRunner runner(Duration timeout) {
++    return new ApplicationContextRunner()
++        .withUserConfiguration(HealthConfig.class)
++        .withBean(AppProperties.class, () -> props(timeout))
++        .withBean(WhisperClient.class, () -> mock(WhisperClient.class))
++        .withBean(OllamaClient.class, () -> mock(OllamaClient.class));
++  }
++
++  @Test
++  void createsTheChecksAndTheStartupRunner() {
++    runner(Duration.ofSeconds(3))
++        .run(context -> {
++          assertThat(context).hasSingleBean(HealthChecks.class);
++          assertThat(context).hasSingleBean(ApplicationRunner.class);
++        });
++  }
++
++  @Test
++  void theStartupRunnerReturnsAtOnceAndStillChecksBothServices() throws Exception {
++    WhisperClient whisper = mock(WhisperClient.class);
++    OllamaClient ollama = mock(OllamaClient.class);
++    org.mockito.Mockito.when(whisper.probe(Duration.ofSeconds(3)))
++        .thenReturn(com.video2podcast.job.ProbeResult.up());
++    org.mockito.Mockito.when(ollama.probe(Duration.ofSeconds(3)))
++        .thenReturn(com.video2podcast.job.ProbeResult.up());
++    new ApplicationContextRunner()
++        .withUserConfiguration(HealthConfig.class)
++        .withBean(AppProperties.class, () -> props(Duration.ofSeconds(3)))
++        .withBean(WhisperClient.class, () -> whisper)
++        .withBean(OllamaClient.class, () -> ollama)
++        .run(context -> {
++          context.getBean(ApplicationRunner.class).run(mock(ApplicationArguments.class));
++          org.mockito.Mockito.verify(whisper, org.mockito.Mockito.timeout(2000))
++              .probe(Duration.ofSeconds(3));
++          org.mockito.Mockito.verify(ollama, org.mockito.Mockito.timeout(2000))
++              .probe(Duration.ofSeconds(3));
++        });
++  }
++
++  @Test
++  void rejectsAMissingZeroOrNegativeTimeout() {
++    for (Duration bad : new Duration[] {null, Duration.ZERO, Duration.ofSeconds(-1)}) {
++      runner(bad).run(context -> assertThat(context).hasFailed());
++    }
++  }
++}
+diff --git a/src/test/java/com/video2podcast/config/JobConfigTest.java b/src/test/java/com/video2podcast/config/JobConfigTest.java
+index 661136c..8a34cc2 100644
+--- a/src/test/java/com/video2podcast/config/JobConfigTest.java
++++ b/src/test/java/com/video2podcast/config/JobConfigTest.java
+@@ -47,7 +47,8 @@ class JobConfigTest {
+             Duration.ofMinutes(1),
+             Duration.ofMinutes(30),
+             Duration.ofMinutes(30),
+-            Duration.ofMinutes(1)));
++            Duration.ofMinutes(1)),
++        new AppProperties.Health(Duration.ofSeconds(3)));
+   }
+ 
+   private ApplicationContextRunner runner() {
+diff --git a/src/test/java/com/video2podcast/config/MediaConfigTest.java b/src/test/java/com/video2podcast/config/MediaConfigTest.java
+index 9bf3f26..9c36682 100644
+--- a/src/test/java/com/video2podcast/config/MediaConfigTest.java
++++ b/src/test/java/com/video2podcast/config/MediaConfigTest.java
+@@ -29,7 +29,8 @@ class MediaConfigTest {
+             Duration.ofMinutes(1),
+             Duration.ofMinutes(30),
+             Duration.ofMinutes(30),
+-            Duration.ofMinutes(1)));
++            Duration.ofMinutes(1)),
++        new AppProperties.Health(Duration.ofSeconds(3)));
+   }
+ 
+   private ApplicationContextRunner runner() {
+diff --git a/src/test/java/com/video2podcast/config/PipelineConfigTest.java b/src/test/java/com/video2podcast/config/PipelineConfigTest.java
+index f881515..d1a22f7 100644
+--- a/src/test/java/com/video2podcast/config/PipelineConfigTest.java
++++ b/src/test/java/com/video2podcast/config/PipelineConfigTest.java
+@@ -8,6 +8,7 @@ import com.video2podcast.bot.TelegramGateway;
+ import com.video2podcast.bot.UrlMessageHandler;
+ import com.video2podcast.job.ButtonRefresher;
+ import com.video2podcast.job.DeliveryService;
++import com.video2podcast.job.HealthChecks;
+ import com.video2podcast.job.JobQueue;
+ import com.video2podcast.job.JobStore;
+ import com.video2podcast.job.PipelineService;
+@@ -39,7 +40,8 @@ class PipelineConfigTest {
+             Duration.ofMinutes(1),
+             Duration.ofMinutes(30),
+             Duration.ofMinutes(30),
+-            Duration.ofMinutes(1)));
++            Duration.ofMinutes(1)),
++        new AppProperties.Health(Duration.ofSeconds(3)));
+   }
+ 
+   private ApplicationContextRunner runner(boolean enabled) {
+@@ -55,6 +57,7 @@ class PipelineConfigTest {
+         .withBean(JobStore.class, () -> mock(JobStore.class))
+         .withBean(JobQueue.class, () -> mock(JobQueue.class))
+         .withBean(UrlValidator.class, UrlValidator::new)
++        .withBean(HealthChecks.class, () -> mock(HealthChecks.class))
+         .withBean(Clock.class, Clock::systemUTC)
+         .withPropertyValues("app.telegram.enabled=" + enabled);
+   }
+diff --git a/src/test/java/com/video2podcast/config/SummaryConfigTest.java b/src/test/java/com/video2podcast/config/SummaryConfigTest.java
+index 0f9aedd..21ee21d 100644
+--- a/src/test/java/com/video2podcast/config/SummaryConfigTest.java
++++ b/src/test/java/com/video2podcast/config/SummaryConfigTest.java
+@@ -17,6 +17,7 @@ class SummaryConfigTest {
+         null,
+         new AppProperties.Ollama("http://localhost:11434", "m", 8192, Duration.ofMinutes(10)),
+         null,
++        null,
+         null);
+   }
+ 
+@@ -40,7 +41,7 @@ class SummaryConfigTest {
+           new AppProperties.Ollama("http://localhost:11434", "m", 8192, Duration.ofSeconds(-1))
+         }) {
+       new ApplicationContextRunner()
+-          .withBean(AppProperties.class, () -> new AppProperties(null, null, bad, null, null))
++          .withBean(AppProperties.class, () -> new AppProperties(null, null, bad, null, null, null))
+           .withUserConfiguration(SummaryConfig.class)
+           .run(context -> assertThat(context).hasFailed());
+     }
+diff --git a/src/test/java/com/video2podcast/config/TelegramConfigTest.java b/src/test/java/com/video2podcast/config/TelegramConfigTest.java
+index 521d8d4..f27ced3 100644
+--- a/src/test/java/com/video2podcast/config/TelegramConfigTest.java
++++ b/src/test/java/com/video2podcast/config/TelegramConfigTest.java
+@@ -32,7 +32,8 @@ class TelegramConfigTest {
+             Duration.ofMinutes(1),
+             Duration.ofMinutes(30),
+             Duration.ofMinutes(30),
+-            Duration.ofMinutes(1)));
++            Duration.ofMinutes(1)),
++        new AppProperties.Health(Duration.ofSeconds(3)));
+   }
+ 
+   private ApplicationContextRunner runner(String token, long admin, boolean enabled) {
+@@ -114,7 +115,8 @@ class TelegramConfigTest {
+               props("123:abc", 1L, true).access(),
+               props("123:abc", 1L, true).ollama(),
+               props("123:abc", 1L, true).whisper(),
+-              props("123:abc", 1L, true).jobs());
++              props("123:abc", 1L, true).jobs(),
++              props("123:abc", 1L, true).health());
+ 
+       org.telegram.telegrambots.meta.generics.TelegramClient client =
+           new TelegramConfig().telegramClient(props);
+diff --git a/src/test/java/com/video2podcast/config/TranscriptConfigTest.java b/src/test/java/com/video2podcast/config/TranscriptConfigTest.java
+index 6fb08d4..0c0dcfa 100644
+--- a/src/test/java/com/video2podcast/config/TranscriptConfigTest.java
++++ b/src/test/java/com/video2podcast/config/TranscriptConfigTest.java
+@@ -16,6 +16,7 @@ class TranscriptConfigTest {
+         null,
+         null,
+         new AppProperties.Whisper("http://localhost:8081", Duration.ofMinutes(10)),
++        null,
+         null);
+   }
+ 
+diff --git a/src/test/java/com/video2podcast/job/HealthChecksTest.java b/src/test/java/com/video2podcast/job/HealthChecksTest.java
+new file mode 100644
+index 0000000..63ff4b7
+--- /dev/null
++++ b/src/test/java/com/video2podcast/job/HealthChecksTest.java
+@@ -0,0 +1,216 @@
++package com.video2podcast.job;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.assertj.core.api.Assertions.assertThatThrownBy;
++
++import ch.qos.logback.classic.Level;
++import ch.qos.logback.classic.Logger;
++import ch.qos.logback.classic.spi.ILoggingEvent;
++import ch.qos.logback.core.read.ListAppender;
++import java.time.Duration;
++import java.util.List;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.atomic.AtomicInteger;
++import org.junit.jupiter.api.AfterEach;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.slf4j.LoggerFactory;
++
++class HealthChecksTest {
++
++  private static final Duration TIMEOUT = Duration.ofMillis(200);
++  private static final ServiceProbe UP = t -> ProbeResult.up();
++
++  private final ListAppender<ILoggingEvent> logs = new ListAppender<>();
++  private final Logger logger = (Logger) LoggerFactory.getLogger(HealthChecks.class);
++
++  @BeforeEach
++  void attach() {
++    logs.start();
++    logger.addAppender(logs);
++  }
++
++  @AfterEach
++  void detach() {
++    logger.detachAppender(logs);
++    Thread.interrupted();
++  }
++
++  private static ServiceProbe down(String reason) {
++    return t -> ProbeResult.down(reason);
++  }
++
++  private List<String> lines() {
++    return logs.list.stream().map(ILoggingEvent::getFormattedMessage).toList();
++  }
++
++  @Test
++  void bothUpMeansAllReachableAndNothingIsThrown() {
++    HealthChecks checks = new HealthChecks(UP, UP, TIMEOUT);
++
++    assertThat(checks.check().allReachable()).isTrue();
++    checks.requireReachable();
++  }
++
++  @Test
++  void healthIsReachableOnlyWhenBothAre() {
++    assertThat(new Health(ProbeResult.up(), ProbeResult.down("x")).allReachable()).isFalse();
++    assertThat(new Health(ProbeResult.down("x"), ProbeResult.up()).allReachable()).isFalse();
++  }
++
++  @Test
++  void whisperDownGivesTheTranscriptionFailure() {
++    HealthChecks checks = new HealthChecks(down("connection refused"), UP, TIMEOUT);
++
++    assertThatThrownBy(checks::requireReachable)
++        .isInstanceOfSatisfying(
++            JobFailure.class,
++            f -> {
++              assertThat(f.kind()).isEqualTo(JobFailure.Kind.SERVICE_UNREACHABLE);
++              assertThat(f).hasMessage("The transcription server is unreachable.");
++            });
++  }
++
++  @Test
++  void ollamaDownGivesTheSummaryFailure() {
++    HealthChecks checks = new HealthChecks(UP, down("connection refused"), TIMEOUT);
++
++    assertThatThrownBy(checks::requireReachable)
++        .isInstanceOfSatisfying(
++            JobFailure.class,
++            f -> assertThat(f.kind()).isEqualTo(JobFailure.Kind.SUMMARY_UNREACHABLE));
++  }
++
++  @Test
++  void bothDownGivesTheCombinedMessage() {
++    HealthChecks checks = new HealthChecks(down("a"), down("b"), TIMEOUT);
++
++    assertThatThrownBy(checks::requireReachable)
++        .isInstanceOfSatisfying(
++            JobFailure.class,
++            f -> {
++              assertThat(f.kind()).isEqualTo(JobFailure.Kind.SERVICE_UNREACHABLE);
++              assertThat(f)
++                  .hasMessage(
++                      "The transcription server is unreachable. The summary server is unreachable.");
++            });
++  }
++
++  @Test
++  void aProbeThatThrowsCountsAsDown() {
++    ServiceProbe broken =
++        t -> {
++          throw new IllegalStateException("http://secret/host");
++        };
++
++    Health health = new HealthChecks(broken, UP, TIMEOUT).check();
++
++    assertThat(health.whisper()).isEqualTo(ProbeResult.down("check failed"));
++    assertThat(health.ollama().reachable()).isTrue();
++  }
++
++  @Test
++  void aProbeThatReturnsNullCountsAsDown() {
++    Health health = new HealthChecks(t -> null, UP, TIMEOUT).check();
++
++    assertThat(health.whisper()).isEqualTo(ProbeResult.down("check failed"));
++  }
++
++  @Test
++  void aProbeThatOverrunsIsCutOffAfterTheTimeoutPlusOneSecond() {
++    CountDownLatch never = new CountDownLatch(1);
++    ServiceProbe hanging =
++        t -> {
++          try {
++            never.await();
++          } catch (InterruptedException e) {
++            Thread.currentThread().interrupt();
++          }
++          return ProbeResult.up();
++        };
++    HealthChecks checks = new HealthChecks(hanging, hanging, TIMEOUT);
++
++    long start = System.nanoTime();
++    Health health = checks.check();
++    Duration took = Duration.ofNanos(System.nanoTime() - start);
++
++    assertThat(health.whisper()).isEqualTo(ProbeResult.down("no answer in time"));
++    assertThat(health.ollama()).isEqualTo(ProbeResult.down("no answer in time"));
++    assertThat(took).isBetween(Duration.ofMillis(1000), Duration.ofMillis(1900));
++  }
++
++  @Test
++  void theProbesGetTheConfiguredTimeoutAndRunInParallel() {
++    AtomicInteger running = new AtomicInteger();
++    AtomicInteger peak = new AtomicInteger();
++    CountDownLatch both = new CountDownLatch(2);
++    ServiceProbe probe =
++        t -> {
++          assertThat(t).isEqualTo(TIMEOUT);
++          peak.accumulateAndGet(running.incrementAndGet(), Math::max);
++          both.countDown();
++          try {
++            both.await();
++          } catch (InterruptedException e) {
++            Thread.currentThread().interrupt();
++          }
++          running.decrementAndGet();
++          return ProbeResult.up();
++        };
++
++    assertThat(new HealthChecks(probe, probe, TIMEOUT).check().allReachable()).isTrue();
++    assertThat(peak).hasValue(2);
++  }
++
++  @Test
++  void anInterruptedCheckReportsBothDownAndKeepsTheFlag() {
++    HealthChecks checks = new HealthChecks(UP, UP, TIMEOUT);
++    Thread.currentThread().interrupt();
++
++    Health health = checks.check();
++
++    assertThat(Thread.currentThread().isInterrupted()).isTrue();
++    assertThat(health.whisper()).isEqualTo(ProbeResult.down("interrupted"));
++    assertThat(health.ollama()).isEqualTo(ProbeResult.down("interrupted"));
++  }
++
++  @Test
++  void anInterruptedRequireReachableFailsTheJobAndKeepsTheFlag() {
++    HealthChecks checks = new HealthChecks(UP, UP, TIMEOUT);
++    Thread.currentThread().interrupt();
++
++    assertThatThrownBy(checks::requireReachable)
++        .isInstanceOfSatisfying(
++            JobFailure.class, f -> assertThat(f.kind()).isEqualTo(JobFailure.Kind.FAILED));
++    assertThat(Thread.currentThread().isInterrupted()).isTrue();
++  }
++
++  @Test
++  void startupLogsOneLinePerServiceWithTheReasonOnly() {
++    new HealthChecks(UP, down("connection refused"), TIMEOUT).logStartup();
++
++    assertThat(lines())
++        .containsExactly(
++            "Health check: whisper reachable",
++            "Health check: ollama unreachable (connection refused)");
++    assertThat(logs.list.get(0).getLevel()).isEqualTo(Level.INFO);
++    assertThat(logs.list.get(1).getLevel()).isEqualTo(Level.WARN);
++    assertThat(logs.list).allMatch(e -> e.getThrowableProxy() == null);
++  }
++
++  @Test
++  void startupLogsUnreachableWhisperAndReachableOllama() {
++    new HealthChecks(down("host not found"), UP, TIMEOUT).logStartup();
++
++    assertThat(lines())
++        .containsExactly(
++            "Health check: whisper unreachable (host not found)", "Health check: ollama reachable");
++  }
++
++  @Test
++  void requireReachableLogsNothing() {
++    new HealthChecks(UP, UP, TIMEOUT).requireReachable();
++
++    assertThat(logs.list).isEmpty();
++  }
++}
+diff --git a/src/test/java/com/video2podcast/job/HttpProbeTest.java b/src/test/java/com/video2podcast/job/HttpProbeTest.java
+new file mode 100644
+index 0000000..d488526
+--- /dev/null
++++ b/src/test/java/com/video2podcast/job/HttpProbeTest.java
+@@ -0,0 +1,80 @@
++package com.video2podcast.job;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.when;
++
++import java.io.IOException;
++import java.net.ConnectException;
++import java.net.URI;
++import java.net.http.HttpClient;
++import java.net.http.HttpConnectTimeoutException;
++import java.net.http.HttpRequest;
++import java.net.http.HttpResponse;
++import java.net.http.HttpTimeoutException;
++import java.nio.channels.UnresolvedAddressException;
++import java.time.Duration;
++import org.junit.jupiter.api.AfterEach;
++import org.junit.jupiter.api.Test;
++import org.mockito.ArgumentCaptor;
++
++class HttpProbeTest {
++
++  private static final URI URI_ = URI.create("http://svc.example:1/x");
++  private static final Duration TIMEOUT = Duration.ofSeconds(2);
++
++  private final HttpClient http = mock(HttpClient.class);
++
++  @AfterEach
++  void clearFlag() {
++    Thread.interrupted();
++  }
++
++  private ProbeResult probeThrowing(Throwable t) throws Exception {
++    org.mockito.Mockito.doThrow(t).when(http).send(any(), any());
++    return HttpProbe.get(http, URI_, TIMEOUT);
++  }
++
++  @Test
++  void anyStatusMeansReachableAndTheRequestIsABodylessGetWithTheTimeout() throws Exception {
++    for (int status : new int[] {200, 404, 503}) {
++      HttpResponse<Object> response = mock(HttpResponse.class);
++      when(response.statusCode()).thenReturn(status);
++      when(http.send(any(), any())).thenReturn(response);
++
++      assertThat(HttpProbe.get(http, URI_, TIMEOUT)).isEqualTo(ProbeResult.up());
++    }
++    ArgumentCaptor<HttpRequest> request = ArgumentCaptor.forClass(HttpRequest.class);
++    org.mockito.Mockito.verify(http, org.mockito.Mockito.atLeastOnce())
++        .send(request.capture(), any());
++    HttpRequest sent = request.getValue();
++    assertThat(sent.method()).isEqualTo("GET");
++    assertThat(sent.uri()).isEqualTo(URI_);
++    assertThat(sent.timeout()).contains(TIMEOUT);
++    assertThat(sent.bodyPublisher()).isEmpty();
++  }
++
++  @Test
++  void reasonsAreFixedPhrases() throws Exception {
++    assertThat(probeThrowing(new ConnectException("http://secret")).reason())
++        .isEqualTo("connection refused");
++    assertThat(probeThrowing(new UnresolvedAddressException()).reason())
++        .isEqualTo("host not found");
++    assertThat(probeThrowing(new HttpTimeoutException("x")).reason())
++        .isEqualTo("no answer in time");
++    assertThat(probeThrowing(new HttpConnectTimeoutException("x")).reason())
++        .isEqualTo("no answer in time");
++    ProbeResult other = probeThrowing(new IOException("/secret/path"));
++    assertThat(other.reachable()).isFalse();
++    assertThat(other.reason()).isEqualTo("i/o error (IOException)");
++  }
++
++  @Test
++  void anInterruptionRestoresTheFlag() throws Exception {
++    ProbeResult result = probeThrowing(new InterruptedException());
++
++    assertThat(result).isEqualTo(ProbeResult.down("interrupted"));
++    assertThat(Thread.currentThread().isInterrupted()).isTrue();
++  }
++}
+diff --git a/src/test/java/com/video2podcast/job/JobFailureTest.java b/src/test/java/com/video2podcast/job/JobFailureTest.java
+index 13e3fdb..ee21581 100644
+--- a/src/test/java/com/video2podcast/job/JobFailureTest.java
++++ b/src/test/java/com/video2podcast/job/JobFailureTest.java
+@@ -80,4 +80,26 @@ class JobFailureTest {
+     assertThat(failure.kind()).isEqualTo(JobFailure.Kind.FAILED);
+     assertThat(failure).hasMessage("x").hasNoCause();
+   }
++
++  @Test
++  void unreachableNamesTheServicesThatAreDown() {
++    JobFailure whisper = JobFailure.unreachable(true, false);
++    assertThat(whisper.kind()).isEqualTo(JobFailure.Kind.SERVICE_UNREACHABLE);
++    assertThat(whisper).hasMessage("The transcription server is unreachable.").hasNoCause();
++
++    JobFailure ollama = JobFailure.unreachable(false, true);
++    assertThat(ollama.kind()).isEqualTo(JobFailure.Kind.SUMMARY_UNREACHABLE);
++    assertThat(ollama).hasMessage("The summary server is unreachable.");
++
++    JobFailure both = JobFailure.unreachable(true, true);
++    assertThat(both.kind()).isEqualTo(JobFailure.Kind.SERVICE_UNREACHABLE);
++    assertThat(both)
++        .hasMessage("The transcription server is unreachable. The summary server is unreachable.");
++  }
++
++  @Test
++  void unreachableNeedsAServiceThatIsDown() {
++    org.assertj.core.api.Assertions.assertThatThrownBy(() -> JobFailure.unreachable(false, false))
++        .isInstanceOf(IllegalArgumentException.class);
++  }
+ }
+diff --git a/src/test/java/com/video2podcast/job/PipelineServiceTest.java b/src/test/java/com/video2podcast/job/PipelineServiceTest.java
+index 05084a8..2f68c4f 100644
+--- a/src/test/java/com/video2podcast/job/PipelineServiceTest.java
++++ b/src/test/java/com/video2podcast/job/PipelineServiceTest.java
+@@ -54,6 +54,7 @@ class PipelineServiceTest {
+   private final FfmpegRunner ffmpeg = mock(FfmpegRunner.class);
+   private final TranscriptionClient transcription = mock(TranscriptionClient.class);
+   private final SummaryService summary = mock(SummaryService.class);
++  private final HealthChecks health = mock(HealthChecks.class);
+   private final MutableClock clock = new MutableClock(Instant.parse("2026-11-19T10:05:00Z"));
+   private final List<String> events = new ArrayList<>();
+   private final FakePublisher publisher = new FakePublisher();
+@@ -109,7 +110,8 @@ class PipelineServiceTest {
+   void setUp() throws IOException {
+     store = new JobStore(work, clock);
+     pipeline =
+-        new PipelineService(ytDlp, ffmpeg, transcription, summary, store, publisher, clock, JOBS);
++        new PipelineService(
++            ytDlp, ffmpeg, transcription, summary, store, publisher, clock, JOBS, health);
+     dir = store.directory(JOB_ID);
+     Path source = dir.resolve("source.m4a");
+     Path wav = dir.resolve("audio.wav");
+@@ -336,7 +338,8 @@ class PipelineServiceTest {
+           }
+         };
+     pipeline =
+-        new PipelineService(ytDlp, ffmpeg, transcription, summary, failing, publisher, clock, JOBS);
++        new PipelineService(
++            ytDlp, ffmpeg, transcription, summary, failing, publisher, clock, JOBS, health);
+ 
+     assertThatThrownBy(() -> pipeline.run(REQUEST, progress))
+         .isInstanceOfSatisfying(
+@@ -359,7 +362,7 @@ class PipelineServiceTest {
+         };
+     pipeline =
+         new PipelineService(
+-            ytDlp, ffmpeg, transcription, summary, vanishing, publisher, clock, JOBS);
++            ytDlp, ffmpeg, transcription, summary, vanishing, publisher, clock, JOBS, health);
+ 
+     assertThatThrownBy(() -> pipeline.run(REQUEST, progress)).isInstanceOf(JobFailure.class);
+ 
+@@ -381,10 +384,40 @@ class PipelineServiceTest {
+         .discard(JOB_ID);
+     pipeline =
+         new PipelineService(
+-            ytDlp, ffmpeg, transcription, summary, stubborn, publisher, clock, JOBS);
++            ytDlp, ffmpeg, transcription, summary, stubborn, publisher, clock, JOBS, health);
+ 
+     assertThatThrownBy(() -> pipeline.run(REQUEST, progress)).isSameAs(failure);
+ 
+     verify(stubborn).discard(JOB_ID);
+   }
++
++  @Test
++  void anUnreachableServiceFailsTheJobBeforeAnyWork() {
++    JobFailure down = JobFailure.unreachable(true, false);
++    org.mockito.Mockito.doThrow(down).when(health).requireReachable();
++
++    assertThatThrownBy(() -> pipeline.run(REQUEST, progress)).isSameAs(down);
++
++    assertThat(events).isEmpty();
++    assertThat(dir).doesNotExist();
++    verify(ytDlp, never()).fetchMetadata(any());
++    verify(ytDlp, never()).downloadAudio(any(), any());
++  }
++
++  @Test
++  void theCheckRunsBeforeTheDirectoryAndTheFirstStageReport() {
++    org.mockito.Mockito.doAnswer(
++            call -> {
++              assertThat(dir).doesNotExist();
++              events.add("health");
++              return null;
++            })
++        .when(health)
++        .requireReachable();
++
++    pipeline.run(REQUEST, progress);
++
++    assertThat(events).first().isEqualTo("health");
++    assertThat(events.get(1)).isEqualTo("downloading");
++  }
+ }
+diff --git a/src/test/java/com/video2podcast/summary/OllamaClientTest.java b/src/test/java/com/video2podcast/summary/OllamaClientTest.java
+index e025d85..05c70e4 100644
+--- a/src/test/java/com/video2podcast/summary/OllamaClientTest.java
++++ b/src/test/java/com/video2podcast/summary/OllamaClientTest.java
+@@ -15,6 +15,7 @@ import com.github.tomakehurst.wiremock.WireMockServer;
+ import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
+ import com.github.tomakehurst.wiremock.http.Fault;
+ import com.video2podcast.config.AppProperties;
++import com.video2podcast.job.ProbeResult;
+ import com.video2podcast.storage.Json;
+ import java.io.IOException;
+ import java.net.ServerSocket;
+@@ -401,4 +402,42 @@ class OllamaClientTest {
+     new OllamaClient(
+         new AppProperties.Ollama("http://localhost:1", "m", 8192, Duration.ofNanos(1)));
+   }
++
++  @Test
++  void probeGetsTheVersionPathAndAnyStatusIsReachable() {
++    server.stubFor(
++        com.github.tomakehurst.wiremock.client.WireMock.get(urlEqualTo("/api/version"))
++            .willReturn(aResponse().withStatus(500).withBody("secret-body")));
++
++    assertThat(client().probe(Duration.ofSeconds(2)).reachable()).isTrue();
++
++    server.verify(
++        com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor(
++            urlEqualTo("/api/version")));
++  }
++
++  @Test
++  void probeReportsAClosedPort() throws IOException {
++    int port;
++    try (ServerSocket socket = new ServerSocket(0)) {
++      port = socket.getLocalPort();
++    }
++
++    ProbeResult result =
++        new OllamaClient(config("http://localhost:" + port, Duration.ofSeconds(5)))
++            .probe(Duration.ofSeconds(2));
++
++    assertThat(result.reachable()).isFalse();
++    assertThat(result.reason()).doesNotContain("localhost").doesNotContain(String.valueOf(port));
++  }
++
++  @Test
++  void probeReportsNoAnswerInTime() {
++    server.stubFor(
++        com.github.tomakehurst.wiremock.client.WireMock.get(urlEqualTo("/api/version"))
++            .willReturn(aResponse().withFixedDelay(1500)));
++
++    assertThat(client().probe(Duration.ofMillis(200)))
++        .isEqualTo(ProbeResult.down("no answer in time"));
++  }
+ }
+diff --git a/src/test/java/com/video2podcast/transcript/WhisperClientTest.java b/src/test/java/com/video2podcast/transcript/WhisperClientTest.java
+index a644255..8aa0ae3 100644
+--- a/src/test/java/com/video2podcast/transcript/WhisperClientTest.java
++++ b/src/test/java/com/video2podcast/transcript/WhisperClientTest.java
+@@ -18,6 +18,7 @@ import com.github.tomakehurst.wiremock.http.Fault;
+ import com.github.tomakehurst.wiremock.verification.LoggedRequest;
+ import com.video2podcast.config.AppProperties;
+ import com.video2podcast.job.JobFailure;
++import com.video2podcast.job.ProbeResult;
+ import java.io.IOException;
+ import java.net.ServerSocket;
+ import java.net.http.HttpClient;
+@@ -278,4 +279,53 @@ class WhisperClientTest {
+       Thread.interrupted();
+     }
+   }
++
++  @Test
++  void probeGetsTheRootAndAnyStatusIsReachable() {
++    server.stubFor(
++        com.github.tomakehurst.wiremock.client.WireMock.get(urlEqualTo("/"))
++            .willReturn(aResponse().withStatus(503).withBody("secret-body")));
++
++    assertThat(client().probe(Duration.ofSeconds(2)).reachable()).isTrue();
++
++    server.verify(com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor(urlEqualTo("/")));
++  }
++
++  @Test
++  void probeReportsAClosedPort() throws IOException {
++    int port;
++    try (ServerSocket socket = new ServerSocket(0)) {
++      port = socket.getLocalPort();
++    }
++
++    ProbeResult result =
++        client("http://localhost:" + port, Duration.ofSeconds(5)).probe(Duration.ofSeconds(2));
++
++    assertThat(result.reachable()).isFalse();
++    assertThat(result.reason()).doesNotContain("localhost").doesNotContain(String.valueOf(port));
++  }
++
++  @Test
++  void probeReportsNoAnswerInTime() {
++    server.stubFor(
++        com.github.tomakehurst.wiremock.client.WireMock.get(urlEqualTo("/"))
++            .willReturn(aResponse().withFixedDelay(1500)));
++
++    ProbeResult result = client().probe(Duration.ofMillis(200));
++
++    assertThat(result).isEqualTo(ProbeResult.down("no answer in time"));
++  }
++
++  @Test
++  void probeKeepsTheRootWhenTheBaseUrlEndsWithASlash() {
++    server.stubFor(
++        com.github.tomakehurst.wiremock.client.WireMock.get(urlEqualTo("/"))
++            .willReturn(aResponse().withStatus(200)));
++
++    assertThat(
++            client("http://localhost:" + server.port() + "/", Duration.ofSeconds(5))
++                .probe(Duration.ofSeconds(2))
++                .reachable())
++        .isTrue();
++  }
+ }
