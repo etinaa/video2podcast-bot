@@ -3,6 +3,7 @@ Feature: Detect unavailable local services before downloading a video
   Startup service checks are informational. Each accepted link gets a fresh check.
   Observe Telegram HTTP calls, service HTTP probes, process invocations and durable files.
   Reuse T8-T14 media, delivery, retention and mid-job failure scenarios.
+  T18 replaces terminal model outages with durable parking; startup checks stay informational.
 
   @R1
   Scenario Outline: Start the bot even when a service cannot be reached
@@ -56,7 +57,7 @@ Feature: Detect unavailable local services before downloading a video
     And the Telegram mock receives no sendAudio or sendDocument request
 
   @R2 @R3
-  Scenario Outline: Reject an unavailable service before downloading
+  Scenario Outline: Park an unavailable service before downloading
     Given an allowed Telegram user
     And process mocks are enabled for tool argument checks
     And the bot has completed healthy startup checks
@@ -64,8 +65,9 @@ Feature: Detect unavailable local services before downloading a video
     And the Ollama health HTTP mock answers with <ollama> for the next accepted link
     When the user sends "http://videos.example/video" in a private chat
     Then the responding peer service HTTP mock records a new health request for this submission
-    And the bot replies with "<message>"
-    And this submission receives a queued acknowledgement before its failure message and a "Failed." status edit afterwards
+    And the original queued status is edited to "<message>"
+    And deferred-jobs.json contains exactly one entry for this submission
+    And no separate service-failure sendMessage or "Failed." edit is sent for this submission
     And after this preflight finishes no working directory for this submission remains
     And the yt-dlp mock records no invocation for this submission
     And the ffmpeg mock records no invocation for this submission
@@ -74,17 +76,18 @@ Feature: Detect unavailable local services before downloading a video
     And the Telegram mock receives no sendAudio or sendDocument request
     Examples:
       | whisper            | ollama             | message                                  |
-      | connection refusal | HTTP 200           | The transcription server is unreachable. |
-      | HTTP 200           | connection refusal | The summary server is unreachable.       |
+      | connection refusal | HTTP 200           | Service temporarily unavailable. We will send the result after it recovers. |
+      | HTTP 200           | connection refusal | Service temporarily unavailable. We will send the result after it recovers.       |
 
   @R2 @R3
-  Scenario: Report both unavailable services for the same link
+  Scenario: Park both unavailable services as one deferred link
     Given an allowed Telegram user
     And process mocks are enabled for tool argument checks
     And the bot has completed healthy startup checks
     And both health HTTP mocks refuse connections for the next accepted link
     When the user sends "http://videos.example/video" in a private chat
-    Then this submission's Telegram failure notification is "The transcription server is unreachable. The summary server is unreachable."
+    Then the original queued status is edited to "Service temporarily unavailable. We will send the result after it recovers."
+    And deferred-jobs.json contains exactly one entry for this submission
     And after this preflight finishes no working directory for this submission remains
     And this submission produces no yt-dlp, ffmpeg, Whisper inference or Ollama chat request
     And this submission produces no summary keyboard, sendAudio or sendDocument request
@@ -97,27 +100,28 @@ Feature: Detect unavailable local services before downloading a video
     And the <service> health HTTP mock holds its response beyond the configured short health deadline
     And the other health HTTP mock answers HTTP 200
     When the user sends "http://videos.example/video" in a private chat
-    Then the bot replies with "<message>" within HEALTH_TIMEOUT plus 1 second and a 500 millisecond test scheduling tolerance
+    Then the original queued status is edited to "<message>" within HEALTH_TIMEOUT plus 1 second and a 500 millisecond test scheduling tolerance
     And this submission sends no message "Processing took too long and was stopped."
     And after this preflight finishes no working directory for this submission remains
     And this submission produces no yt-dlp, ffmpeg, Whisper inference or Ollama chat request
     Examples:
       | service | message                                  |
-      | Whisper | The transcription server is unreachable. |
-      | Ollama  | The summary server is unreachable.       |
+      | Whisper | Service temporarily unavailable. We will send the result after it recovers. |
+      | Ollama  | Service temporarily unavailable. We will send the result after it recovers.       |
 
   @R2 @R3
-  Scenario: A fresh submission can succeed after services recover without replaying a rejected link
+  Scenario: A fresh submission can succeed while a parked link waits for its scheduled retry
     Given an allowed Telegram user
     And process mocks are enabled for tool argument checks
     And both health HTTP mocks refuse connections for the next accepted link
     When the user sends "http://videos.example/rejected" in a private chat
-    Then this submission's Telegram failure notifications contain each existing unreachable message exactly once
+    Then the original queued status is edited exactly once to "Service temporarily unavailable. We will send the result after it recovers."
+    And deferred-jobs.json contains exactly one entry for this submission
     When both health HTTP mocks begin answering HTTP 200
     And the Whisper and Ollama mocks begin returning successful answers
     And the user sends "http://videos.example/recovered" in a private chat
     Then both service HTTP mocks record a fresh health request for the recovered submission
-    And only "http://videos.example/recovered" is downloaded and receives a successful summary
+    And before the next deferred retry interval only "http://videos.example/recovered" is downloaded and receives a successful summary
     And no working directory for the rejected submission remains
 
   @R3
@@ -127,24 +131,25 @@ Feature: Detect unavailable local services before downloading a video
     And snapshots of user 101's job files and the access file have been recorded
     And both health HTTP mocks refuse connections for the next accepted link
     When user 202 sends "http://videos.example/video" in a private chat
-    Then user 202 receives both existing unreachable messages and user 101 receives neither
+    Then user 202's queued status is edited to "Service temporarily unavailable. We will send the result after it recovers."
+    And user 101 receives no outage notification
     And after this preflight finishes no working directory for this submission remains
     And user 101's retained files and the access file match their snapshots
 
   @R3
-  Scenario: A rejected failure notification does not prevent a later submission
+  Scenario: A rejected parking edit does not prevent a later submission
     Given an allowed Telegram user
     And process mocks are enabled for tool argument checks
     And the Whisper health HTTP mock refuses its next connection
     And the Ollama health HTTP mock answers HTTP 200
-    And the Telegram mock rejects the next service-failure notification with HTTP 500
+    And the Telegram mock rejects the next temporarily-unavailable status edit with HTTP 500
     When the user sends "http://videos.example/rejected" in a private chat
     Then after this preflight finishes no working directory for this submission remains
     And no audio download is recorded for "http://videos.example/rejected"
     When both health HTTP mocks begin answering HTTP 200
     And the Whisper and Ollama mocks begin returning successful answers
     And the user sends "http://videos.example/recovered" in a private chat
-    Then only "http://videos.example/recovered" is downloaded and receives a successful summary
+    Then before the next deferred retry interval only "http://videos.example/recovered" is downloaded and receives a successful summary
 
   @R4
   Scenario: Another user's command is answered while a health request is pending
@@ -183,8 +188,8 @@ Feature: Detect unavailable local services before downloading a video
     When Alice sends "http://videos.example/stalled" in her private chat
     And the Whisper health HTTP mock has received Alice's request
     And Bob sends "http://videos.example/following" in his private chat
-    Then Alice receives "The transcription server is unreachable." within HEALTH_TIMEOUT plus 1 second and a 500 millisecond test scheduling tolerance
-    And Alice's queued status is edited to "Failed."
+    Then Alice's queued status is edited to "Service temporarily unavailable. We will send the result after it recovers." within HEALTH_TIMEOUT plus 1 second and a 500 millisecond test scheduling tolerance
+    And deferred-jobs.json contains exactly one entry for Alice's submission
     And Bob's first yt-dlp invocation occurs after Alice's preflight ends and before the held HTTP response is released
     And Bob receives a successful summary
     And no yt-dlp invocation or working directory exists for Alice's submission
@@ -200,8 +205,8 @@ Feature: Detect unavailable local services before downloading a video
     When the Ollama health HTTP mock begins refusing connections
     And the Whisper inference HTTP mock releases a successful answer for the first job
     Then the first job receives a successful summary
-    And the waiting submission receives "The summary server is unreachable."
-    And the waiting submission's queued status is edited to "Failed."
+    And the waiting submission's queued status is edited to "Service temporarily unavailable. We will send the result after it recovers."
+    And deferred-jobs.json contains exactly one entry for the waiting submission
     And no yt-dlp invocation or working directory exists for the waiting submission
 
   @R6

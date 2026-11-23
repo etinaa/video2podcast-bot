@@ -154,9 +154,7 @@ Feature: Receive a summary and download buttons after sending a video link
       | ffmpeg split failure                     | Could not process this video. Please try again later. |
       | a download timeout                       | Processing took too long and was stopped.             |
       | empty speech in every Whisper chunk      | No speech was found in this video.                    |
-      | connection refusal on both Whisper attempts | The transcription server is unreachable.            |
       | status 500 on both Whisper attempts      | Transcription failed. Please try again later.         |
-      | Ollama connection refusal                | The summary server is unreachable.                    |
       | Ollama empty content                     | Summary failed. Please try again later.               |
       | Ollama silently truncated prompt         | Summary failed. Please try again later.               |
       | an Ollama answer timeout                 | Processing took too long and was stopped.             |

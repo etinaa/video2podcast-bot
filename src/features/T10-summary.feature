@@ -155,7 +155,8 @@ Feature: Summarize a video link through the local Ollama HTTP API
   Scenario: Explain an unreachable Ollama instead of silently hanging
     Given the Ollama base URL points to a local port that refuses connections
     When the user sends "http://videos.example/video" in a private chat
-    Then the bot replies with "The summary server is unreachable."
+    Then the original queued status is edited to "Service temporarily unavailable. We will send the result after it recovers."
+    And deferred-jobs.json contains exactly one entry for this submission
     And no successful Telegram summary is sent
 
   @R4 @R7

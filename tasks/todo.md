@@ -182,18 +182,19 @@ Sizes: S = 1-2 files, M = 3-5 files.
   - Depends on: T7, T12, T13
   - Files: `job/RetentionSweeper.java`, `job/JobRecovery.java`, `bot/Keyboards.java`, tests
 
-- [ ] **T18: Deferred jobs: park on service outage, notify the user, retry every 2 hours** (M)
-  - Draft from the owner's request during T9; it is settled at intake before any work starts (the open points are marked).
-  - Why: when Whisper (T9) or Ollama (T10) is down, the job fails with `SERVICE_UNREACHABLE` and the user has to resend the link. The owner wants the job kept in a dead-letter queue (DLQ) and finished automatically after the service is back.
+- [~] **T18: Deferred jobs: park on service outage, notify the user, retry every 2 hours** (M)
+  - Why: when Whisper (T9) or Ollama (T10) is down, the job fails with `SERVICE_UNREACHABLE` and the user has to resend the link. The owner wants the job kept and finished automatically after the service is back.
   - Acceptance:
-    - A job that fails with `SERVICE_UNREACHABLE` is not dropped. It is parked in a DLQ together with what is needed to run it again (job id, owner user id, chat id, URL, the stage that failed, attempt count, the time it was parked).
-    - The user gets one message: "Service temporarily unavailable. We will send the result after it recovers." (exact English text to confirm at intake). The existing status message is edited, not a second message.
-    - Every 2 hours (`@Scheduled`, the interval configurable, default `PT2H`) the DLQ is checked and each entry is run again through the normal pipeline (T11). On success the user gets the usual summary message with both buttons and the entry leaves the DLQ. If the service is still down the entry stays and the user is not messaged again.
-    - Open at intake: where the DLQ lives (a separate file if everything stays in files; `SPEC.md` says no database), how long a parked job and its working files are kept (`JOB_RETENTION` is 1 hour and would delete them first), the maximum number of attempts or age before giving up and telling the user, whether the retry starts from the failed stage or from scratch, what happens to the DLQ at restart, and whether the queue order is kept.
-    - Functional test `DeferredJobIT`: Whisper is down, the user gets the "temporarily unavailable" message and the job is parked; after the scheduler runs with Whisper back, the summary message with two buttons is sent and the DLQ is empty.
-  - Verify: `./mvnw test -Dtest=DeadLetterQueueTest` with a fake clock and a temp directory (park, scheduled retry, success, still failing, restart, give-up), and `./mvnw verify -Dit.test=DeferredJobIT`.
+    - A job that fails with `SERVICE_UNREACHABLE` is not dropped. It is written to the deferred queue, `deferred-jobs.json` in the data directory next to `allowed-users.json` (atomic write, as the allowlist), with the URL, owner user id, chat id, status message id, attempt count and the time it was parked. Queue order is kept and the queue survives a restart. A file that is not valid JSON is renamed to `deferred-jobs.json.corrupt-<time>` and the bot starts with an empty queue.
+    - The working files of such a job are deleted at once. A retry starts from scratch, so `JOB_RETENTION` does not affect the queue.
+    - The user gets one message: "Service temporarily unavailable. We will send the result after it recovers." The existing status message is edited, not a second message.
+    - Every 2 hours (`@Scheduled`, `DEFERRED_RETRY_INTERVAL`, default `PT2H`) each queued entry is run again through the normal pipeline (T11), one at a time. On success the user gets the usual summary message with both buttons and the entry leaves the queue. If the service is still down the entry stays, its attempt count grows and the user is not messaged again.
+    - At most 12 attempts (`DEFERRED_MAX_ATTEMPTS`, default 12, about 24 hours). After that the user gets one message, "We could not process this link. Please send it again later.", and the entry is removed. Any other failure on a retry (not `SERVICE_UNREACHABLE`) closes the entry at once with the normal error message.
+    - If the user lost access to the bot while waiting, the entry is dropped silently.
+    - Functional test `DeferredJobIT`: Whisper is down, the user gets the "temporarily unavailable" message and the job is queued; after the scheduler runs with Whisper back, the summary message with two buttons is sent and the queue is empty. More scenarios: the attempt limit, a restart, a repeated failure without a new message.
+  - Verify: `./mvnw test -Dtest=DeferredJobsTest` with a fake clock and a temp directory (park, scheduled retry, success, still failing, restart, attempt limit), and `./mvnw verify -Dit.test=DeferredJobIT`.
   - Depends on: T9, T10, T11, T14
-  - Files: `job/DeadLetterQueue.java`, `job/DeferredJobRunner.java`, `job/PipelineService.java`, `config/AppProperties.java`, `application.yml`, `SPEC.md`, tests
+  - Files: `job/DeferredJobs.java`, `job/DeferredJobRunner.java`, `job/PipelineService.java`, `config/AppProperties.java`, `application.yml`, `.env.example`, `docs/host-setup.md`, `SPEC.md` (criterion 14 and storage), tests
 
 ### Checkpoint 4: Full flow
 - [x] All tests pass

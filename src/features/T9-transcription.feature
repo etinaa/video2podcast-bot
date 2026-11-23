@@ -264,7 +264,8 @@ Feature: Transcribe a video link into a plain-text transcript
   Scenario: Report an unreachable transcription server without inventing received requests
     Given the Whisper base URL points to a local port that refuses connections
     When the user sends "http://videos.example/video" in a private chat
-    Then the bot replies with "The transcription server is unreachable."
+    Then the original queued status is edited to "Service temporarily unavailable. We will send the result after it recovers."
+    And deferred-jobs.json contains exactly one entry for this submission
     And the Whisper mock receives no POST request to "/inference"
     And the Ollama mock receives no request
     And after this submission finishes no working directory for it remains
