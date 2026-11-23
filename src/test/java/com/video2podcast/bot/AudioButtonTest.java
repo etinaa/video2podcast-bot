@@ -175,6 +175,7 @@ class AudioButtonTest {
           assertThat(audio.title()).isEqualTo("Budget meeting");
           assertThat(audio.performer()).isEqualTo("Video2Podcast");
           assertThat(audio.caption()).isEqualTo("Original audio, not compressed.");
+          assertThat(audio.duration()).isEqualTo(10_800);
         });
     assertThat(labels())
         .containsExactly("Preparing audio…|Download transcript", "Audio sent|Download transcript");

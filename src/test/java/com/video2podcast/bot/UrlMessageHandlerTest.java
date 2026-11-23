@@ -100,7 +100,13 @@ class UrlMessageHandlerTest {
 
     @Override
     public void sendAudio(
-        long chatId, Path file, String fileName, String title, String performer, String caption) {
+        long chatId,
+        Path file,
+        String fileName,
+        String title,
+        String performer,
+        String caption,
+        long duration) {
       throw new UnsupportedOperationException();
     }
 

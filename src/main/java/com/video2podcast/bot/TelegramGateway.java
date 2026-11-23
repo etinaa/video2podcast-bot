@@ -27,10 +27,17 @@ public interface TelegramGateway {
    *
    * @param fileName shown to the user, e.g. "Budget meeting.m4a"
    * @param caption HTML, may be null
+   * @param duration length in seconds shown by the player; zero or negative leaves it out
    * @throws TelegramGatewayException if Telegram refuses or cannot be reached
    */
   void sendAudio(
-      long chatId, Path file, String fileName, String title, String performer, String caption);
+      long chatId,
+      Path file,
+      String fileName,
+      String title,
+      String performer,
+      String caption,
+      long duration);
 
   /** Acknowledges a button tap, optionally showing a short notice to the user. */
   void answerCallback(String callbackQueryId, String text);

@@ -50,7 +50,13 @@ class RecordingGateway implements TelegramGateway {
   final List<Document> documents = new CopyOnWriteArrayList<>();
 
   record Audio(
-      long chatId, Path file, String fileName, String title, String performer, String caption) {}
+      long chatId,
+      Path file,
+      String fileName,
+      String title,
+      String performer,
+      String caption,
+      long duration) {}
 
   final List<Audio> audios = new CopyOnWriteArrayList<>();
 
@@ -82,11 +88,17 @@ class RecordingGateway implements TelegramGateway {
 
   @Override
   public void sendAudio(
-      long chatId, Path file, String fileName, String title, String performer, String caption) {
+      long chatId,
+      Path file,
+      String fileName,
+      String title,
+      String performer,
+      String caption,
+      long duration) {
     if (failAudio) {
       throw new TelegramGatewayException("cannot send audio", null);
     }
-    audios.add(new Audio(chatId, file, fileName, title, performer, caption));
+    audios.add(new Audio(chatId, file, fileName, title, performer, caption, duration));
   }
 
   @Override

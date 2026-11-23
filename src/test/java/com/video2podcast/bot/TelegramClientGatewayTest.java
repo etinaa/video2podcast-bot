@@ -4,7 +4,9 @@ import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
 import static com.github.tomakehurst.wiremock.client.WireMock.containing;
 import static com.github.tomakehurst.wiremock.client.WireMock.equalTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.equalToJson;
+import static com.github.tomakehurst.wiremock.client.WireMock.matching;
 import static com.github.tomakehurst.wiremock.client.WireMock.matchingJsonPath;
+import static com.github.tomakehurst.wiremock.client.WireMock.notMatching;
 import static com.github.tomakehurst.wiremock.client.WireMock.post;
 import static com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlPathEqualTo;
@@ -21,6 +23,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.telegram.telegrambots.client.okhttp.OkHttpTelegramClient;
 import org.telegram.telegrambots.meta.TelegramUrl;
 
@@ -186,7 +190,7 @@ class TelegramClientGatewayTest {
             .willReturn(
                 aResponse().withBody(MESSAGE_OK).withHeader("Content-Type", "application/json")));
 
-    gateway.sendAudio(5L, file, "Episode.m4a", "Episode", "Channel", "Converted &amp; done");
+    gateway.sendAudio(5L, file, "Episode.m4a", "Episode", "Channel", "Converted &amp; done", 114);
 
     telegram.verify(
         postRequestedFor(urlPathEqualTo(path("sendAudio")))
@@ -194,7 +198,25 @@ class TelegramClientGatewayTest {
             .withRequestBody(containing("Converted &amp; done"))
             .withRequestBody(containing("HTML"))
             .withRequestBody(containing("Episode"))
-            .withRequestBody(containing("Channel")));
+            .withRequestBody(containing("Channel"))
+            .withRequestBody(matching("(?s).*name=\"duration\"[^\\n]*\\n[^\\n]*\\n\\s*114\\s.*")));
+  }
+
+  @ParameterizedTest
+  @ValueSource(longs = {0, -5})
+  void sendAudioLeavesOutTheDurationWhenItIsNotPositive(long seconds) throws Exception {
+    Path file = Files.writeString(tempDir.resolve("audio.m4a"), "audio bytes");
+    telegram.stubFor(
+        post(urlPathEqualTo(path("sendAudio")))
+            .willReturn(
+                aResponse().withBody(MESSAGE_OK).withHeader("Content-Type", "application/json")));
+
+    gateway.sendAudio(5L, file, "Episode.m4a", "Episode", "Channel", null, seconds);
+
+    telegram.verify(
+        postRequestedFor(urlPathEqualTo(path("sendAudio")))
+            .withRequestBody(containing("filename=\"Episode.m4a\""))
+            .withRequestBody(notMatching("(?s).*name=\"duration\".*")));
   }
 
   @Test

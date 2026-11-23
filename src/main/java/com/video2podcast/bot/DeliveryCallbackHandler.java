@@ -111,7 +111,8 @@ public class DeliveryCallbackHandler {
           FileNames.audioName(title, extensionOf(prepared.file())),
           title,
           PERFORMER,
-          caption(prepared));
+          caption(prepared),
+          job.durationSeconds());
     } catch (RuntimeException e) {
       LOG.error("Could not send the audio of job {}", jobId, e);
       failAudio(job, jobId);
