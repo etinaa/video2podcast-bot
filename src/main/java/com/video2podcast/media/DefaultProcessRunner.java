@@ -1,6 +1,7 @@
 package com.video2podcast.media;
 
 import com.video2podcast.job.JobFailure;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.IOException;
@@ -77,6 +78,12 @@ public class DefaultProcessRunner implements ProcessRunner {
       this.process = process;
     }
 
+    @SuppressFBWarnings(
+        value = "COMMAND_INJECTION",
+        justification =
+            "No shell: the arguments are a list and the binary is always yt-dlp, ffmpeg or"
+                + " ffprobe. The URL passes UrlValidator first and follows the -- marker, and a"
+                + " real-process test proves hostile punctuation stays one literal argument.")
     static Child start(List<String> args) {
       try {
         Child child = new Child(new ProcessBuilder(args).start());

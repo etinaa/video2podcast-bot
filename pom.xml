@@ -46,6 +46,13 @@
     </dependency>
 
     <dependency>
+      <groupId>com.github.spotbugs</groupId>
+      <artifactId>spotbugs-annotations</artifactId>
+      <version>4.10.5</version>
+      <scope>provided</scope>
+    </dependency>
+
+    <dependency>
       <groupId>org.telegram</groupId>
       <artifactId>telegrambots-springboot-longpolling-starter</artifactId>
       <version>${telegrambots.version}</version>
@@ -201,7 +208,6 @@
           <effort>Max</effort>
           <threshold>Medium</threshold>
           <failOnError>true</failOnError>
-          <excludeFilterFile>${project.basedir}/config/spotbugs-exclude.xml</excludeFilterFile>
           <plugins>
             <plugin>
               <groupId>com.h3xstream.findsecbugs</groupId>
