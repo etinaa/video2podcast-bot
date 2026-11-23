@@ -1,0 +1,58 @@
+diff --git a/src/it/java/com/video2podcast/functional/PipelineAssertionSteps.java b/src/it/java/com/video2podcast/functional/PipelineAssertionSteps.java
+index fc39cf1..5a92d01 100644
+--- a/src/it/java/com/video2podcast/functional/PipelineAssertionSteps.java
++++ b/src/it/java/com/video2podcast/functional/PipelineAssertionSteps.java
+@@ -185,6 +185,12 @@ public class PipelineAssertionSteps {
+     assertThat(w.summaryText()).contains("<b>" + title + "</b>", duration, "• " + bullet);
+   }
+ 
++  @Then("the summary contains the duration line {string}")
++  public void durationLine(String line) {
++    assertThat(w.summaryText().lines().filter(s -> s.startsWith("Duration: ")).toList())
++        .containsExactly(line);
++  }
++
+   @Then("the summary keyboard contains exactly {string} and {string}")
+   public void buttons(String a, String b) {
+     assertThat(buttons().stream().map(n -> n.path("text").asText()).toList()).containsExactly(a, b);
+diff --git a/src/it/java/com/video2podcast/functional/PipelineSetupSteps.java b/src/it/java/com/video2podcast/functional/PipelineSetupSteps.java
+index e9eedac..ee3f641 100644
+--- a/src/it/java/com/video2podcast/functional/PipelineSetupSteps.java
++++ b/src/it/java/com/video2podcast/functional/PipelineSetupSteps.java
+@@ -175,6 +175,12 @@ public class PipelineSetupSteps {
+     w.retitle(t);
+   }
+ 
++  @Given("the media page duration is {long} seconds")
++  public void pageDuration(long seconds) throws Exception {
++    for (var e : new ArrayList<>(w.media.entrySet()))
++      w.fixture(e.getValue().seconds(), e.getValue().ext(), e.getKey(), seconds);
++  }
++
+   @Given("the media page title is {string} with decoded whitespace")
+   public void whitespace(String t) throws Exception {
+     w.retitle(t.replace("\\t", "\t").replace("\\n", "\n"));
+diff --git a/src/it/java/com/video2podcast/functional/PipelineWorld.java b/src/it/java/com/video2podcast/functional/PipelineWorld.java
+index 84c1f48..a7605ef 100644
+--- a/src/it/java/com/video2podcast/functional/PipelineWorld.java
++++ b/src/it/java/com/video2podcast/functional/PipelineWorld.java
+@@ -188,6 +188,10 @@ public class PipelineWorld implements AutoCloseable {
+   }
+ 
+   void fixture(long duration, String ext, String url) throws Exception {
++    fixture(duration, ext, url, duration);
++  }
++
++  void fixture(long duration, String ext, String url, long pageDuration) throws Exception {
+     seconds = duration;
+     extension = ext;
+     Path file = MediaFixtures.recording(duration, ext);
+@@ -210,7 +214,7 @@ public class PipelineWorld implements AutoCloseable {
+                     "name",
+                     title,
+                     "duration",
+-                    "PT" + duration + "S",
++                    "PT" + pageDuration + "S",
+                     "contentUrl",
+                     "http://" + uri.getHost() + mediaPath))
+             + "</script></head><body></body></html>";

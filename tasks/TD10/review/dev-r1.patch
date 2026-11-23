@@ -1,0 +1,71 @@
+diff --git a/src/main/java/com/video2podcast/bot/SummaryMessageFormatter.java b/src/main/java/com/video2podcast/bot/SummaryMessageFormatter.java
+index 8c1cbf3..188c054 100644
+--- a/src/main/java/com/video2podcast/bot/SummaryMessageFormatter.java
++++ b/src/main/java/com/video2podcast/bot/SummaryMessageFormatter.java
+@@ -38,16 +38,28 @@ final class SummaryMessageFormatter {
+     return clean.substring(0, end) + ELLIPSIS;
+   }
+ 
+-  /** {@code 1h 42m}, {@code 5m} or {@code 45s}; minutes are floored. */
++  /**
++   * {@code 2h 36m 30s}, {@code 1m 54s} or {@code 45s}; zero units are left out, negatives read 0s.
++   */
+   static String formatDuration(long seconds) {
+-    long hours = seconds / SECONDS_PER_HOUR;
+-    long minutes = seconds % SECONDS_PER_HOUR / SECONDS_PER_MINUTE;
+-    if (hours > 0) {
+-      return hours + "h " + minutes + "m";
++    long total = Math.max(seconds, 0);
++    long hours = total / SECONDS_PER_HOUR;
++    long minutes = total % SECONDS_PER_HOUR / SECONDS_PER_MINUTE;
++    long secs = total % SECONDS_PER_MINUTE;
++    StringBuilder out = new StringBuilder();
++    appendUnit(out, hours, 'h');
++    appendUnit(out, minutes, 'm');
++    appendUnit(out, secs, 's');
++    return out.length() == 0 ? "0s" : out.toString();
++  }
++
++  private static void appendUnit(StringBuilder out, long value, char unit) {
++    if (value == 0) {
++      return;
+     }
+-    if (minutes > 0) {
+-      return minutes + "m";
++    if (out.length() > 0) {
++      out.append(' ');
+     }
+-    return seconds + "s";
++    out.append(value).append(unit);
+   }
+ }
+diff --git a/src/test/java/com/video2podcast/bot/SummaryMessageFormatterTest.java b/src/test/java/com/video2podcast/bot/SummaryMessageFormatterTest.java
+index 6779736..111f91d 100644
+--- a/src/test/java/com/video2podcast/bot/SummaryMessageFormatterTest.java
++++ b/src/test/java/com/video2podcast/bot/SummaryMessageFormatterTest.java
+@@ -11,16 +11,19 @@ class SummaryMessageFormatterTest {
+   @ParameterizedTest
+   @CsvSource({
+     "0,0s",
++    "-5,0s",
+     "45,45s",
+     "59,59s",
+     "60,1m",
+-    "119,1m",
+-    "300,5m",
+-    "3599,59m",
+-    "3600,1h 0m",
+-    "3659,1h 0m",
++    "114,1m 54s",
++    "120,2m",
++    "3599,59m 59s",
++    "3600,1h",
++    "3659,1h 59s",
++    "3660,1h 1m",
+     "6120,1h 42m",
+-    "10800,3h 0m"
++    "9390,2h 36m 30s",
++    "10800,3h"
+   })
+   void formatsTheDuration(long seconds, String expected) {
+     assertThat(SummaryMessageFormatter.formatDuration(seconds)).isEqualTo(expected);
