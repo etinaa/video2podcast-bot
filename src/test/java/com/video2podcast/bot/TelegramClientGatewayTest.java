@@ -10,18 +10,20 @@ import static com.github.tomakehurst.wiremock.client.WireMock.notMatching;
 import static com.github.tomakehurst.wiremock.client.WireMock.post;
 import static com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlPathEqualTo;
-import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import com.github.tomakehurst.wiremock.junit5.WireMockExtension;
+import com.github.tomakehurst.wiremock.WireMockServer;
+import com.video2podcast.support.LoopbackWireMock;
+import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Locale;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -36,18 +38,32 @@ class TelegramClientGatewayTest {
       {"ok":true,"result":{"message_id":77,"date":1700000000,"chat":{"id":5,"type":"private"}}}\
       """;
 
-  @RegisterExtension
-  static WireMockExtension telegram =
-      WireMockExtension.newInstance().options(wireMockConfig().dynamicPort()).build();
+  static WireMockServer telegram;
 
   @TempDir Path tempDir;
 
   private TelegramClientGateway gateway;
 
+  @BeforeAll
+  static void startTelegram() {
+    telegram = LoopbackWireMock.start();
+  }
+
+  @AfterAll
+  static void stopTelegram() {
+    telegram.stop();
+  }
+
   @BeforeEach
   void setUp() {
+    telegram.resetAll();
+    URI base = URI.create(telegram.baseUrl());
     TelegramUrl url =
-        TelegramUrl.builder().schema("http").host("localhost").port(telegram.getPort()).build();
+        TelegramUrl.builder()
+            .schema(base.getScheme())
+            .host(base.getHost())
+            .port(base.getPort())
+            .build();
     gateway = new TelegramClientGateway(new OkHttpTelegramClient(TOKEN, url));
   }
 

@@ -8,11 +8,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.github.tomakehurst.wiremock.WireMockServer;
-import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
 import com.github.tomakehurst.wiremock.stubbing.Scenario;
 import com.github.tomakehurst.wiremock.stubbing.ServeEvent;
 import com.video2podcast.config.AppProperties;
 import com.video2podcast.job.JobFailure;
+import com.video2podcast.support.LoopbackWireMock;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -41,8 +41,7 @@ class TranscriptionAssembledTest {
 
   @BeforeEach
   void setUp() throws IOException {
-    server = new WireMockServer(WireMockConfiguration.options().dynamicPort());
-    server.start();
+    server = LoopbackWireMock.start();
     Files.writeString(jobDir.resolve("source.m4a"), "source");
     Files.writeString(jobDir.resolve("audio.wav"), "wav");
     Files.createDirectory(jobDir.resolve("chunks"));
@@ -55,7 +54,7 @@ class TranscriptionAssembledTest {
 
   private TranscriptionClient client(Duration timeout) {
     return new TranscriptionClient(
-        new WhisperClient(new AppProperties.Whisper("http://localhost:" + server.port(), timeout)));
+        new WhisperClient(new AppProperties.Whisper(server.baseUrl(), timeout)));
   }
 
   private Path chunk(String name, int size) throws IOException {

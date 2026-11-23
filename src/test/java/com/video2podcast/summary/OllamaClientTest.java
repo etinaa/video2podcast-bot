@@ -12,11 +12,11 @@ import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.github.tomakehurst.wiremock.WireMockServer;
-import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
 import com.github.tomakehurst.wiremock.http.Fault;
 import com.video2podcast.config.AppProperties;
 import com.video2podcast.job.ProbeResult;
 import com.video2podcast.storage.Json;
+import com.video2podcast.support.LoopbackWireMock;
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.http.HttpClient;
@@ -39,8 +39,7 @@ class OllamaClientTest {
 
   @BeforeEach
   void setUp() {
-    server = new WireMockServer(WireMockConfiguration.options().dynamicPort());
-    server.start();
+    server = LoopbackWireMock.start();
   }
 
   @AfterEach
@@ -53,7 +52,7 @@ class OllamaClientTest {
   }
 
   private OllamaClient client() {
-    return new OllamaClient(config("http://localhost:" + server.port(), Duration.ofSeconds(5)));
+    return new OllamaClient(config(server.baseUrl(), Duration.ofSeconds(5)));
   }
 
   private void stub(int status, String body) {
@@ -124,8 +123,7 @@ class OllamaClientTest {
     stub(200, fixture("ollama-chat-ok.json"));
     OllamaClient other =
         new OllamaClient(
-            new AppProperties.Ollama(
-                "http://localhost:" + server.port(), "qwen3:14b", 4096, Duration.ofSeconds(5)));
+            new AppProperties.Ollama(server.baseUrl(), "qwen3:14b", 4096, Duration.ofSeconds(5)));
 
     other.complete("s", "u", 10);
 
@@ -138,8 +136,7 @@ class OllamaClientTest {
   @Test
   void aTrailingSlashOfTheBaseUrlIsDropped() throws Exception {
     stub(200, fixture("ollama-chat-ok.json"));
-    OllamaClient slash =
-        new OllamaClient(config("http://localhost:" + server.port() + "/", Duration.ofSeconds(5)));
+    OllamaClient slash = new OllamaClient(config(server.baseUrl() + "/", Duration.ofSeconds(5)));
 
     slash.complete("s", "u", 10);
 
@@ -300,8 +297,7 @@ class OllamaClientTest {
     server.stubFor(
         post(urlEqualTo("/api/chat"))
             .willReturn(aResponse().withStatus(200).withBody("{}").withFixedDelay(2000)));
-    OllamaClient slow =
-        new OllamaClient(config("http://localhost:" + server.port(), Duration.ofMillis(200)));
+    OllamaClient slow = new OllamaClient(config(server.baseUrl(), Duration.ofMillis(200)));
 
     LlmException e = failure(slow);
 

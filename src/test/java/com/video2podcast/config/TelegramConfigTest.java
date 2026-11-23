@@ -11,6 +11,7 @@ import com.video2podcast.bot.TelegramBot;
 import com.video2podcast.bot.TelegramGateway;
 import com.video2podcast.bot.UrlMessageHandler;
 import com.video2podcast.job.RetentionSweeper;
+import com.video2podcast.support.LoopbackWireMock;
 import java.nio.file.Path;
 import java.time.Duration;
 import org.junit.jupiter.api.Test;
@@ -97,11 +98,7 @@ class TelegramConfigTest {
 
   @org.junit.jupiter.api.Test
   void theClientDoesNotResendARequestWhoseConnectionDropped() {
-    com.github.tomakehurst.wiremock.WireMockServer server =
-        new com.github.tomakehurst.wiremock.WireMockServer(
-            com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig()
-                .dynamicPort());
-    server.start();
+    com.github.tomakehurst.wiremock.WireMockServer server = LoopbackWireMock.start();
     try {
       server.stubFor(
           com.github.tomakehurst.wiremock.client.WireMock.post(
@@ -111,7 +108,7 @@ class TelegramConfigTest {
                       .withFault(com.github.tomakehurst.wiremock.http.Fault.EMPTY_RESPONSE)));
       AppProperties props =
           new AppProperties(
-              new AppProperties.Telegram("123:abc", 1L, true, "http://localhost:" + server.port()),
+              new AppProperties.Telegram("123:abc", 1L, true, server.baseUrl()),
               props("123:abc", 1L, true).access(),
               props("123:abc", 1L, true).ollama(),
               props("123:abc", 1L, true).whisper(),

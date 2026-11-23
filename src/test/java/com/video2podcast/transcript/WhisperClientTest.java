@@ -13,12 +13,12 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.github.tomakehurst.wiremock.WireMockServer;
-import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
 import com.github.tomakehurst.wiremock.http.Fault;
 import com.github.tomakehurst.wiremock.verification.LoggedRequest;
 import com.video2podcast.config.AppProperties;
 import com.video2podcast.job.JobFailure;
 import com.video2podcast.job.ProbeResult;
+import com.video2podcast.support.LoopbackWireMock;
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.http.HttpClient;
@@ -44,8 +44,7 @@ class WhisperClientTest {
 
   @BeforeEach
   void setUp() throws IOException {
-    server = new WireMockServer(WireMockConfiguration.options().dynamicPort());
-    server.start();
+    server = LoopbackWireMock.start();
     chunk = Files.write(dir.resolve("chunk-000.wav"), new byte[] {1, 2, 3, (byte) 0xFF});
   }
 
@@ -59,7 +58,7 @@ class WhisperClientTest {
   }
 
   private WhisperClient client() {
-    return client("http://localhost:" + server.port(), Duration.ofSeconds(5));
+    return client(server.baseUrl(), Duration.ofSeconds(5));
   }
 
   private void stub(int status, String body) {
@@ -163,10 +162,7 @@ class WhisperClientTest {
   void trailingSlashInBaseUrlIsDropped() throws Exception {
     stub(200, "{\"text\":\"\"}");
 
-    assertThat(
-            client("http://localhost:" + server.port() + "/", Duration.ofSeconds(5))
-                .transcribe(chunk))
-        .isEmpty();
+    assertThat(client(server.baseUrl() + "/", Duration.ofSeconds(5)).transcribe(chunk)).isEmpty();
     server.verify(1, postRequestedFor(urlEqualTo("/inference")));
   }
 
@@ -218,8 +214,7 @@ class WhisperClientTest {
             .willReturn(aResponse().withStatus(200).withBody(OK).withFixedDelay(2000)));
 
     WhisperException e =
-        catchWhisper(() ->
-            client("http://localhost:" + server.port(), Duration.ofMillis(200)).transcribe(chunk));
+        catchWhisper(() -> client(server.baseUrl(), Duration.ofMillis(200)).transcribe(chunk));
 
     assertThat(e.isConnection()).isFalse();
   }
@@ -323,7 +318,7 @@ class WhisperClientTest {
             .willReturn(aResponse().withStatus(200)));
 
     assertThat(
-            client("http://localhost:" + server.port() + "/", Duration.ofSeconds(5))
+            client(server.baseUrl() + "/", Duration.ofSeconds(5))
                 .probe(Duration.ofSeconds(2))
                 .reachable())
         .isTrue();
