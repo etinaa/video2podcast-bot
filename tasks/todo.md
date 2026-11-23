@@ -244,15 +244,17 @@ Sizes: S = 1-2 files, M = 3-5 files.
 
 Work that is not scheduled in a phase. Technical debt carries the `[debt]` mark.
 
-- [ ] **TD1 [debt]: Remove the SpotBugs `COMMAND_INJECTION` exclusion for `DefaultProcessRunner`** (S)
-  - Why: T8 needed `config/spotbugs-exclude.xml` because find-sec-bugs flags `new ProcessBuilder(args)` in `DefaultProcessRunner` whenever the argument list is not a compile-time constant. A typed command (enum of tools plus argument list) was tried in a T8 spike and is flagged the same way. The owner approved this one narrow exclusion for T8, as a known false positive. Safeguards that stand in for the check: arguments are a list (no shell), the binary is always `yt-dlp` or `ffmpeg`, `UrlValidator` runs first and the URL follows `--`, and a real-process test proves hostile punctuation stays one literal argument.
+- [~] **TD1 [debt]: Replace the class-wide `COMMAND_INJECTION` exclusion with one annotation on the call** (S)
+  - Why: T8 needed `config/spotbugs-exclude.xml` because find-sec-bugs flags `new ProcessBuilder(args)` in `DefaultProcessRunner` whenever the argument list is not a compile-time constant. A typed command (enum of tools plus argument list) was tried in a T8 spike and is flagged the same way. As of 2026-11-23 `findsecbugs-plugin` 1.14.0, `spotbugs-maven-plugin` 4.10.5.0 and SpotBugs 4.10.5 are the newest releases, so waiting for a newer one does not help. The owner approved (2026-11-23) a narrower mechanism: one `@SuppressFBWarnings` on the method that starts the process. Safeguards that stand in for the check: arguments are a list (no shell), the binary is always `yt-dlp` or `ffmpeg`, `UrlValidator` runs first and the URL follows `--`, and a real-process test proves hostile punctuation stays one literal argument.
   - Acceptance:
-    - `config/spotbugs-exclude.xml` and its wiring in `pom.xml` are removed, or the exclusion is replaced by a narrower mechanism the owner approves.
-    - `./mvnw verify` passes with SpotBugs and find-sec-bugs on and no `COMMAND_INJECTION` suppression, for example because a newer find-sec-bugs or SpotBugs release no longer flags the pattern, or because the process start moves to a form the detector accepts without hiding the call.
+    - `config/spotbugs-exclude.xml` and its wiring in `pom.xml` (`excludeFilterFile`) are removed.
+    - `pom.xml` gets `com.github.spotbugs:spotbugs-annotations:4.10.5` with scope `provided`. No other dependency is added.
+    - `DefaultProcessRunner.Child.start` carries one `@SuppressFBWarnings(value = "COMMAND_INJECTION", justification = "...")` on the method, not on the class. The justification names the safeguards above. No other suppression is added.
+    - `./mvnw verify` passes with SpotBugs and find-sec-bugs on. A search shows no `COMMAND_INJECTION` in `config/` and `pom.xml`, and exactly one in `src/main` (that annotation).
     - The real-process argument-preservation test of `DefaultProcessRunner` still passes.
-  - Verify: `./mvnw clean verify`, and a search showing no `COMMAND_INJECTION` entry left in `config/` or `pom.xml`.
+  - Verify: `./mvnw clean verify`, and the search above.
   - Depends on: T8
-  - Files: `config/spotbugs-exclude.xml`, `pom.xml`, `media/DefaultProcessRunner.java`
+  - Files: `config/spotbugs-exclude.xml` (removed), `pom.xml`, `media/DefaultProcessRunner.java`
 
 - [x] **TD2 [debt]: Fix the flaky `JobQueueTest.sizeCountsWaitingAndRunningTasksUntilTheyFinish`** (S)
   - Why: it failed once in four full `./mvnw verify` runs during T8 (`expected: 0 but was: 1` at `JobQueueTest.java:86`). `JobQueue.run` completes the task's future first and removes the task from `open` only in `finally`, so `size()` still counts a task whose future is already done. The test is right; the race is in the production code, and `size()` is the queue position T11 will show to users.
