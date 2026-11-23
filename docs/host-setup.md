@@ -22,8 +22,10 @@ curl -L --fail -o ~/models/whisper/ggml-large-v3-turbo.bin \
 
 ```bash
 # Ollama listens on 127.0.0.1:11434 by default (brew services start ollama, or open the app)
-whisper-server -m ~/models/whisper/ggml-large-v3-turbo.bin --host 127.0.0.1 --port 8081 -l en -t 8
+whisper-server -m ~/models/whisper/ggml-large-v3-turbo.bin --host 127.0.0.1 --port 8081 -l en -t 8 -mc 0
 ```
+
+`-mc 0` is required: it stops Whisper from feeding the previous text back in as context. Without it a 2 h 36 min test video got a repetition loop ("And I thought, maybe I could do something else", 14 to 20 times, about 18 seconds of real speech replaced). With `-mc 0` the same 10-minute chunk comes out without the loop and with the missing speech back, at the same speed. The bot sends `temperature=0.0` and no `temperature_inc`, so the temperature fallback does not help here (checked: no change).
 
 Reachability from the container: checked on this machine (Podman 6.2.0, `podman machine` with applehv, 8 CPUs, 6 GiB). With `whisper-server` bound to `127.0.0.1:8081` and Ollama bound to `127.0.0.1:11434` on the host, a container request to `http://host.containers.internal:8081/` and to `http://host.containers.internal:11434/api/tags` both answer HTTP 200. No `0.0.0.0` binding and no `OLLAMA_HOST` change is needed here. If a different Podman setup cannot reach them, bind `whisper-server` with `--host 0.0.0.0` and start Ollama with `OLLAMA_HOST=0.0.0.0`, and restrict the ports with the macOS firewall.
 
@@ -33,6 +35,31 @@ Check that both are up:
 curl -s http://127.0.0.1:8081/ -o /dev/null -w "%{http_code}\n"   # 200
 curl -s http://localhost:11434/api/tags                           # lists qwen3:32b
 ```
+
+## Measured on this machine (T17, 2026-11-23)
+
+MacBook with 8 performance cores, `ggml-large-v3-turbo` on Whisper, `qwen3:32b` (22 GB, 100% GPU, `num_ctx` 8192) in Ollama, the bot run locally (`./run.sh`). Times are wall-clock from the process logs sampled every 5 seconds (`ps`) and the Telegram message times.
+
+| Video | Audio sent as | Result |
+|---|---|---|
+| 1:54 Russian video, E-AC-3 5.1 inside an `.m4a` (5.5 MB) | converted to AAC stereo 128 kbps | plays (see D15) |
+| 3:36 English video | unchanged, AAC `.m4a` | plays, transcript complete (owner checked) |
+| 2 h 36 min English talk (9 390 s, 16 chunks of up to 10 min) | compressed to mono AAC 42 kbps, 51 933 907 bytes (44.2 kbps real) | Telegram accepted it, plays to the end |
+
+Stages for the 2 h 36 min video (second run, with `-mc 0`):
+
+| Stage | Time | Notes |
+|---|---|---|
+| Download (`yt-dlp`, 152 MB) | about 16 s | timed on its own with `time` |
+| Convert to WAV and split into chunks (`ffmpeg`) | 5 to 10 s | seen in 1 to 2 of the 5-second process samples in both runs |
+| Transcribe, 16 chunks | 3 to 4 min | `whisper-server` busy for 3 min (second run) and 4 min (first run) in the process samples, so about 40 to 50 times faster than real time; a single 10-minute chunk took 10 to 13 s when sent with `curl` |
+| Summary (Ollama, map-reduce) | 6 to 9 min | from the end of transcription to the start of the next `ffmpeg`/the summary message: about 6 min (first run) and about 9 min (second run) |
+| Compress to fit Telegram (on the audio tap) | about 1 min | `ffmpeg` busy for 55 s in the first run and 1 min in the second |
+| Upload of the 49.5 MiB audio | about 2 min | from the end of `ffmpeg` to the time of the audio message in Telegram (11:40 to 11:42 in the first run) |
+
+Peak memory (RSS): `whisper-server` up to 2.1 GB (the model sits in GPU memory, not counted), Java bot 190 MB, `ffmpeg` 62 MB, Ollama about 22 GB for the model (`ollama ps`). Nothing needed tuning: chunk size, `num_ctx` 8192 and `keep_alive` stay as they are, and `qwen3:32b` is fast enough that no fall back to `qwen3:14b` is needed.
+
+Telegram size limit: a file of 51 933 907 bytes (above 50 000 000, below 50 MiB = 52 428 800) was accepted by `sendAudio`, so `LIMIT_BYTES = 50 MiB` holds. The encoder output is about 5% larger than the requested bitrate, so for a 3-hour video the first attempt (37 kbps, about 52.6 MB) lands above the limit and the 29 kbps retry is used; this retry is covered by tests but was not run on a real 3-hour video.
 
 ## Container: build, start, update, logs
 
