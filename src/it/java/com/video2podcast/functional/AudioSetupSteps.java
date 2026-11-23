@@ -38,6 +38,33 @@ public class AudioSetupSteps {
     assertThat(media.toString()).contains(streams.startsWith("an Opus") ? "opus" : "video");
   }
 
+  @Given(
+      "^the retained audio source is a real ffmpeg-generated 60 second \"([^\"]+)\" below 1000000 bytes with (an E-AC-3 5.1 audio stream in an MP4 container|an Opus audio stream in an MP4 container|an AAC audio stream in an ADTS container)$")
+  public void incompatibleSource(String name, String streams) throws Exception {
+    boolean surround = streams.startsWith("an E-AC-3");
+    boolean opus = streams.startsWith("an Opus");
+    String codec = surround ? "eac3" : opus ? "opus" : "aac";
+    String container = streams.contains("ADTS") ? "adts" : "mp4";
+    int channels = surround ? 6 : 2;
+    w.audio.incompatibleSource(name, opus ? "libopus" : codec, container, channels);
+    assertThat(Files.size(w.audio.source)).isBetween(1L, 999999L);
+    var media = AudioSupport.probe(w.audio.source, "-count_frames");
+    assertThat(media.path("format").path("format_name").asText())
+        .contains(container.equals("adts") ? "aac" : "mp4");
+    assertThat(media.path("streams").size()).isEqualTo(1);
+    var audio = media.path("streams").path(0);
+    assertThat(audio.path("codec_type").asText()).isEqualTo("audio");
+    assertThat(audio.path("codec_name").asText()).isEqualTo(codec);
+    assertThat(audio.path("channels").asInt()).isEqualTo(channels);
+    // Raw ADTS reports an estimated duration; count decoded AAC-LC frames (1024 samples each).
+    double seconds =
+        container.equals("adts")
+            ? audio.path("nb_read_frames").asLong() * 1024.0 / audio.path("sample_rate").asInt()
+            : media.path("format").path("duration").asDouble();
+    assertThat(seconds).isBetween(59.0, 61.0);
+    if (surround) assertThat(audio.path("channel_layout").asText()).startsWith("5.1");
+  }
+
   @Given("the job directory contains UTF-8 {string} with content {string}")
   public void transcript(String name, String text) throws Exception {
     assertThat(name).isEqualTo("transcript.txt");

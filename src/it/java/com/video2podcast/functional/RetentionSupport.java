@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.video2podcast.media.DefaultProcessRunner;
 import com.video2podcast.media.ProcessResult;
 import java.nio.file.*;
 import java.time.*;
@@ -86,6 +87,8 @@ final class RetentionSupport {
         }
         if (failDownload) return new ProcessResult(1, "", "download fixture failed");
         Files.copy(w.audio.source, source, StandardCopyOption.REPLACE_EXISTING);
+      } else if (args.getFirst().equals("ffprobe")) {
+        return new DefaultProcessRunner().run(args, timeout);
       } else if (args.getFirst().equals("ffmpeg")) {
         String output = args.getLast();
         Path target = Path.of(output.replace("%03d", "000"));

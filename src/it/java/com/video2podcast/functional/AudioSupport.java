@@ -55,6 +55,36 @@ final class AudioSupport implements AutoCloseable {
     if (oversized) assertThat(Files.size(source)).isGreaterThan(LIMIT);
   }
 
+  void incompatibleSource(String name, String codec, String container, int channels)
+      throws Exception {
+    assertThat(w.context).as("source fixture before startup").isNull();
+    source = w.dir.resolve(name);
+    MediaFixtures.run(
+        List.of(
+            "ffmpeg",
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000",
+            "-t",
+            "60",
+            "-c:a",
+            codec,
+            "-ac",
+            Integer.toString(channels),
+            "-b:a",
+            "64k",
+            "-f",
+            container,
+            source.toString()));
+    w.change(j -> ((ObjectNode) j.path("files").path("AUDIO")).put("path", name));
+  }
+
   static synchronized Path fixture(String name, boolean large) throws Exception {
     String ext = name.substring(name.lastIndexOf('.') + 1).toLowerCase(Locale.ROOT);
     Path dir = Files.createDirectories(Path.of("target", "audio-fixtures"));
@@ -113,20 +143,20 @@ final class AudioSupport implements AutoCloseable {
     }
   }
 
-  static JsonNode probe(Path file) {
-    ProcessResult r =
-        new DefaultProcessRunner()
-            .run(
-                List.of(
-                    "ffprobe",
-                    "-v",
-                    "error",
-                    "-show_streams",
-                    "-show_format",
-                    "-of",
-                    "json",
-                    file.toString()),
-                Duration.ofSeconds(15));
+  static JsonNode probe(Path file, String... options) {
+    var args =
+        new ArrayList<>(
+            List.of(
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_streams",
+                "-show_format",
+                "-of",
+                "json",
+                file.toString()));
+    args.addAll(1, List.of(options));
+    ProcessResult r = new DefaultProcessRunner().run(args, Duration.ofSeconds(15));
     assertThat(r.exitCode()).as(r.stderr()).isZero();
     return PipelineWorld.json(r.stdout());
   }
@@ -155,7 +185,7 @@ final class AudioSupport implements AutoCloseable {
           boolean oversized =
               fault.equals("always-large")
                   || (fault.equals("retry") && encodes.size() == 1)
-                  || (fault.equals("conversion") && !args.contains("-ac"));
+                  || (fault.equals("conversion") && args.get(args.indexOf("-ac") + 1).equals("2"));
           if (oversized) {
             Files.writeString(out, "oversized fixture");
             resize(out, firstSize);

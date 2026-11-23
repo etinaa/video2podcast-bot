@@ -215,6 +215,12 @@ public class AudioAssertionSteps {
     media(false);
   }
 
+  @Then("the uploaded audio has {int} channels at most")
+  public void channelLimit(int maximum) throws Exception {
+    assertThat(w.audio.uploadedMedia().path("streams").path(0).path("channels").asInt())
+        .isBetween(1, maximum);
+  }
+
   @Then("the uploaded bytes form a nonempty M4A with mono AAC audio and no video stream")
   public void mono() throws Exception {
     media(true);
@@ -239,7 +245,7 @@ public class AudioAssertionSteps {
     assertThat(w.audio.encodes).hasSize(1);
     assertThat(w.audio.encodes.getFirst())
         .containsSubsequence("-b:a", "128k")
-        .doesNotContain("-ac");
+        .containsSubsequence("-ac", "2");
     assertThat(probe.path("streams").path(0).path("channels").asInt())
         .isEqualTo(
             AudioSupport.probe(w.audio.source).path("streams").findValue("channels").asInt());
@@ -285,7 +291,7 @@ public class AudioAssertionSteps {
     assertThat(w.audio.encodes).hasSize(2);
     assertThat(w.audio.encodes.getFirst())
         .containsSubsequence("-b:a", "128k")
-        .doesNotContain("-ac");
+        .containsSubsequence("-ac", "2");
     assertThat(w.audio.encodes.getLast())
         .containsSubsequence("-ac", "1")
         .containsSubsequence("-b:a", "128k");
