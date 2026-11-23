@@ -337,11 +337,12 @@ Work that is not scheduled in a phase. Technical debt carries the `[debt]` mark.
   - Verify: `./mvnw verify -Dno-it`, `./mvnw clean verify`, `-Pmutation` at least 85%. The owner checks the audio message in Telegram. Technical task.
   - Depends on: T13
   - Files: `bot/TelegramGateway.java` and its implementation, `bot/DeliveryCallbackHandler.java`, unit tests, a scenario in `src/features/T13-audio-button.feature` and its steps in `src/it`.
-- [ ] **TD10 [debt]: Show seconds in the summary duration ("1m 54s" instead of "1m")** (S)
-  - Found at the T17 smoke run (2026-11-23): a 1:54 video shows `Duration: 1m`. `SummaryMessageFormatter.formatDuration` drops the seconds whenever there is at least one minute (the T10 format `1h 42m`). This is the current, intended behaviour, so it is a change of the format and needs the owner's decision on the exact format before work starts.
+- [~] **TD10 [debt]: Show seconds in the summary duration ("1m 54s" instead of "1m")** (S)
+  - Found at the T17 smoke run (2026-11-23): a 1:54 video shows `Duration: 1m`. `SummaryMessageFormatter.formatDuration` drops the seconds whenever there is at least one minute. The owner chose the format on 2026-11-23: always show seconds, zero units are left out.
   - Acceptance:
-    - The owner picks the format (for example `1m 54s` below an hour, `1h 42m` from an hour up, or `1m 54s` everywhere under 10 minutes).
-    - `formatDuration` and the T10/T11 scenarios and unit tests that name the old format are updated. The summary length limit of 1,500 characters is unaffected.
+    - `formatDuration` gives hours, minutes and seconds with zero units left out: `114` → `1m 54s`, `120` → `2m`, `3659` → `1h 59s`, `3600` → `1h`, `9390` → `2h 36m 30s`, `45` → `45s`, `0` → `0s`. A negative value still does not throw.
+    - Nothing else in the summary changes: title, bullets, the 1,500-character limit, HTML escaping.
+    - The unit tests and the T10/T11 scenarios that name the old format are updated, and a new T11 outline checks the duration line for several stored durations. `SPEC.md` keeps its example (`Duration: 1h 42m` is still right); its description of the format is updated if it has one, with the owner's approval.
   - Verify: `./mvnw verify -Dno-it`, `./mvnw clean verify`, `-Pmutation` at least 85%. Technical task.
   - Depends on: T10, T11
   - Files: `bot/SummaryMessageFormatter.java`, its unit tests, the T10/T11 features that show the duration, and their steps in `src/it`.

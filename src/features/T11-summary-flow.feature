@@ -302,3 +302,21 @@ Feature: Receive a summary and download buttons after sending a video link
       | a successful summary         | the final "Done." status edit |
       | a terminal Whisper failure   | the failure sentence send    |
       | a terminal Whisper failure   | the final "Failed." status edit |
+
+  @TD10 @R5
+  Scenario Outline: The summary shows the duration with seconds
+    Given the media page title is "Budget meeting"
+    And the media page duration is <seconds> seconds
+    And the Ollama mock returns valid prompt counts and content "- The budget meeting is on Tuesday."
+    When the user sends "http://videos.example/video" in a private chat
+    Then the summary contains the duration line "Duration: <line>"
+
+    Examples:
+      | seconds | line      |
+      | 45      | 45s       |
+      | 114     | 1m 54s    |
+      | 120     | 2m        |
+      | 3600    | 1h        |
+      | 3659    | 1h 59s    |
+      | 9390    | 2h 36m 30s |
+      | 10800   | 3h        |
