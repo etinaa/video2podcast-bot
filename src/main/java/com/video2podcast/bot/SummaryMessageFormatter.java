@@ -38,16 +38,28 @@ final class SummaryMessageFormatter {
     return clean.substring(0, end) + ELLIPSIS;
   }
 
-  /** {@code 1h 42m}, {@code 5m} or {@code 45s}; minutes are floored. */
+  /**
+   * {@code 2h 36m 30s}, {@code 1m 54s} or {@code 45s}; zero units are left out, negatives read 0s.
+   */
   static String formatDuration(long seconds) {
-    long hours = seconds / SECONDS_PER_HOUR;
-    long minutes = seconds % SECONDS_PER_HOUR / SECONDS_PER_MINUTE;
-    if (hours > 0) {
-      return hours + "h " + minutes + "m";
+    long total = Math.max(seconds, 0);
+    long hours = total / SECONDS_PER_HOUR;
+    long minutes = total % SECONDS_PER_HOUR / SECONDS_PER_MINUTE;
+    long secs = total % SECONDS_PER_MINUTE;
+    StringBuilder out = new StringBuilder();
+    appendUnit(out, hours, 'h');
+    appendUnit(out, minutes, 'm');
+    appendUnit(out, secs, 's');
+    return out.length() == 0 ? "0s" : out.toString();
+  }
+
+  private static void appendUnit(StringBuilder out, long value, char unit) {
+    if (value == 0) {
+      return;
     }
-    if (minutes > 0) {
-      return minutes + "m";
+    if (out.length() > 0) {
+      out.append(' ');
     }
-    return seconds + "s";
+    out.append(value).append(unit);
   }
 }

@@ -11,16 +11,19 @@ class SummaryMessageFormatterTest {
   @ParameterizedTest
   @CsvSource({
     "0,0s",
+    "-5,0s",
     "45,45s",
     "59,59s",
     "60,1m",
-    "119,1m",
-    "300,5m",
-    "3599,59m",
-    "3600,1h 0m",
-    "3659,1h 0m",
+    "114,1m 54s",
+    "120,2m",
+    "3599,59m 59s",
+    "3600,1h",
+    "3659,1h 59s",
+    "3660,1h 1m",
     "6120,1h 42m",
-    "10800,3h 0m"
+    "9390,2h 36m 30s",
+    "10800,3h"
   })
   void formatsTheDuration(long seconds, String expected) {
     assertThat(SummaryMessageFormatter.formatDuration(seconds)).isEqualTo(expected);
