@@ -7,6 +7,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
+import java.util.Optional;
+import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -14,6 +17,8 @@ import org.slf4j.LoggerFactory;
 public class FfmpegRunner {
 
   private static final Logger LOG = LoggerFactory.getLogger(FfmpegRunner.class);
+
+  private static final Pattern CODEC_NAME = Pattern.compile("[a-z0-9_]+");
 
   private final ProcessRunner runner;
   private final AppProperties.Jobs jobs;
@@ -100,9 +105,7 @@ public class FfmpegRunner {
     args.addAll(List.of("ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i"));
     args.add(source.toString());
     args.add("-vn");
-    if (mono) {
-      args.addAll(List.of("-ac", "1"));
-    }
+    args.addAll(List.of("-ac", mono ? "1" : "2"));
     args.addAll(List.of("-c:a", "aac", "-b:a", kbps + "k", "-movflags", "+faststart"));
     args.add(target.toString());
     try {
@@ -115,6 +118,50 @@ public class FfmpegRunner {
       throw e;
     }
     return target;
+  }
+
+  /**
+   * The codec name of the first audio stream of {@code source} as ffprobe reports it (for example
+   * {@code aac}, {@code mp3}, {@code eac3}), or empty when it cannot be told: ffprobe could not
+   * run, exited with an error or printed nothing usable.
+   *
+   * @throws JobFailure TIMEOUT
+   */
+  public Optional<String> probeAudioCodec(Path source) {
+    ProcessResult result;
+    try {
+      result =
+          runner.run(
+              List.of(
+                  "ffprobe",
+                  "-v",
+                  "error",
+                  "-select_streams",
+                  "a:0",
+                  "-show_entries",
+                  "stream=codec_name",
+                  "-of",
+                  "default=noprint_wrappers=1:nokey=1",
+                  source.toString()),
+              jobs.ffmpegTimeout());
+    } catch (JobFailure e) {
+      if (e.kind() == JobFailure.Kind.TIMEOUT) {
+        throw e;
+      }
+      LOG.warn("ffprobe could not run", e);
+      return Optional.empty();
+    }
+    if (result.exitCode() != 0) {
+      if (LOG.isWarnEnabled()) {
+        LOG.warn(
+            "ffprobe exited with {}: {}",
+            result.exitCode(),
+            YtDlpClient.forLog(result.stderr() == null ? "" : result.stderr()));
+      }
+      return Optional.empty();
+    }
+    String codec = result.stdout() == null ? "" : result.stdout().strip().toLowerCase(Locale.ROOT);
+    return CODEC_NAME.matcher(codec).matches() ? Optional.of(codec) : Optional.empty();
   }
 
   private static void deleteQuietly(Path file) {

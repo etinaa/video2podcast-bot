@@ -12,8 +12,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
+import java.util.Optional;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class FfmpegRunnerTest {
 
@@ -242,7 +245,7 @@ class FfmpegRunnerTest {
   }
 
   @Test
-  void encodeM4aKeepsTheChannelsWhenNotMono() {
+  void encodeM4aLimitsAMultichannelSourceToStereoWhenNotMono() {
     Path target = dir.resolve("out.m4a");
     FakeProcessRunner runner =
         new FakeProcessRunner((args, timeout) -> {
@@ -252,7 +255,83 @@ class FfmpegRunnerTest {
 
     new FfmpegRunner(runner, JOBS).encodeM4a(dir.resolve("s.webm"), target, 128, false);
 
-    assertThat(runner.calls.get(0)).doesNotContain("-ac").contains("128k");
+    assertThat(runner.calls.get(0)).contains("-ac", "2", "128k").doesNotContain("1");
+  }
+
+  @Test
+  void probeAudioCodecCommandAndResult() {
+    Path source = dir.resolve("source.m4a");
+    FakeProcessRunner runner = FakeProcessRunner.returning(new ProcessResult(0, "eac3\n", ""));
+
+    Optional<String> codec = new FfmpegRunner(runner, JOBS).probeAudioCodec(source);
+
+    assertThat(codec).contains("eac3");
+    assertThat(runner.calls.get(0))
+        .containsExactly(
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=codec_name",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            source.toString());
+    assertThat(runner.timeouts.get(0)).isEqualTo(JOBS.ffmpegTimeout());
+  }
+
+  @Test
+  void probeAudioCodecLowercasesAndTrims() {
+    FakeProcessRunner runner =
+        FakeProcessRunner.returning(new ProcessResult(0, "\n  AAC \r\n", ""));
+
+    assertThat(new FfmpegRunner(runner, JOBS).probeAudioCodec(dir.resolve("s.m4a")))
+        .contains("aac");
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"", "\n", "   ", "N/A?", "two words", "aac; rm"})
+  void probeAudioCodecIsUnknownWithoutAUsableName(String stdout) {
+    FakeProcessRunner runner = FakeProcessRunner.returning(new ProcessResult(0, stdout, ""));
+
+    assertThat(new FfmpegRunner(runner, JOBS).probeAudioCodec(dir.resolve("s.m4a"))).isEmpty();
+  }
+
+  @Test
+  void probeAudioCodecIsUnknownOnANullStdout() {
+    FakeProcessRunner runner = FakeProcessRunner.returning(new ProcessResult(0, null, ""));
+
+    assertThat(new FfmpegRunner(runner, JOBS).probeAudioCodec(dir.resolve("s.m4a"))).isEmpty();
+  }
+
+  @Test
+  void probeAudioCodecIsUnknownOnAnExitCode() {
+    FakeProcessRunner runner =
+        FakeProcessRunner.returning(new ProcessResult(1, "aac", "moov atom not found"));
+
+    assertThat(new FfmpegRunner(runner, JOBS).probeAudioCodec(dir.resolve("s.m4a"))).isEmpty();
+  }
+
+  @Test
+  void probeAudioCodecIsUnknownWhenTheProgramCannotRun() {
+    FakeProcessRunner runner =
+        new FakeProcessRunner((args, timeout) -> {
+          throw JobFailure.of(Kind.FAILED);
+        });
+
+    assertThat(new FfmpegRunner(runner, JOBS).probeAudioCodec(dir.resolve("s.m4a"))).isEmpty();
+  }
+
+  @Test
+  void probeAudioCodecPassesATimeoutOn() {
+    FakeProcessRunner runner =
+        new FakeProcessRunner((args, timeout) -> {
+          throw JobFailure.of(Kind.TIMEOUT);
+        });
+
+    assertKind(
+        () -> new FfmpegRunner(runner, JOBS).probeAudioCodec(dir.resolve("s.m4a")), Kind.TIMEOUT);
   }
 
   @Test

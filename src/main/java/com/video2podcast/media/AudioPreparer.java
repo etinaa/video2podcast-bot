@@ -9,9 +9,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Makes the audio of a job fit Telegram's upload limit. A small MP3 or M4A is sent as it is, any
- * other small source becomes M4A, and a big one is compressed to mono AAC. Knows nothing about
- * Telegram or job state.
+ * Makes the audio of a job fit Telegram's upload limit. A small MP3 or M4A whose codec is MP3 or
+ * AAC is sent as it is, any other small source becomes M4A, and a big one is compressed to mono
+ * AAC. Knows nothing about Telegram or job state.
  */
 public class AudioPreparer {
 
@@ -41,7 +41,7 @@ public class AudioPreparer {
     Path out = source.resolveSibling(OUTPUT_NAME);
     try {
       if (size <= LIMIT_BYTES) {
-        if (isMp3OrM4a(source)) {
+        if (isPlayable(source)) {
           return new PreparedAudio(source, PreparedAudio.Mode.UNCHANGED, 0);
         }
         ffmpeg.encodeM4a(source, out, CONVERT_KBPS, false);
@@ -85,13 +85,22 @@ public class AudioPreparer {
     return size > 0 && size < LIMIT_BYTES;
   }
 
-  private static boolean isMp3OrM4a(Path file) {
+  /** An MP3 holding MP3 or an M4A holding AAC; only the codec shows what a player can play. */
+  private boolean isPlayable(Path file) {
+    String expected = expectedCodec(file);
+    return expected != null && ffmpeg.probeAudioCodec(file).filter(expected::equals).isPresent();
+  }
+
+  private static String expectedCodec(Path file) {
     Path fileName = file.getFileName();
     if (fileName == null) {
-      return false;
+      return null;
     }
     String name = fileName.toString().toLowerCase(Locale.ROOT);
-    return name.endsWith(".mp3") || name.endsWith(".m4a");
+    if (name.endsWith(".mp3")) {
+      return "mp3";
+    }
+    return name.endsWith(".m4a") ? "aac" : null;
   }
 
   private static long sizeOf(Path file) {

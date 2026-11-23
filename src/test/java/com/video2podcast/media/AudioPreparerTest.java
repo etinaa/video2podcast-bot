@@ -59,6 +59,15 @@ class AudioPreparerTest {
     });
   }
 
+  /** Answers ffprobe with {@code codec} and every ffmpeg call like {@link #ffmpeg}. */
+  private FakeProcessRunner probing(String codec, ToLongFunction<Integer> sizeForKbps) {
+    FakeProcessRunner encoder = ffmpeg(sizeForKbps);
+    return new FakeProcessRunner((args, timeout) ->
+        "ffprobe".equals(args.get(0))
+            ? new ProcessResult(0, codec + "\n", "")
+            : encoder.run(args, timeout));
+  }
+
   private AudioPreparer preparer(FakeProcessRunner runner) {
     return new AudioPreparer(new FfmpegRunner(runner, JOBS));
   }
@@ -68,30 +77,120 @@ class AudioPreparerTest {
   }
 
   private static boolean mono(List<String> args) {
-    return args.contains("-ac");
+    return args.contains("-ac") && "1".equals(args.get(args.indexOf("-ac") + 1));
   }
 
   @ParameterizedTest
-  @CsvSource({"source.mp3", "source.m4a", "SOURCE.MP3", "Source.M4A"})
-  void aSmallMp3OrM4aIsSentUnchanged(String name) {
+  @CsvSource({"source.mp3, mp3", "source.m4a, aac", "SOURCE.MP3, mp3", "Source.M4A, aac"})
+  void aSmallMp3OrM4aWithAPlayableCodecIsSentUnchanged(String name, String codec) {
     Path source = source(name, 1000);
-    FakeProcessRunner runner = ffmpeg(kbps -> 10);
+    FakeProcessRunner runner = probing(codec, kbps -> 10);
 
     PreparedAudio result = preparer(runner).prepare(source, 60);
 
     assertThat(result.mode()).isEqualTo(Mode.UNCHANGED);
     assertThat(result.file()).isSameAs(source);
     assertThat(result.kbps()).isZero();
-    assertThat(runner.calls).isEmpty();
+    assertThat(runner.calls).hasSize(1);
+    assertThat(runner.calls.get(0)).startsWith("ffprobe").contains(source.toString());
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+    "source.m4a, eac3",
+    "source.m4a, opus",
+    "source.m4a, mp3",
+    "source.m4a, ac3",
+    "source.mp3, aac",
+    "source.mp3, opus",
+    "source.MP3, eac3"
+  })
+  void aSmallMp3OrM4aWithAnotherCodecIsConvertedToStereo(String name, String codec) {
+    Path source = source(name, 1000);
+    FakeProcessRunner runner = probing(codec, kbps -> 5000);
+
+    PreparedAudio result = preparer(runner).prepare(source, 60);
+
+    assertThat(result.mode()).isEqualTo(Mode.CONVERTED);
+    assertThat(result.kbps()).isEqualTo(128);
+    assertThat(result.file()).isEqualTo(dir.resolve("out.m4a"));
+    List<String> encode = runner.calls.get(1);
+    assertThat(encode).startsWith("ffmpeg").contains("-ac", "2", "128k");
+  }
+
+  @ParameterizedTest
+  @CsvSource(
+      value = {"0, ''", "0, 'N/A'", "1, aac"},
+      quoteCharacter = '\'')
+  void aSmallMp3OrM4aWithAnUnknownCodecIsConverted(int exit, String stdout) {
+    Path source = source("source.m4a", 1000);
+    FakeProcessRunner runner =
+        new FakeProcessRunner((args, timeout) -> {
+          if ("ffprobe".equals(args.get(0))) {
+            return new ProcessResult(exit, stdout, "boom");
+          }
+          sized(Path.of(args.get(args.size() - 1)), 5000);
+          return new ProcessResult(0, "", "");
+        });
+
+    assertThat(preparer(runner).prepare(source, 60).mode()).isEqualTo(Mode.CONVERTED);
+  }
+
+  @Test
+  void aMissingFfprobeCountsAsAnUnknownCodec() {
+    Path source = source("source.mp3", 1000);
+    FakeProcessRunner runner =
+        new FakeProcessRunner((args, timeout) -> {
+          if ("ffprobe".equals(args.get(0))) {
+            throw JobFailure.of(Kind.FAILED);
+          }
+          sized(Path.of(args.get(args.size() - 1)), 5000);
+          return new ProcessResult(0, "", "");
+        });
+
+    assertThat(preparer(runner).prepare(source, 60).mode()).isEqualTo(Mode.CONVERTED);
+  }
+
+  @Test
+  void aProbeTimeoutIsPassedOnAndLeavesNoOutput() {
+    Path source = source("source.m4a", 1000);
+    FakeProcessRunner runner =
+        new FakeProcessRunner((args, timeout) -> {
+          throw JobFailure.of(Kind.TIMEOUT);
+        });
+
+    assertThatThrownBy(() -> preparer(runner).prepare(source, 60))
+        .isInstanceOfSatisfying(
+            JobFailure.class, f -> assertThat(f.kind()).isEqualTo(Kind.TIMEOUT));
+    assertThat(dir.resolve("out.m4a")).doesNotExist();
   }
 
   @Test
   void anMp3ExactlyAtTheLimitIsUnchanged() {
     Path source = source("source.mp3", LIMIT);
-    FakeProcessRunner runner = ffmpeg(kbps -> 10);
+    FakeProcessRunner runner = probing("mp3", kbps -> 10);
 
     assertThat(preparer(runner).prepare(source, 60).mode()).isEqualTo(Mode.UNCHANGED);
-    assertThat(runner.calls).isEmpty();
+  }
+
+  @Test
+  void anOversizedSourceIsNotProbed() {
+    Path source = source("source.m4a", LIMIT + 1);
+    FakeProcessRunner runner = probing("aac", kbps -> 1000);
+
+    preparer(runner).prepare(source, 60);
+
+    assertThat(runner.calls).noneMatch(args -> "ffprobe".equals(args.get(0)));
+  }
+
+  @Test
+  void aSourceWithAnotherExtensionIsNotProbed() {
+    Path source = source("source.webm", 1000);
+    FakeProcessRunner runner = probing("aac", kbps -> 5000);
+
+    preparer(runner).prepare(source, 60);
+
+    assertThat(runner.calls).noneMatch(args -> "ffprobe".equals(args.get(0)));
   }
 
   @Test
@@ -120,6 +219,7 @@ class AudioPreparerTest {
     assertThat(kbpsOf(runner)).containsExactly("128k");
     List<String> args = runner.calls.get(0);
     assertThat(mono(args)).isFalse();
+    assertThat(args).contains("-ac", "2");
     assertThat(args).contains("-vn", "aac", "+faststart").contains(source.toString());
     assertThat(source).exists();
   }
