@@ -1,0 +1,25 @@
+diff --git a/src/it/java/com/video2podcast/functional/AudioAssertionSteps.java b/src/it/java/com/video2podcast/functional/AudioAssertionSteps.java
+index 5c5edf5..997b216 100644
+--- a/src/it/java/com/video2podcast/functional/AudioAssertionSteps.java
++++ b/src/it/java/com/video2podcast/functional/AudioAssertionSteps.java
+@@ -71,6 +71,20 @@ public class AudioAssertionSteps {
+     part("performer", value);
+   }
+ 
++  @Then("the sendAudio multipart duration is {string}")
++  public void duration(String value) {
++    var duration = w.calls("sendAudio").getLast().request().getPart("duration");
++    assertThat(duration).as("sendAudio duration field").isNotNull();
++    assertThat(duration.getBody().asString()).isEqualTo(value);
++  }
++
++  @Then("the sendAudio multipart has no duration field")
++  public void noDuration() {
++    assertThat(w.calls("sendAudio").getLast().request().getPart("duration"))
++        .as("sendAudio duration field")
++        .isNull();
++  }
++
+   @Then("the sendAudio multipart caption is exactly {string}")
+   public void caption(String value) {
+     part("caption", value);

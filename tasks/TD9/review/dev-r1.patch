@@ -1,0 +1,193 @@
+diff --git a/src/main/java/com/video2podcast/bot/DeliveryCallbackHandler.java b/src/main/java/com/video2podcast/bot/DeliveryCallbackHandler.java
+index 8c745b0..62cd892 100644
+--- a/src/main/java/com/video2podcast/bot/DeliveryCallbackHandler.java
++++ b/src/main/java/com/video2podcast/bot/DeliveryCallbackHandler.java
+@@ -111,7 +111,8 @@ public class DeliveryCallbackHandler {
+           FileNames.audioName(title, extensionOf(prepared.file())),
+           title,
+           PERFORMER,
+-          caption(prepared));
++          caption(prepared),
++          job.durationSeconds());
+     } catch (RuntimeException e) {
+       LOG.error("Could not send the audio of job {}", jobId, e);
+       failAudio(job, jobId);
+diff --git a/src/main/java/com/video2podcast/bot/TelegramClientGateway.java b/src/main/java/com/video2podcast/bot/TelegramClientGateway.java
+index 6829571..a8ec8b9 100644
+--- a/src/main/java/com/video2podcast/bot/TelegramClientGateway.java
++++ b/src/main/java/com/video2podcast/bot/TelegramClientGateway.java
+@@ -81,7 +81,13 @@ public class TelegramClientGateway implements TelegramGateway {
+ 
+   @Override
+   public void sendAudio(
+-      long chatId, Path file, String fileName, String title, String performer, String caption) {
++      long chatId,
++      Path file,
++      String fileName,
++      String title,
++      String performer,
++      String caption,
++      long duration) {
+     SendAudio request =
+         SendAudio.builder()
+             .chatId(chatId)
+@@ -90,6 +96,7 @@ public class TelegramClientGateway implements TelegramGateway {
+             .performer(performer)
+             .caption(caption)
+             .parseMode(HTML)
++            .duration(duration > 0 ? (int) Math.min(duration, Integer.MAX_VALUE) : null)
+             .build();
+     call(() -> client.execute(request));
+   }
+diff --git a/src/main/java/com/video2podcast/bot/TelegramGateway.java b/src/main/java/com/video2podcast/bot/TelegramGateway.java
+index 148b98d..e327633 100644
+--- a/src/main/java/com/video2podcast/bot/TelegramGateway.java
++++ b/src/main/java/com/video2podcast/bot/TelegramGateway.java
+@@ -27,10 +27,17 @@ public interface TelegramGateway {
+    *
+    * @param fileName shown to the user, e.g. "Budget meeting.m4a"
+    * @param caption HTML, may be null
++   * @param duration length in seconds shown by the player; zero or negative leaves it out
+    * @throws TelegramGatewayException if Telegram refuses or cannot be reached
+    */
+   void sendAudio(
+-      long chatId, Path file, String fileName, String title, String performer, String caption);
++      long chatId,
++      Path file,
++      String fileName,
++      String title,
++      String performer,
++      String caption,
++      long duration);
+ 
+   /** Acknowledges a button tap, optionally showing a short notice to the user. */
+   void answerCallback(String callbackQueryId, String text);
+diff --git a/src/test/java/com/video2podcast/bot/AudioButtonTest.java b/src/test/java/com/video2podcast/bot/AudioButtonTest.java
+index fa31cb2..e3efaed 100644
+--- a/src/test/java/com/video2podcast/bot/AudioButtonTest.java
++++ b/src/test/java/com/video2podcast/bot/AudioButtonTest.java
+@@ -175,6 +175,7 @@ class AudioButtonTest {
+           assertThat(audio.title()).isEqualTo("Budget meeting");
+           assertThat(audio.performer()).isEqualTo("Video2Podcast");
+           assertThat(audio.caption()).isEqualTo("Original audio, not compressed.");
++          assertThat(audio.duration()).isEqualTo(10_800);
+         });
+     assertThat(labels())
+         .containsExactly("Preparing audio…|Download transcript", "Audio sent|Download transcript");
+diff --git a/src/test/java/com/video2podcast/bot/RecordingGateway.java b/src/test/java/com/video2podcast/bot/RecordingGateway.java
+index 666f6af..7cd1837 100644
+--- a/src/test/java/com/video2podcast/bot/RecordingGateway.java
++++ b/src/test/java/com/video2podcast/bot/RecordingGateway.java
+@@ -50,7 +50,13 @@ class RecordingGateway implements TelegramGateway {
+   final List<Document> documents = new CopyOnWriteArrayList<>();
+ 
+   record Audio(
+-      long chatId, Path file, String fileName, String title, String performer, String caption) {}
++      long chatId,
++      Path file,
++      String fileName,
++      String title,
++      String performer,
++      String caption,
++      long duration) {}
+ 
+   final List<Audio> audios = new CopyOnWriteArrayList<>();
+ 
+@@ -82,11 +88,17 @@ class RecordingGateway implements TelegramGateway {
+ 
+   @Override
+   public void sendAudio(
+-      long chatId, Path file, String fileName, String title, String performer, String caption) {
++      long chatId,
++      Path file,
++      String fileName,
++      String title,
++      String performer,
++      String caption,
++      long duration) {
+     if (failAudio) {
+       throw new TelegramGatewayException("cannot send audio", null);
+     }
+-    audios.add(new Audio(chatId, file, fileName, title, performer, caption));
++    audios.add(new Audio(chatId, file, fileName, title, performer, caption, duration));
+   }
+ 
+   @Override
+diff --git a/src/test/java/com/video2podcast/bot/TelegramClientGatewayTest.java b/src/test/java/com/video2podcast/bot/TelegramClientGatewayTest.java
+index b09db2c..989fc4a 100644
+--- a/src/test/java/com/video2podcast/bot/TelegramClientGatewayTest.java
++++ b/src/test/java/com/video2podcast/bot/TelegramClientGatewayTest.java
+@@ -4,7 +4,9 @@ import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
+ import static com.github.tomakehurst.wiremock.client.WireMock.containing;
+ import static com.github.tomakehurst.wiremock.client.WireMock.equalTo;
+ import static com.github.tomakehurst.wiremock.client.WireMock.equalToJson;
++import static com.github.tomakehurst.wiremock.client.WireMock.matching;
+ import static com.github.tomakehurst.wiremock.client.WireMock.matchingJsonPath;
++import static com.github.tomakehurst.wiremock.client.WireMock.notMatching;
+ import static com.github.tomakehurst.wiremock.client.WireMock.post;
+ import static com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor;
+ import static com.github.tomakehurst.wiremock.client.WireMock.urlPathEqualTo;
+@@ -21,6 +23,8 @@ import org.junit.jupiter.api.BeforeEach;
+ import org.junit.jupiter.api.Test;
+ import org.junit.jupiter.api.extension.RegisterExtension;
+ import org.junit.jupiter.api.io.TempDir;
++import org.junit.jupiter.params.ParameterizedTest;
++import org.junit.jupiter.params.provider.ValueSource;
+ import org.telegram.telegrambots.client.okhttp.OkHttpTelegramClient;
+ import org.telegram.telegrambots.meta.TelegramUrl;
+ 
+@@ -186,7 +190,7 @@ class TelegramClientGatewayTest {
+             .willReturn(
+                 aResponse().withBody(MESSAGE_OK).withHeader("Content-Type", "application/json")));
+ 
+-    gateway.sendAudio(5L, file, "Episode.m4a", "Episode", "Channel", "Converted &amp; done");
++    gateway.sendAudio(5L, file, "Episode.m4a", "Episode", "Channel", "Converted &amp; done", 114);
+ 
+     telegram.verify(
+         postRequestedFor(urlPathEqualTo(path("sendAudio")))
+@@ -194,7 +198,25 @@ class TelegramClientGatewayTest {
+             .withRequestBody(containing("Converted &amp; done"))
+             .withRequestBody(containing("HTML"))
+             .withRequestBody(containing("Episode"))
+-            .withRequestBody(containing("Channel")));
++            .withRequestBody(containing("Channel"))
++            .withRequestBody(matching("(?s).*name=\"duration\"[^\\n]*\\n[^\\n]*\\n\\s*114\\s.*")));
++  }
++
++  @ParameterizedTest
++  @ValueSource(longs = {0, -5})
++  void sendAudioLeavesOutTheDurationWhenItIsNotPositive(long seconds) throws Exception {
++    Path file = Files.writeString(tempDir.resolve("audio.m4a"), "audio bytes");
++    telegram.stubFor(
++        post(urlPathEqualTo(path("sendAudio")))
++            .willReturn(
++                aResponse().withBody(MESSAGE_OK).withHeader("Content-Type", "application/json")));
++
++    gateway.sendAudio(5L, file, "Episode.m4a", "Episode", "Channel", null, seconds);
++
++    telegram.verify(
++        postRequestedFor(urlPathEqualTo(path("sendAudio")))
++            .withRequestBody(containing("filename=\"Episode.m4a\""))
++            .withRequestBody(notMatching("(?s).*name=\"duration\".*")));
+   }
+ 
+   @Test
+diff --git a/src/test/java/com/video2podcast/bot/UrlMessageHandlerTest.java b/src/test/java/com/video2podcast/bot/UrlMessageHandlerTest.java
+index 73da14c..48097fb 100644
+--- a/src/test/java/com/video2podcast/bot/UrlMessageHandlerTest.java
++++ b/src/test/java/com/video2podcast/bot/UrlMessageHandlerTest.java
+@@ -100,7 +100,13 @@ class UrlMessageHandlerTest {
+ 
+     @Override
+     public void sendAudio(
+-        long chatId, Path file, String fileName, String title, String performer, String caption) {
++        long chatId,
++        Path file,
++        String fileName,
++        String title,
++        String performer,
++        String caption,
++        long duration) {
+       throw new UnsupportedOperationException();
+     }
+ 

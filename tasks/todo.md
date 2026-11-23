@@ -329,7 +329,7 @@ Work that is not scheduled in a phase. Technical debt carries the `[debt]` mark.
   - Verify: `./mvnw verify -Dno-it`, `./mvnw clean verify`, `-Pmutation` at least 85%. The owner checks the new text in Telegram during Checkpoint 4. Technical task: Developer and Tester, both code reviewers; no Analyst, no Architect.
   - Depends on: T12, T13, T14
   - Files: `bot/DeliveryCallbackHandler.java`, its unit tests, `src/features/T12-transcript-button.feature`, `T13-audio-button.feature`, `T14-retention.feature` (the Tester updates the matching steps under `src/it`), `SPEC.md` if it quotes the text
-- [~] **TD9 [debt]: Send the audio duration to Telegram so the player shows it before download** (S)
+- [x] **TD9 [debt]: Send the audio duration to Telegram so the player shows it before download** (S)
   - Found at the T17 smoke run (2026-11-23): the converted M4A plays, but its message shows `00:00` in the Telegram chat until it is opened. `sendAudio` is called without the `duration` parameter, while `job.json` already stores `durationSeconds`.
   - Acceptance:
     - `TelegramGateway.sendAudio` gets a `duration` parameter (seconds) and the multipart request carries the field `duration`. `DeliveryCallbackHandler` takes the value from the stored `job.durationSeconds()`; when it is zero or negative the field is not sent. The tap flow, texts, states, captions and file names do not change.
