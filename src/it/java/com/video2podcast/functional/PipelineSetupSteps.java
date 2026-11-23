@@ -175,6 +175,12 @@ public class PipelineSetupSteps {
     w.retitle(t);
   }
 
+  @Given("the media page duration is {long} seconds")
+  public void pageDuration(long seconds) throws Exception {
+    for (var e : new ArrayList<>(w.media.entrySet()))
+      w.fixture(e.getValue().seconds(), e.getValue().ext(), e.getKey(), seconds);
+  }
+
   @Given("the media page title is {string} with decoded whitespace")
   public void whitespace(String t) throws Exception {
     w.retitle(t.replace("\\t", "\t").replace("\\n", "\n"));

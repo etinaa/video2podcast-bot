@@ -188,6 +188,10 @@ public class PipelineWorld implements AutoCloseable {
   }
 
   void fixture(long duration, String ext, String url) throws Exception {
+    fixture(duration, ext, url, duration);
+  }
+
+  void fixture(long duration, String ext, String url, long pageDuration) throws Exception {
     seconds = duration;
     extension = ext;
     Path file = MediaFixtures.recording(duration, ext);
@@ -210,7 +214,7 @@ public class PipelineWorld implements AutoCloseable {
                     "name",
                     title,
                     "duration",
-                    "PT" + duration + "S",
+                    "PT" + pageDuration + "S",
                     "contentUrl",
                     "http://" + uri.getHost() + mediaPath))
             + "</script></head><body></body></html>";

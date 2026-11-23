@@ -185,6 +185,12 @@ public class PipelineAssertionSteps {
     assertThat(w.summaryText()).contains("<b>" + title + "</b>", duration, "• " + bullet);
   }
 
+  @Then("the summary contains the duration line {string}")
+  public void durationLine(String line) {
+    assertThat(w.summaryText().lines().filter(s -> s.startsWith("Duration: ")).toList())
+        .containsExactly(line);
+  }
+
   @Then("the summary keyboard contains exactly {string} and {string}")
   public void buttons(String a, String b) {
     assertThat(buttons().stream().map(n -> n.path("text").asText()).toList()).containsExactly(a, b);
