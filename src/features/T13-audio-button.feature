@@ -461,3 +461,17 @@ Feature: Prepare retained audio on demand and deliver it once
       | source.m4a | an E-AC-3 5.1 audio stream in an MP4 container |
       | source.m4a | an Opus audio stream in an MP4 container       |
       | source.mp3 | an AAC audio stream in an ADTS container       |
+
+  @TD9 @R2
+  Scenario Outline: The audio upload carries the stored duration
+    Given the stored job duration is <stored> seconds
+    And the retained audio source is a real ffmpeg-generated 60 second "source.m4a" below 1000000 bytes
+    When the user taps "audio:11111111-1111-4111-8111-111111111111" on private message 701 in chat 101
+    Then the Telegram mock receives one successful sendAudio
+    And the sendAudio multipart <duration>
+    Examples:
+      | stored | duration                    |
+      | 60     | duration is "60"            |
+      | 7322   | duration is "7322"          |
+      | 0      | has no duration field       |
+      | -5     | has no duration field       |
