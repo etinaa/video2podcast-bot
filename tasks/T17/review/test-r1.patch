@@ -1,0 +1,179 @@
+diff --git a/src/it/java/com/video2podcast/functional/AudioAssertionSteps.java b/src/it/java/com/video2podcast/functional/AudioAssertionSteps.java
+index f8878a5..5c5edf5 100644
+--- a/src/it/java/com/video2podcast/functional/AudioAssertionSteps.java
++++ b/src/it/java/com/video2podcast/functional/AudioAssertionSteps.java
+@@ -215,6 +215,12 @@ public class AudioAssertionSteps {
+     media(false);
+   }
+ 
++  @Then("the uploaded audio has {int} channels at most")
++  public void channelLimit(int maximum) throws Exception {
++    assertThat(w.audio.uploadedMedia().path("streams").path(0).path("channels").asInt())
++        .isBetween(1, maximum);
++  }
++
+   @Then("the uploaded bytes form a nonempty M4A with mono AAC audio and no video stream")
+   public void mono() throws Exception {
+     media(true);
+@@ -239,7 +245,7 @@ public class AudioAssertionSteps {
+     assertThat(w.audio.encodes).hasSize(1);
+     assertThat(w.audio.encodes.getFirst())
+         .containsSubsequence("-b:a", "128k")
+-        .doesNotContain("-ac");
++        .containsSubsequence("-ac", "2");
+     assertThat(probe.path("streams").path(0).path("channels").asInt())
+         .isEqualTo(
+             AudioSupport.probe(w.audio.source).path("streams").findValue("channels").asInt());
+@@ -285,7 +291,7 @@ public class AudioAssertionSteps {
+     assertThat(w.audio.encodes).hasSize(2);
+     assertThat(w.audio.encodes.getFirst())
+         .containsSubsequence("-b:a", "128k")
+-        .doesNotContain("-ac");
++        .containsSubsequence("-ac", "2");
+     assertThat(w.audio.encodes.getLast())
+         .containsSubsequence("-ac", "1")
+         .containsSubsequence("-b:a", "128k");
+diff --git a/src/it/java/com/video2podcast/functional/AudioSetupSteps.java b/src/it/java/com/video2podcast/functional/AudioSetupSteps.java
+index 6a2f7ab..4dd2228 100644
+--- a/src/it/java/com/video2podcast/functional/AudioSetupSteps.java
++++ b/src/it/java/com/video2podcast/functional/AudioSetupSteps.java
+@@ -38,6 +38,33 @@ public class AudioSetupSteps {
+     assertThat(media.toString()).contains(streams.startsWith("an Opus") ? "opus" : "video");
+   }
+ 
++  @Given(
++      "^the retained audio source is a real ffmpeg-generated 60 second \"([^\"]+)\" below 1000000 bytes with (an E-AC-3 5.1 audio stream in an MP4 container|an Opus audio stream in an MP4 container|an AAC audio stream in an ADTS container)$")
++  public void incompatibleSource(String name, String streams) throws Exception {
++    boolean surround = streams.startsWith("an E-AC-3");
++    boolean opus = streams.startsWith("an Opus");
++    String codec = surround ? "eac3" : opus ? "opus" : "aac";
++    String container = streams.contains("ADTS") ? "adts" : "mp4";
++    int channels = surround ? 6 : 2;
++    w.audio.incompatibleSource(name, opus ? "libopus" : codec, container, channels);
++    assertThat(Files.size(w.audio.source)).isBetween(1L, 999999L);
++    var media = AudioSupport.probe(w.audio.source, "-count_frames");
++    assertThat(media.path("format").path("format_name").asText())
++        .contains(container.equals("adts") ? "aac" : "mp4");
++    assertThat(media.path("streams").size()).isEqualTo(1);
++    var audio = media.path("streams").path(0);
++    assertThat(audio.path("codec_type").asText()).isEqualTo("audio");
++    assertThat(audio.path("codec_name").asText()).isEqualTo(codec);
++    assertThat(audio.path("channels").asInt()).isEqualTo(channels);
++    // Raw ADTS reports an estimated duration; count decoded AAC-LC frames (1024 samples each).
++    double seconds =
++        container.equals("adts")
++            ? audio.path("nb_read_frames").asLong() * 1024.0 / audio.path("sample_rate").asInt()
++            : media.path("format").path("duration").asDouble();
++    assertThat(seconds).isBetween(59.0, 61.0);
++    if (surround) assertThat(audio.path("channel_layout").asText()).startsWith("5.1");
++  }
++
+   @Given("the job directory contains UTF-8 {string} with content {string}")
+   public void transcript(String name, String text) throws Exception {
+     assertThat(name).isEqualTo("transcript.txt");
+diff --git a/src/it/java/com/video2podcast/functional/AudioSupport.java b/src/it/java/com/video2podcast/functional/AudioSupport.java
+index 8b5d58e..737c0c4 100644
+--- a/src/it/java/com/video2podcast/functional/AudioSupport.java
++++ b/src/it/java/com/video2podcast/functional/AudioSupport.java
+@@ -55,6 +55,36 @@ final class AudioSupport implements AutoCloseable {
+     if (oversized) assertThat(Files.size(source)).isGreaterThan(LIMIT);
+   }
+ 
++  void incompatibleSource(String name, String codec, String container, int channels)
++      throws Exception {
++    assertThat(w.context).as("source fixture before startup").isNull();
++    source = w.dir.resolve(name);
++    MediaFixtures.run(
++        List.of(
++            "ffmpeg",
++            "-nostdin",
++            "-hide_banner",
++            "-loglevel",
++            "error",
++            "-y",
++            "-f",
++            "lavfi",
++            "-i",
++            "sine=frequency=440:sample_rate=48000",
++            "-t",
++            "60",
++            "-c:a",
++            codec,
++            "-ac",
++            Integer.toString(channels),
++            "-b:a",
++            "64k",
++            "-f",
++            container,
++            source.toString()));
++    w.change(j -> ((ObjectNode) j.path("files").path("AUDIO")).put("path", name));
++  }
++
+   static synchronized Path fixture(String name, boolean large) throws Exception {
+     String ext = name.substring(name.lastIndexOf('.') + 1).toLowerCase(Locale.ROOT);
+     Path dir = Files.createDirectories(Path.of("target", "audio-fixtures"));
+@@ -113,20 +143,20 @@ final class AudioSupport implements AutoCloseable {
+     }
+   }
+ 
+-  static JsonNode probe(Path file) {
+-    ProcessResult r =
+-        new DefaultProcessRunner()
+-            .run(
+-                List.of(
+-                    "ffprobe",
+-                    "-v",
+-                    "error",
+-                    "-show_streams",
+-                    "-show_format",
+-                    "-of",
+-                    "json",
+-                    file.toString()),
+-                Duration.ofSeconds(15));
++  static JsonNode probe(Path file, String... options) {
++    var args =
++        new ArrayList<>(
++            List.of(
++                "ffprobe",
++                "-v",
++                "error",
++                "-show_streams",
++                "-show_format",
++                "-of",
++                "json",
++                file.toString()));
++    args.addAll(1, List.of(options));
++    ProcessResult r = new DefaultProcessRunner().run(args, Duration.ofSeconds(15));
+     assertThat(r.exitCode()).as(r.stderr()).isZero();
+     return PipelineWorld.json(r.stdout());
+   }
+@@ -155,7 +185,7 @@ final class AudioSupport implements AutoCloseable {
+           boolean oversized =
+               fault.equals("always-large")
+                   || (fault.equals("retry") && encodes.size() == 1)
+-                  || (fault.equals("conversion") && !args.contains("-ac"));
++                  || (fault.equals("conversion") && args.get(args.indexOf("-ac") + 1).equals("2"));
+           if (oversized) {
+             Files.writeString(out, "oversized fixture");
+             resize(out, firstSize);
+diff --git a/src/it/java/com/video2podcast/functional/RetentionSupport.java b/src/it/java/com/video2podcast/functional/RetentionSupport.java
+index 56e6160..9f7f19c 100644
+--- a/src/it/java/com/video2podcast/functional/RetentionSupport.java
++++ b/src/it/java/com/video2podcast/functional/RetentionSupport.java
+@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
+ 
+ import com.fasterxml.jackson.databind.JsonNode;
+ import com.fasterxml.jackson.databind.node.ObjectNode;
++import com.video2podcast.media.DefaultProcessRunner;
+ import com.video2podcast.media.ProcessResult;
+ import java.nio.file.*;
+ import java.time.*;
+@@ -86,6 +87,8 @@ final class RetentionSupport {
+         }
+         if (failDownload) return new ProcessResult(1, "", "download fixture failed");
+         Files.copy(w.audio.source, source, StandardCopyOption.REPLACE_EXISTING);
++      } else if (args.getFirst().equals("ffprobe")) {
++        return new DefaultProcessRunner().run(args, timeout);
+       } else if (args.getFirst().equals("ffmpeg")) {
+         String output = args.getLast();
+         Path target = Path.of(output.replace("%03d", "000"));

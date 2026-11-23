@@ -301,6 +301,7 @@ Work that is not scheduled in a phase. Technical debt carries the `[debt]` mark.
 - [x] **TD6 [debt]: Flaky T9 scenario "Broken successful responses are retried rather than called silence"** (S)
   - Update from T13 (2026-11-19): two more single-scenario failures (a T8 scenario and a T10 scenario) in `clean verify` runs started from the orchestrator's sandboxed shell; the T10 log shows `Ollama answered 403 ... "reason":"not_allowed_local","source":"baseline_policy"`: the sandbox network policy sometimes denies calls to localhost. Outside the sandbox the same suite was green. The T9 failure below may have the same cause (check its log for `not_allowed_local`). The owner decided that full gates run outside the sandbox with approval. Logs: `tasks/TD6/failed-run*.log`. The Tester already hardened the fixtures in T13 (`tasks/T13/comms/tester-flaky.md`), so TD6 may shrink to checking the T9 log and the remaining weak waits (and the one-off `OllamaClientTest.anAnswerStoppedAtTheLengthLimitIsAccepted` failure, `header parser received no bytes`).
   - Update from T14 (2026-11-21): in the Tester's run, two older scenarios (a T9 Whisper one and one with a held Ollama) timed out with `not_allowed_local / baseline_policy` on localhost even though the command was approved outside the sandbox; one T8 scenario failed once before the URL was submitted (a `/allow` reply with a null `ok`). Evidence: `tasks/T14/comms/questions.md`. The orchestrator's own `clean verify` (outside the sandbox) was green. TD6 should treat the platform network policy as the first suspect.
+  - Update from T17 (2026-11-23): the same T9 scenario ("Broken successful responses are retried rather than called silence", Example #1.3) timed out once in the orchestrator's `clean verify` (30 s wait for `transcript.txt`; no `not_allowed_local` and no 401/403 in the log, so not the network policy). The rerun of the same command was green (387/387). The flake is still there; reopen TD6 if it recurs.
   - Why: one of five full `./mvnw clean verify` runs failed at the step `"chunk-000.wav" is sent exactly twice` (`T9-transcription.feature:122`, example 1.1 `{broken`): the Whisper mock journal had 0 requests after 30 seconds. The rerun was green. A flaky test weakens trust in `verify`.
   - Acceptance:
     - The cause is found (in the test or in the code) and written in `tasks/TD6/evidence.md`: the log of the failed run, the code version, the explanation.
@@ -328,3 +329,19 @@ Work that is not scheduled in a phase. Technical debt carries the `[debt]` mark.
   - Verify: `./mvnw verify -Dno-it`, `./mvnw clean verify`, `-Pmutation` at least 85%. The owner checks the new text in Telegram during Checkpoint 4. Technical task: Developer and Tester, both code reviewers; no Analyst, no Architect.
   - Depends on: T12, T13, T14
   - Files: `bot/DeliveryCallbackHandler.java`, its unit tests, `src/features/T12-transcript-button.feature`, `T13-audio-button.feature`, `T14-retention.feature` (the Tester updates the matching steps under `src/it`), `SPEC.md` if it quotes the text
+- [ ] **TD9 [debt]: Send the audio duration to Telegram so the player shows it before download** (S)
+  - Found at the T17 smoke run (2026-11-23): the converted M4A plays, but its message shows `00:00` in the Telegram chat until it is opened. `sendAudio` is called without the `duration` parameter, while `job.json` already stores `durationSeconds`.
+  - Acceptance:
+    - `TelegramGateway.sendAudio` passes `duration` (seconds, from the stored job) in the multipart request. The tap flow, texts, states and captions do not change.
+    - Unit tests and a T13 scenario check the `duration` field of the upload.
+  - Verify: `./mvnw verify -Dno-it`, `./mvnw clean verify`, `-Pmutation` at least 85%. The owner checks the audio message in Telegram. Technical task.
+  - Depends on: T13
+  - Files: `bot/TelegramGateway.java` and its implementation, `bot/DeliveryCallbackHandler.java`, unit tests, a scenario in `src/features/T13-audio-button.feature` and its steps in `src/it`.
+- [ ] **TD10 [debt]: Show seconds in the summary duration ("1m 54s" instead of "1m")** (S)
+  - Found at the T17 smoke run (2026-11-23): a 1:54 video shows `Duration: 1m`. `SummaryMessageFormatter.formatDuration` drops the seconds whenever there is at least one minute (the T10 format `1h 42m`). This is the current, intended behaviour, so it is a change of the format and needs the owner's decision on the exact format before work starts.
+  - Acceptance:
+    - The owner picks the format (for example `1m 54s` below an hour, `1h 42m` from an hour up, or `1m 54s` everywhere under 10 minutes).
+    - `formatDuration` and the T10/T11 scenarios and unit tests that name the old format are updated. The summary length limit of 1,500 characters is unaffected.
+  - Verify: `./mvnw verify -Dno-it`, `./mvnw clean verify`, `-Pmutation` at least 85%. Technical task.
+  - Depends on: T10, T11
+  - Files: `bot/SummaryMessageFormatter.java`, its unit tests, the T10/T11 features that show the duration, and their steps in `src/it`.
