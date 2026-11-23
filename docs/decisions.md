@@ -74,6 +74,11 @@ private services other than the host ones it is meant to reach).
 non-constant argument list and a typed command did not help (spike in T8). No PMD suppression is
 approved. The exclusion is tracked as technical debt in `tasks/todo.md` (TD1).
 
+**Narrowed (TD1, 2026-11-23):** the owner replaced the class-wide filter file with one
+`@SuppressFBWarnings("COMMAND_INJECTION")` on `DefaultProcessRunner.Child.start`, with a
+justification in the code. `config/spotbugs-exclude.xml` is gone. The newest find-sec-bugs
+(1.14.0) and SpotBugs (4.10.5) still flag the call, so the one suppression stays.
+
 ## D5: Queue size is updated before the future completes (TD2, 2026-11-17)
 
 **Decision:** `JobQueue.run` removes a task from `open` before it completes the task's future, on all

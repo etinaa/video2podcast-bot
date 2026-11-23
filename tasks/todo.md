@@ -349,3 +349,14 @@ Work that is not scheduled in a phase. Technical debt carries the `[debt]` mark.
   - Verify: `./mvnw verify -Dno-it`, `./mvnw clean verify`, `-Pmutation` at least 85%. Technical task.
   - Depends on: T10, T11
   - Files: `bot/SummaryMessageFormatter.java`, its unit tests, the T10/T11 features that show the duration, and their steps in `src/it`.
+- [~] **TD11 [debt]: WireMock ports collide with other programs listening on 127.0.0.1** (S)
+  - Found (2026-11-23): in `clean verify`, tests sometimes get `401/403` (`not_allowed_local`, `baseline_policy`, `Proxy key is missing…`) or an empty mock journal. Cause, checked by hand: WireMock listens on all interfaces on a random port; if another program already listens on `127.0.0.1` with the same port (the Codex app-server daemon, other Codex processes, IntelliJ IDEA), a request to `localhost:<port>` goes to that program, not to the mock. Reproduced with a wildcard socket on port 54050: the request got the Codex `403 ... not_allowed_local`. With about a dozen foreign listeners, about 16,000 ephemeral ports and about a thousand mocks per run, a collision in a full run is likely. This is the real cause behind TD6 and the later flakes noted in it.
+  - Acceptance:
+    - Every WireMock server in `src/it` (and the one in `TelegramConfigTest`) listens on `127.0.0.1` only and its port is chosen so that nobody else holds that port. A port that is already taken is replaced by another one (a short retry); it never ends in a silent wrong answer.
+    - The test clients keep using the URL the mock gives them and never reach a foreign listener on that port.
+    - A test shows the fix: with a foreign listener on `127.0.0.1:<port>` the helper does not use that port.
+    - No production code changes, no suppressions, no timeout increases.
+    - `./mvnw clean verify` runs green at least 3 times in a row while the Codex app-server daemon is running (one run at a time).
+  - Verify: `./mvnw clean verify` three times, `-Pmutation` at least 85%.
+  - Depends on: TD6, T16
+  - Files: `src/it/java/com/video2podcast/functional/WireMocks.java` and the other users of `WireMockServer` in `src/it`, `src/test/java/com/video2podcast/config/TelegramConfigTest.java`
