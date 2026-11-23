@@ -1,0 +1,68 @@
+diff --git a/config/spotbugs-exclude.xml b/config/spotbugs-exclude.xml
+deleted file mode 100644
+index fe94666..0000000
+--- a/config/spotbugs-exclude.xml
++++ /dev/null
+@@ -1,11 +0,0 @@
+-<?xml version="1.0" encoding="UTF-8"?>
+-<FindBugsFilter>
+-  <!-- Approved by the owner (A: Q-developer-3 in tasks/T8/comms/questions.md). To be removed under
+-       TD1 in tasks/todo.md. DefaultProcessRunner starts yt-dlp and ffmpeg from an argument list
+-       (no shell); URLs pass UrlValidator and follow the end-of-options marker. find-sec-bugs
+-       flags any non-constant argument, and a typed command did not change that. -->
+-  <Match>
+-    <Class name="~com\.video2podcast\.media\.DefaultProcessRunner(\$Child)?"/>
+-    <Bug pattern="COMMAND_INJECTION"/>
+-  </Match>
+-</FindBugsFilter>
+diff --git a/pom.xml b/pom.xml
+index e34eff0..c3cd76d 100644
+--- a/pom.xml
++++ b/pom.xml
+@@ -45,6 +45,13 @@
+       <artifactId>spring-boot-starter</artifactId>
+     </dependency>
+ 
++    <dependency>
++      <groupId>com.github.spotbugs</groupId>
++      <artifactId>spotbugs-annotations</artifactId>
++      <version>4.10.5</version>
++      <scope>provided</scope>
++    </dependency>
++
+     <dependency>
+       <groupId>org.telegram</groupId>
+       <artifactId>telegrambots-springboot-longpolling-starter</artifactId>
+@@ -201,7 +208,6 @@
+           <effort>Max</effort>
+           <threshold>Medium</threshold>
+           <failOnError>true</failOnError>
+-          <excludeFilterFile>${project.basedir}/config/spotbugs-exclude.xml</excludeFilterFile>
+           <plugins>
+             <plugin>
+               <groupId>com.h3xstream.findsecbugs</groupId>
+diff --git a/src/main/java/com/video2podcast/media/DefaultProcessRunner.java b/src/main/java/com/video2podcast/media/DefaultProcessRunner.java
+index 3d17a3f..1fb80b8 100644
+--- a/src/main/java/com/video2podcast/media/DefaultProcessRunner.java
++++ b/src/main/java/com/video2podcast/media/DefaultProcessRunner.java
+@@ -1,6 +1,7 @@
+ package com.video2podcast.media;
+ 
+ import com.video2podcast.job.JobFailure;
++import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+ import java.io.ByteArrayOutputStream;
+ import java.io.Closeable;
+ import java.io.IOException;
+@@ -77,6 +78,12 @@ public class DefaultProcessRunner implements ProcessRunner {
+       this.process = process;
+     }
+ 
++    @SuppressFBWarnings(
++        value = "COMMAND_INJECTION",
++        justification =
++            "No shell: the arguments are a list and the binary is always yt-dlp or ffmpeg. The"
++                + " URL passes UrlValidator first and follows the -- marker, and a real-process"
++                + " test proves hostile punctuation stays one literal argument.")
+     static Child start(List<String> args) {
+       try {
+         Child child = new Child(new ProcessBuilder(args).start());
