@@ -149,3 +149,9 @@ chunks again.
 **Decision:** `job/HealthChecks` probes Whisper (`GET /`) and Ollama (`GET /api/version`) in parallel with one timeout (`app.health.timeout`, default `PT3S`). Any HTTP status counts as reachable; no health route is required and the body is ignored. At startup it only logs one line per service, on a virtual thread after the context is ready, so the bot starts either way. Before every job `PipelineService.execute` calls `requireReachable()` as its first statement, on the job worker: it is after queueing, before any directory or download, and never blocks the single Telegram polling thread. A down service gives the existing `JobFailure` messages; both down gives one message with both sentences and kind `SERVICE_UNREACHABLE`. There is no periodic check.
 
 **Consequences:** the user sees `Queued: position N` first and then the failure within the timeout. A down job holds the worker for at most the timeout. A service that answers HTTP but is broken is still found by the T9/T10 failure paths. Mid-job failures are unchanged.
+
+## D15: Codec check before sending audio unchanged (T17, 2026-11-23)
+
+**Decision:** D12's "send unchanged by extension" is narrowed: a source at most the limit goes out unchanged only as `m4a` with codec `aac` or `mp3` with codec `mp3`. The codec comes from `ffprobe` (first audio stream) through `FfmpegRunner.probeAudioCodec`. Any other small source, or one whose codec cannot be read, is converted to M4A at 128 kbps, and `encodeM4a` now always passes `-ac` (1 for mono, 2 otherwise), so 5.1 sources come out as stereo.
+
+**Consequences:** the smoke test found YouTube serving `.m4a` with an E-AC-3 5.1 track that Telegram's player cannot play. The cost is one short `ffprobe` call for small `mp3`/`m4a` sources. Oversized sources and other extensions are not probed.

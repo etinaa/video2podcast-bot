@@ -5,7 +5,7 @@ No HTTP endpoint of ours, no new configuration property, no change of `job.json`
 ## Rule constants (decisions, answers to Q-analyst-1)
 
 - `LIMIT_BYTES = 50 * 1024 * 1024` (52 428 800). Chosen as 50 MiB because the SPEC target of 48 MiB is already above 50 000 000 bytes. `TARGET_BYTES = 48 * 1024 * 1024`.
-- Source unchanged when `size <= LIMIT_BYTES` (inclusive) and extension is `mp3` or `m4a` (case-insensitive, from the file name; no content sniffing).
+- Source unchanged when `size <= LIMIT_BYTES` (inclusive) and the extension (case-insensitive) is `m4a` with audio codec `aac`, or `mp3` with codec `mp3`. The codec comes from ffprobe (T17, D15); an unknown codec is not unchanged.
 - An encoded output is accepted only when `size < LIMIT_BYTES` (strict) and the file is not empty.
 - Duration is `JobRecord.durationSeconds` (rounded up already by `YtDlpClient`).
 
@@ -34,8 +34,8 @@ Decision table (in this order):
 
 | # | Condition | Action | Result |
 |---|---|---|---|
-| 1 | size ≤ LIMIT and ext in {mp3, m4a} | none | `UNCHANGED`, `file == source` (same path) |
-| 2 | size ≤ LIMIT, other ext (e.g. `source.mp4`, `.webm`, `.opus`) | `encodeM4a(source, <dir>/out.m4a, 128, mono=false)` | if output `< LIMIT`: `CONVERTED`, 128. Otherwise go to row 3 |
+| 1 | size ≤ LIMIT and (ext m4a + codec aac, or ext mp3 + codec mp3) | none | `UNCHANGED`, `file == source` (same path) |
+| 2 | size ≤ LIMIT, other ext (e.g. `source.mp4`, `.webm`, `.opus`) | `encodeM4a(source, <dir>/out.m4a, 128, mono=false)` (`-ac 2` since T17) | if output `< LIMIT`: `CONVERTED`, 128. Otherwise go to row 3 |
 | 3 | size > LIMIT, or row 2 gave an oversized output | compress | see below |
 
 Compression: `kbps = clamp(floor(TARGET_BYTES * 8 / max(durationSeconds,1) / 1000), 8, 128)`; `encodeM4a(source, out, kbps, mono=true)`. If the result is `< LIMIT` → `COMPRESSED`, `kbps`. Otherwise one retry at `lower = max(8, floor(kbps * 0.8))` (output overwritten); if still not `< LIMIT` (or `lower == kbps`) → `JobFailure.of(FAILED)`. A failed attempt leaves no `out.m4a` behind. Examples: 3 h (10 800 s) → 37 kbps, retry 29 kbps; 1 h → 111 kbps.
