@@ -1,0 +1,24 @@
+diff --git a/docs/host-setup.md b/docs/host-setup.md
+index 02fe32d..99ae19f 100644
+--- a/docs/host-setup.md
++++ b/docs/host-setup.md
+@@ -45,6 +45,8 @@ MacBook with 8 performance cores, `ggml-large-v3-turbo` on Whisper, `qwen3:32b`
+ | 1:54 Russian video, E-AC-3 5.1 inside an `.m4a` (5.5 MB) | converted to AAC stereo 128 kbps | plays (see D15) |
+ | 3:36 English video | unchanged, AAC `.m4a` | plays, transcript complete (owner checked) |
+ | 2 h 36 min English talk (9 390 s, 16 chunks of up to 10 min) | compressed to mono AAC 42 kbps, 51 933 907 bytes (44.2 kbps real) | Telegram accepted it, plays to the end |
++| 2 h 58 min 20 s Russian audiobook (10 700 s, 18 chunks) | compressed to mono AAC, first attempt at 37 kbps was over the limit, retry at 29 kbps gave 40 222 038 bytes (30.1 kbps real) | Telegram accepted it, sent without a size error |
++| A video longer than 3 hours | not downloaded | the bot answered `TOO_LONG` before any download (log line at 13:24) |
+ 
+ Stages for the 2 h 36 min video (second run, with `-mc 0`):
+ 
+@@ -57,6 +59,10 @@ Stages for the 2 h 36 min video (second run, with `-mc 0`):
+ | Compress to fit Telegram (on the audio tap) | about 1 min | `ffmpeg` busy for 55 s in the first run and 1 min in the second |
+ | Upload of the 49.5 MiB audio | about 2 min | from the end of `ffmpeg` to the time of the audio message in Telegram (11:40 to 11:42 in the first run) |
+ 
++Stages for the 2 h 58 min 20 s video: download, WAV and split about 1 min; transcribe 18 chunks about 6.5 min (slower than the English talk, the audio was Russian); summary about 9 min; compression about 4 min (two `ffmpeg` attempts, 37 then 29 kbps); upload about 1 min. All from the same process samples. The Java bot peaked at 672 MB RSS in this run (186 MB in the 2 h 36 min run), `whisper-server` at 325 MB.
++
++Language: Whisper is forced to English (SPEC: other languages are out of scope). On the Russian audiobook the text came out as a garbled English translation with several repetition loops (for example "I thought it was going to be a new house" repeated about 14 times), even with `-mc 0`. This was not a failure of the bot: the transcript was complete in length (30 855 words for 10 700 s). Use English videos for checks of the transcript.
++
+ Peak memory (RSS): `whisper-server` up to 2.1 GB (the model sits in GPU memory, not counted), Java bot 190 MB, `ffmpeg` 62 MB, Ollama about 22 GB for the model (`ollama ps`). Nothing needed tuning: chunk size, `num_ctx` 8192 and `keep_alive` stay as they are, and `qwen3:32b` is fast enough that no fall back to `qwen3:14b` is needed.
+ 
+ Telegram size limit: a file of 51 933 907 bytes (above 50 000 000, below 50 MiB = 52 428 800) was accepted by `sendAudio`, so `LIMIT_BYTES = 50 MiB` holds. The encoder output is about 5% larger than the requested bitrate, so for a 3-hour video the first attempt (37 kbps, about 52.6 MB) lands above the limit and the 29 kbps retry is used; this retry is covered by tests but was not run on a real 3-hour video.
