@@ -1,0 +1,370 @@
+diff --git a/src/test/java/com/video2podcast/bot/TelegramClientGatewayTest.java b/src/test/java/com/video2podcast/bot/TelegramClientGatewayTest.java
+index 989fc4a..3a2bc92 100644
+--- a/src/test/java/com/video2podcast/bot/TelegramClientGatewayTest.java
++++ b/src/test/java/com/video2podcast/bot/TelegramClientGatewayTest.java
+@@ -10,18 +10,19 @@ import static com.github.tomakehurst.wiremock.client.WireMock.notMatching;
+ import static com.github.tomakehurst.wiremock.client.WireMock.post;
+ import static com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor;
+ import static com.github.tomakehurst.wiremock.client.WireMock.urlPathEqualTo;
+-import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig;
+ import static org.assertj.core.api.Assertions.assertThat;
+ import static org.assertj.core.api.Assertions.assertThatThrownBy;
+ 
+-import com.github.tomakehurst.wiremock.junit5.WireMockExtension;
++import com.github.tomakehurst.wiremock.WireMockServer;
++import com.video2podcast.support.LoopbackWireMock;
+ import java.nio.file.Files;
+ import java.nio.file.Path;
+ import java.util.List;
+ import java.util.Locale;
++import org.junit.jupiter.api.AfterAll;
++import org.junit.jupiter.api.BeforeAll;
+ import org.junit.jupiter.api.BeforeEach;
+ import org.junit.jupiter.api.Test;
+-import org.junit.jupiter.api.extension.RegisterExtension;
+ import org.junit.jupiter.api.io.TempDir;
+ import org.junit.jupiter.params.ParameterizedTest;
+ import org.junit.jupiter.params.provider.ValueSource;
+@@ -36,18 +37,27 @@ class TelegramClientGatewayTest {
+       {"ok":true,"result":{"message_id":77,"date":1700000000,"chat":{"id":5,"type":"private"}}}\
+       """;
+ 
+-  @RegisterExtension
+-  static WireMockExtension telegram =
+-      WireMockExtension.newInstance().options(wireMockConfig().dynamicPort()).build();
++  static WireMockServer telegram;
+ 
+   @TempDir Path tempDir;
+ 
+   private TelegramClientGateway gateway;
+ 
++  @BeforeAll
++  static void startTelegram() {
++    telegram = LoopbackWireMock.start();
++  }
++
++  @AfterAll
++  static void stopTelegram() {
++    telegram.stop();
++  }
++
+   @BeforeEach
+   void setUp() {
++    telegram.resetAll();
+     TelegramUrl url =
+-        TelegramUrl.builder().schema("http").host("localhost").port(telegram.getPort()).build();
++        TelegramUrl.builder().schema("http").host("127.0.0.1").port(telegram.port()).build();
+     gateway = new TelegramClientGateway(new OkHttpTelegramClient(TOKEN, url));
+   }
+ 
+diff --git a/src/test/java/com/video2podcast/config/TelegramConfigTest.java b/src/test/java/com/video2podcast/config/TelegramConfigTest.java
+index f27ced3..f8220fb 100644
+--- a/src/test/java/com/video2podcast/config/TelegramConfigTest.java
++++ b/src/test/java/com/video2podcast/config/TelegramConfigTest.java
+@@ -11,6 +11,7 @@ import com.video2podcast.bot.TelegramBot;
+ import com.video2podcast.bot.TelegramGateway;
+ import com.video2podcast.bot.UrlMessageHandler;
+ import com.video2podcast.job.RetentionSweeper;
++import com.video2podcast.support.LoopbackWireMock;
+ import java.nio.file.Path;
+ import java.time.Duration;
+ import org.junit.jupiter.api.Test;
+@@ -97,11 +98,7 @@ class TelegramConfigTest {
+ 
+   @org.junit.jupiter.api.Test
+   void theClientDoesNotResendARequestWhoseConnectionDropped() {
+-    com.github.tomakehurst.wiremock.WireMockServer server =
+-        new com.github.tomakehurst.wiremock.WireMockServer(
+-            com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig()
+-                .dynamicPort());
+-    server.start();
++    com.github.tomakehurst.wiremock.WireMockServer server = LoopbackWireMock.start();
+     try {
+       server.stubFor(
+           com.github.tomakehurst.wiremock.client.WireMock.post(
+@@ -111,7 +108,7 @@ class TelegramConfigTest {
+                       .withFault(com.github.tomakehurst.wiremock.http.Fault.EMPTY_RESPONSE)));
+       AppProperties props =
+           new AppProperties(
+-              new AppProperties.Telegram("123:abc", 1L, true, "http://localhost:" + server.port()),
++              new AppProperties.Telegram("123:abc", 1L, true, server.baseUrl()),
+               props("123:abc", 1L, true).access(),
+               props("123:abc", 1L, true).ollama(),
+               props("123:abc", 1L, true).whisper(),
+diff --git a/src/test/java/com/video2podcast/summary/OllamaClientTest.java b/src/test/java/com/video2podcast/summary/OllamaClientTest.java
+index 05c70e4..9086534 100644
+--- a/src/test/java/com/video2podcast/summary/OllamaClientTest.java
++++ b/src/test/java/com/video2podcast/summary/OllamaClientTest.java
+@@ -12,11 +12,11 @@ import static org.mockito.Mockito.when;
+ 
+ import com.fasterxml.jackson.databind.JsonNode;
+ import com.github.tomakehurst.wiremock.WireMockServer;
+-import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
+ import com.github.tomakehurst.wiremock.http.Fault;
+ import com.video2podcast.config.AppProperties;
+ import com.video2podcast.job.ProbeResult;
+ import com.video2podcast.storage.Json;
++import com.video2podcast.support.LoopbackWireMock;
+ import java.io.IOException;
+ import java.net.ServerSocket;
+ import java.net.http.HttpClient;
+@@ -39,8 +39,7 @@ class OllamaClientTest {
+ 
+   @BeforeEach
+   void setUp() {
+-    server = new WireMockServer(WireMockConfiguration.options().dynamicPort());
+-    server.start();
++    server = LoopbackWireMock.start();
+   }
+ 
+   @AfterEach
+@@ -53,7 +52,7 @@ class OllamaClientTest {
+   }
+ 
+   private OllamaClient client() {
+-    return new OllamaClient(config("http://localhost:" + server.port(), Duration.ofSeconds(5)));
++    return new OllamaClient(config(server.baseUrl(), Duration.ofSeconds(5)));
+   }
+ 
+   private void stub(int status, String body) {
+@@ -124,8 +123,7 @@ class OllamaClientTest {
+     stub(200, fixture("ollama-chat-ok.json"));
+     OllamaClient other =
+         new OllamaClient(
+-            new AppProperties.Ollama(
+-                "http://localhost:" + server.port(), "qwen3:14b", 4096, Duration.ofSeconds(5)));
++            new AppProperties.Ollama(server.baseUrl(), "qwen3:14b", 4096, Duration.ofSeconds(5)));
+ 
+     other.complete("s", "u", 10);
+ 
+@@ -138,8 +136,7 @@ class OllamaClientTest {
+   @Test
+   void aTrailingSlashOfTheBaseUrlIsDropped() throws Exception {
+     stub(200, fixture("ollama-chat-ok.json"));
+-    OllamaClient slash =
+-        new OllamaClient(config("http://localhost:" + server.port() + "/", Duration.ofSeconds(5)));
++    OllamaClient slash = new OllamaClient(config(server.baseUrl() + "/", Duration.ofSeconds(5)));
+ 
+     slash.complete("s", "u", 10);
+ 
+@@ -300,8 +297,7 @@ class OllamaClientTest {
+     server.stubFor(
+         post(urlEqualTo("/api/chat"))
+             .willReturn(aResponse().withStatus(200).withBody("{}").withFixedDelay(2000)));
+-    OllamaClient slow =
+-        new OllamaClient(config("http://localhost:" + server.port(), Duration.ofMillis(200)));
++    OllamaClient slow = new OllamaClient(config(server.baseUrl(), Duration.ofMillis(200)));
+ 
+     LlmException e = failure(slow);
+ 
+diff --git a/src/test/java/com/video2podcast/support/LoopbackWireMock.java b/src/test/java/com/video2podcast/support/LoopbackWireMock.java
+new file mode 100644
+index 0000000..897ab24
+--- /dev/null
++++ b/src/test/java/com/video2podcast/support/LoopbackWireMock.java
+@@ -0,0 +1,56 @@
++package com.video2podcast.support;
++
++import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig;
++
++import com.github.tomakehurst.wiremock.WireMockServer;
++import java.net.BindException;
++
++/**
++ * Starts a WireMock server on 127.0.0.1 only. Other programs may listen on the same port on
++ * 127.0.0.1, and a wildcard listener would lose to them, so the mock never binds to all interfaces.
++ */
++public final class LoopbackWireMock {
++
++  private static final int ATTEMPTS = 3;
++
++  private LoopbackWireMock() {}
++
++  /** A started server on a free port. */
++  public static WireMockServer start() {
++    return start(0);
++  }
++
++  /** Tries {@code preferredPort} first (0 asks the OS); a collision is retried on a fresh port. */
++  public static WireMockServer start(int preferredPort) {
++    for (int attempt = 1; ; attempt++) {
++      WireMockServer server =
++          new WireMockServer(
++              wireMockConfig().bindAddress("127.0.0.1").port(attempt == 1 ? preferredPort : 0));
++      try {
++        server.start();
++        return server;
++      } catch (RuntimeException failure) {
++        try {
++          server.stop();
++        } catch (Exception cleanupFailure) {
++          // Jetty can report STOPPED after a partial startup; keep it without losing the retry.
++          failure.addSuppressed(cleanupFailure);
++        }
++        if (attempt == ATTEMPTS || !isBindFailure(failure)) {
++          throw failure;
++        }
++      }
++    }
++  }
++
++  private static boolean isBindFailure(Throwable failure) {
++    for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
++      if (cause instanceof BindException
++          || (cause.getMessage() != null
++              && cause.getMessage().contains("Address already in use"))) {
++        return true;
++      }
++    }
++    return false;
++  }
++}
+diff --git a/src/test/java/com/video2podcast/support/LoopbackWireMockTest.java b/src/test/java/com/video2podcast/support/LoopbackWireMockTest.java
+new file mode 100644
+index 0000000..38ecf6c
+--- /dev/null
++++ b/src/test/java/com/video2podcast/support/LoopbackWireMockTest.java
+@@ -0,0 +1,39 @@
++package com.video2podcast.support;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++import com.github.tomakehurst.wiremock.WireMockServer;
++import java.io.IOException;
++import java.net.InetAddress;
++import java.net.ServerSocket;
++import java.net.Socket;
++import org.junit.jupiter.api.Test;
++
++class LoopbackWireMockTest {
++
++  private static final InetAddress LOOPBACK = InetAddress.getLoopbackAddress();
++
++  @Test
++  void startsAServerThatAcceptsConnectionsOnLoopback() throws IOException {
++    WireMockServer server = LoopbackWireMock.start();
++    try (Socket socket = new Socket(LOOPBACK, server.port())) {
++      assertThat(server.isRunning()).isTrue();
++      assertThat(socket.isConnected()).isTrue();
++    } finally {
++      server.stop();
++    }
++  }
++
++  @Test
++  void usesAnotherPortWhenAForeignListenerHoldsThePreferredOne() throws IOException {
++    try (ServerSocket foreign = new ServerSocket(0, 1, LOOPBACK)) {
++      WireMockServer server = LoopbackWireMock.start(foreign.getLocalPort());
++      try {
++        assertThat(server.isRunning()).isTrue();
++        assertThat(server.port()).isNotEqualTo(foreign.getLocalPort());
++      } finally {
++        server.stop();
++      }
++    }
++  }
++}
+diff --git a/src/test/java/com/video2podcast/transcript/TranscriptionAssembledTest.java b/src/test/java/com/video2podcast/transcript/TranscriptionAssembledTest.java
+index 4a89a3c..e610d92 100644
+--- a/src/test/java/com/video2podcast/transcript/TranscriptionAssembledTest.java
++++ b/src/test/java/com/video2podcast/transcript/TranscriptionAssembledTest.java
+@@ -8,11 +8,11 @@ import static org.assertj.core.api.Assertions.assertThat;
+ import static org.assertj.core.api.Assertions.assertThatThrownBy;
+ 
+ import com.github.tomakehurst.wiremock.WireMockServer;
+-import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
+ import com.github.tomakehurst.wiremock.stubbing.Scenario;
+ import com.github.tomakehurst.wiremock.stubbing.ServeEvent;
+ import com.video2podcast.config.AppProperties;
+ import com.video2podcast.job.JobFailure;
++import com.video2podcast.support.LoopbackWireMock;
+ import java.io.IOException;
+ import java.nio.charset.StandardCharsets;
+ import java.nio.file.Files;
+@@ -41,8 +41,7 @@ class TranscriptionAssembledTest {
+ 
+   @BeforeEach
+   void setUp() throws IOException {
+-    server = new WireMockServer(WireMockConfiguration.options().dynamicPort());
+-    server.start();
++    server = LoopbackWireMock.start();
+     Files.writeString(jobDir.resolve("source.m4a"), "source");
+     Files.writeString(jobDir.resolve("audio.wav"), "wav");
+     Files.createDirectory(jobDir.resolve("chunks"));
+@@ -55,7 +54,7 @@ class TranscriptionAssembledTest {
+ 
+   private TranscriptionClient client(Duration timeout) {
+     return new TranscriptionClient(
+-        new WhisperClient(new AppProperties.Whisper("http://localhost:" + server.port(), timeout)));
++        new WhisperClient(new AppProperties.Whisper(server.baseUrl(), timeout)));
+   }
+ 
+   private Path chunk(String name, int size) throws IOException {
+diff --git a/src/test/java/com/video2podcast/transcript/WhisperClientTest.java b/src/test/java/com/video2podcast/transcript/WhisperClientTest.java
+index 8aa0ae3..22a234b 100644
+--- a/src/test/java/com/video2podcast/transcript/WhisperClientTest.java
++++ b/src/test/java/com/video2podcast/transcript/WhisperClientTest.java
+@@ -13,12 +13,12 @@ import static org.mockito.Mockito.verify;
+ import static org.mockito.Mockito.when;
+ 
+ import com.github.tomakehurst.wiremock.WireMockServer;
+-import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
+ import com.github.tomakehurst.wiremock.http.Fault;
+ import com.github.tomakehurst.wiremock.verification.LoggedRequest;
+ import com.video2podcast.config.AppProperties;
+ import com.video2podcast.job.JobFailure;
+ import com.video2podcast.job.ProbeResult;
++import com.video2podcast.support.LoopbackWireMock;
+ import java.io.IOException;
+ import java.net.ServerSocket;
+ import java.net.http.HttpClient;
+@@ -44,8 +44,7 @@ class WhisperClientTest {
+ 
+   @BeforeEach
+   void setUp() throws IOException {
+-    server = new WireMockServer(WireMockConfiguration.options().dynamicPort());
+-    server.start();
++    server = LoopbackWireMock.start();
+     chunk = Files.write(dir.resolve("chunk-000.wav"), new byte[] {1, 2, 3, (byte) 0xFF});
+   }
+ 
+@@ -59,7 +58,7 @@ class WhisperClientTest {
+   }
+ 
+   private WhisperClient client() {
+-    return client("http://localhost:" + server.port(), Duration.ofSeconds(5));
++    return client(server.baseUrl(), Duration.ofSeconds(5));
+   }
+ 
+   private void stub(int status, String body) {
+@@ -163,10 +162,7 @@ class WhisperClientTest {
+   void trailingSlashInBaseUrlIsDropped() throws Exception {
+     stub(200, "{\"text\":\"\"}");
+ 
+-    assertThat(
+-            client("http://localhost:" + server.port() + "/", Duration.ofSeconds(5))
+-                .transcribe(chunk))
+-        .isEmpty();
++    assertThat(client(server.baseUrl() + "/", Duration.ofSeconds(5)).transcribe(chunk)).isEmpty();
+     server.verify(1, postRequestedFor(urlEqualTo("/inference")));
+   }
+ 
+@@ -218,8 +214,7 @@ class WhisperClientTest {
+             .willReturn(aResponse().withStatus(200).withBody(OK).withFixedDelay(2000)));
+ 
+     WhisperException e =
+-        catchWhisper(() ->
+-            client("http://localhost:" + server.port(), Duration.ofMillis(200)).transcribe(chunk));
++        catchWhisper(() -> client(server.baseUrl(), Duration.ofMillis(200)).transcribe(chunk));
+ 
+     assertThat(e.isConnection()).isFalse();
+   }
+@@ -323,7 +318,7 @@ class WhisperClientTest {
+             .willReturn(aResponse().withStatus(200)));
+ 
+     assertThat(
+-            client("http://localhost:" + server.port() + "/", Duration.ofSeconds(5))
++            client(server.baseUrl() + "/", Duration.ofSeconds(5))
+                 .probe(Duration.ofSeconds(2))
+                 .reachable())
+         .isTrue();

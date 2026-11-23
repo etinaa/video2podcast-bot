@@ -1,0 +1,14 @@
+VERDICT: CHANGES_REQUESTED
+
+## Findings
+- [Important] src/test/java/com/video2podcast/bot/TelegramClientGatewayTest.java:60 - The client endpoint still comes from a hard-coded scheme/host and `telegram.port()`, rather than the mock-supplied URL. The widened TD11 acceptance explicitly requires test clients to use the URL the mock supplies; this is the same requirement enforced in round 1 for TelegramConfigTest. Construct a URI from `telegram.baseUrl()` and use its scheme, host, and port to build TelegramUrl. The current endpoint reaches the explicitly bound mock, but bypasses the required supplied-URL path.
+- [Suggestion] src/test/java/com/video2podcast/support/LoopbackWireMockTest.java:14 - Use an explicit IPv4 loopback address for these sockets and assert the server's configured bind address equals `127.0.0.1`. `InetAddress.getLoopbackAddress()` can select IPv6, while the helper deliberately binds IPv4; the existing connection assertion also does not distinguish a loopback-only listener from a wildcard listener.
+
+## Requirements
+- R1: met (dev scope) - All five unit-test classes now start WireMock through LoopbackWireMock. It explicitly binds 127.0.0.1, uses OS-assigned ports, retries bind failures on fresh ports for at most three attempts, and preserves startup/cleanup diagnostics.
+- R2: not met - TelegramConfigTest fixes the round 1 finding with server.baseUrl(); OllamaClientTest, WhisperClientTest, and TranscriptionAssembledTest likewise use it. TelegramClientGatewayTest still reconstructs its endpoint independently (finding above).
+- R3: met (dev scope) - The new helper regression keeps a foreign loopback listener open while requesting its occupied port and checks that a running server uses another port.
+- R4: met - Only unit-test sources/support change; no production changes, suppressions, or timeout increases.
+- R5: outside dev zone / pending task gate - Three consecutive green clean verify runs with the daemon running and mutation coverage >=85% are not established by the supplied dev checks. This report does not approve those task-wide gates.
+
+Reviewed the full dev-r2.patch and all seven resulting files in full; verified that their Git blob hashes match the patch result, so this review applies to the supplied patch. Read my own round 1 report only: its TelegramConfigTest finding is fixed. Checked the widened task, brief, SPEC.md, plan, helper contract, and production Telegram URL conversion. TD11 has no separate requirements.md, api.md, components.md, flows.md, or feature file. Reviewed correctness, readability, architecture, security, and performance. Supplied checks: Spotless clean and ./mvnw verify -Dno-it passed. Maven and mutation experiments were not run, per the reviewer role; no source files or other reviewer's reports were changed/read.

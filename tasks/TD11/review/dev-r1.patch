@@ -1,0 +1,67 @@
+diff --git a/src/test/java/com/video2podcast/config/TelegramConfigTest.java b/src/test/java/com/video2podcast/config/TelegramConfigTest.java
+index f27ced3..d644528 100644
+--- a/src/test/java/com/video2podcast/config/TelegramConfigTest.java
++++ b/src/test/java/com/video2podcast/config/TelegramConfigTest.java
+@@ -97,11 +97,7 @@ class TelegramConfigTest {
+ 
+   @org.junit.jupiter.api.Test
+   void theClientDoesNotResendARequestWhoseConnectionDropped() {
+-    com.github.tomakehurst.wiremock.WireMockServer server =
+-        new com.github.tomakehurst.wiremock.WireMockServer(
+-            com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig()
+-                .dynamicPort());
+-    server.start();
++    com.github.tomakehurst.wiremock.WireMockServer server = startLoopbackServer();
+     try {
+       server.stubFor(
+           com.github.tomakehurst.wiremock.client.WireMock.post(
+@@ -111,7 +107,7 @@ class TelegramConfigTest {
+                       .withFault(com.github.tomakehurst.wiremock.http.Fault.EMPTY_RESPONSE)));
+       AppProperties props =
+           new AppProperties(
+-              new AppProperties.Telegram("123:abc", 1L, true, "http://localhost:" + server.port()),
++              new AppProperties.Telegram("123:abc", 1L, true, "http://127.0.0.1:" + server.port()),
+               props("123:abc", 1L, true).access(),
+               props("123:abc", 1L, true).ollama(),
+               props("123:abc", 1L, true).whisper(),
+@@ -133,4 +129,40 @@ class TelegramConfigTest {
+       server.stop();
+     }
+   }
++
++  private static com.github.tomakehurst.wiremock.WireMockServer startLoopbackServer() {
++    RuntimeException last = null;
++    for (int attempt = 0; attempt < 3; attempt++) {
++      com.github.tomakehurst.wiremock.WireMockServer server =
++          new com.github.tomakehurst.wiremock.WireMockServer(
++              com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig()
++                  .bindAddress("127.0.0.1")
++                  .dynamicPort());
++      try {
++        server.start();
++        return server;
++      } catch (RuntimeException e) {
++        try {
++          server.stop();
++        } catch (Exception cleanupFailure) {
++          e.addSuppressed(cleanupFailure);
++        }
++        if (!isBindFailure(e)) {
++          throw e;
++        }
++        last = e;
++      }
++    }
++    throw new IllegalStateException("no free port on 127.0.0.1", last);
++  }
++
++  private static boolean isBindFailure(Throwable error) {
++    for (Throwable t = error; t != null; t = t.getCause()) {
++      if (t instanceof java.net.BindException
++          || (t.getMessage() != null && t.getMessage().contains("Address already in use"))) {
++        return true;
++      }
++    }
++    return false;
++  }
+ }
