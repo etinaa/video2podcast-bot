@@ -29,3 +29,6 @@ app:
     download-timeout: ${DOWNLOAD_TIMEOUT:PT30M}
     ffmpeg-timeout: ${FFMPEG_TIMEOUT:PT30M}
     sweep-interval: ${JOB_SWEEP_INTERVAL:PT1M}
+  deferred:
+    retry-interval: ${DEFERRED_RETRY_INTERVAL:PT2H}
+    max-attempts: ${DEFERRED_MAX_ATTEMPTS:12}

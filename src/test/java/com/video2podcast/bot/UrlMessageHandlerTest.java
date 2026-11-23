@@ -12,6 +12,8 @@ import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
+import com.video2podcast.job.DeferredJobs;
+import com.video2podcast.job.DeferredJobsException;
 import com.video2podcast.job.JobFailure;
 import com.video2podcast.job.JobProgress;
 import com.video2podcast.job.JobQueue;
@@ -44,8 +46,10 @@ class UrlMessageHandlerTest {
   private final ThreadSafeGateway gateway = new ThreadSafeGateway();
   private final JobQueue queue = new JobQueue(Duration.ofMillis(100));
   private final PipelineService pipeline = mock(PipelineService.class);
+  private final DeferredJobs deferred = mock(DeferredJobs.class);
   private final UrlMessageHandler handler =
-      new UrlMessageHandler(gateway, new UrlValidator(), queue, pipeline, new MutableClock(NOW));
+      new UrlMessageHandler(
+          gateway, new UrlValidator(), queue, pipeline, deferred, new MutableClock(NOW));
 
   /** The gateway is called from the worker and from the completion thread. */
   private static class ThreadSafeGateway implements TelegramGateway {
@@ -54,6 +58,7 @@ class UrlMessageHandlerTest {
     final List<RecordingGateway.Edit> edits = new CopyOnWriteArrayList<>();
     volatile boolean failSends;
     volatile boolean failEdits;
+    volatile long editDelayMillis;
     volatile String rejectedText;
     volatile CountDownLatch blockSend;
 
@@ -70,6 +75,13 @@ class UrlMessageHandlerTest {
 
     @Override
     public void editMessage(long chatId, int messageId, String html, List<InlineButton> buttons) {
+      if (editDelayMillis > 0) {
+        try {
+          Thread.sleep(editDelayMillis);
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        }
+      }
       if (failEdits) {
         throw new TelegramGatewayException("cannot edit", null);
       }
@@ -331,7 +343,8 @@ class UrlMessageHandlerTest {
           }
         };
     UrlMessageHandler other =
-        new UrlMessageHandler(watching, new UrlValidator(), queue, pipeline, new MutableClock(NOW));
+        new UrlMessageHandler(
+            watching, new UrlValidator(), queue, pipeline, deferred, new MutableClock(NOW));
 
     other.handle(SENDER, URL);
 
@@ -466,6 +479,7 @@ class UrlMessageHandlerTest {
             new UrlValidator(),
             shortQueue,
             pipeline,
+            deferred,
             new MutableClock(NOW),
             Duration.ofMillis(50));
     CountDownLatch slowSend = new CountDownLatch(1);
@@ -487,7 +501,7 @@ class UrlMessageHandlerTest {
     JobQueue closing = new JobQueue(Duration.ofMillis(100));
     UrlMessageHandler other =
         new UrlMessageHandler(
-            gateway, new UrlValidator(), closing, pipeline, new MutableClock(NOW));
+            gateway, new UrlValidator(), closing, pipeline, deferred, new MutableClock(NOW));
     CountDownLatch slowSend = new CountDownLatch(1);
     gateway.blockSend = slowSend;
     Thread sender = Thread.ofVirtual().start(() -> other.handle(SENDER, URL));
@@ -501,5 +515,71 @@ class UrlMessageHandlerTest {
     await(() -> gateway.edits.size() == 1);
     verify(pipeline, never()).run(any(), any());
     assertThat(gateway.calls).contains("send " + FAILED, "edit Failed.");
+  }
+
+  @Test
+  void anOutageParksTheJobAndOnlyEditsTheStatusMessage() throws Exception {
+    for (JobFailure.Kind kind :
+        List.of(JobFailure.Kind.SERVICE_UNREACHABLE, JobFailure.Kind.SUMMARY_UNREACHABLE)) {
+      gateway.calls.clear();
+      gateway.edits.clear();
+      doThrow(JobFailure.of(kind)).when(pipeline).run(any(), any());
+
+      handler.handle(SENDER, URL);
+
+      await(() -> gateway.edits.size() == 1);
+      assertThat(gateway.calls)
+          .containsExactly(
+              "send Queued: position 1",
+              "edit Service temporarily unavailable. We will send the result after it recovers.");
+    }
+    ArgumentCaptor<JobRequest> request = ArgumentCaptor.forClass(JobRequest.class);
+    verify(deferred, org.mockito.Mockito.times(2))
+        .park(request.capture(), org.mockito.ArgumentMatchers.anyInt());
+    assertThat(request.getValue().url()).isEqualTo(URL);
+    assertThat(request.getValue().ownerUserId()).isEqualTo(7);
+    assertThat(request.getValue().chatId()).isEqualTo(555);
+  }
+
+  @Test
+  void anOutageThatCannotBeParkedIsReportedAsAFailure() throws Exception {
+    doThrow(JobFailure.of(JobFailure.Kind.SERVICE_UNREACHABLE)).when(pipeline).run(any(), any());
+    doThrow(new DeferredJobsException("disk", null))
+        .when(deferred)
+        .park(any(), org.mockito.ArgumentMatchers.anyInt());
+
+    handler.handle(SENDER, URL);
+
+    await(() -> gateway.edits.size() == 1);
+    assertThat(gateway.calls)
+        .containsExactly(
+            "send Queued: position 1",
+            "send The transcription server is unreachable.",
+            "edit Failed.");
+  }
+
+  @Test
+  void aFailureThatIsNotAnOutageIsNotParked() throws Exception {
+    doThrow(JobFailure.of(JobFailure.Kind.PRIVATE)).when(pipeline).run(any(), any());
+
+    handler.handle(SENDER, URL);
+
+    await(() -> gateway.edits.size() == 1);
+    verify(deferred, never()).park(any(), org.mockito.ArgumentMatchers.anyInt());
+  }
+
+  @Test
+  void theParkedStatusIsEditedBeforeAnyLaterTaskCanRetryTheEntry() throws Exception {
+    doThrow(JobFailure.of(JobFailure.Kind.SERVICE_UNREACHABLE)).when(pipeline).run(any(), any());
+    gateway.editDelayMillis = 200;
+    List<String> seenByNextTask = new CopyOnWriteArrayList<>();
+
+    handler.handle(SENDER, URL);
+    // stands in for the retry of the parked entry, which runs on the same worker
+    queue.submit(() -> seenByNextTask.addAll(gateway.calls)).get(10, TimeUnit.SECONDS);
+
+    assertThat(seenByNextTask)
+        .contains(
+            "edit Service temporarily unavailable. We will send the result after it recovers.");
   }
 }

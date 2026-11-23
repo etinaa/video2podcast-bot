@@ -123,7 +123,16 @@ Health check: whisper reachable
 Health check: ollama unreachable (connection refused)
 ```
 
-Before every job the bot checks both services again (`GET /` on whisper-server, `GET /api/version` on Ollama; any HTTP answer counts as reachable). If one does not answer, the job fails before any download with "The transcription server is unreachable." and/or "The summary server is unreachable.". `HEALTH_TIMEOUT` (default `PT3S`) is how long one probe may take; a down service delays the next queued job by at most that plus one second.
+Before every job the bot checks both services again (`GET /` on whisper-server, `GET /api/version` on Ollama; any HTTP answer counts as reachable). If one does not answer, the job stops before any download and is parked (see below). Only when the queue file cannot be written does the user get "The transcription server is unreachable." and/or "The summary server is unreachable.". `HEALTH_TIMEOUT` (default `PT3S`) is how long one probe may take; a down service delays the next queued job by at most that plus one second.
+
+### Links parked during an outage
+
+When Whisper or Ollama is down, the bot keeps the link instead of failing it. The status message says "Service temporarily unavailable. We will send the result after it recovers." and the bot retries from scratch (nothing but the link and the owner data is stored; working files are deleted at once). Settings:
+
+- `DEFERRED_RETRY_INTERVAL` (default `PT2H`): the wait between two retry passes, also before the first pass after a start.
+- `DEFERRED_MAX_ATTEMPTS` (default `12`, at least 1): retries per link before the bot tells the user to send it again; 12 at two hours is about 24 hours.
+
+The queue is the file `deferred-jobs.json` in the directory of `ACCESS_FILE` (the `data` volume). It survives `podman compose down` and is lost if the volume is removed. It contains user links, so do not share it.
 
 ## whisper-server contract
 

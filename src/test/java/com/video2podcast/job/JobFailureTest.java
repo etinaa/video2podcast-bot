@@ -102,4 +102,18 @@ class JobFailureTest {
     org.assertj.core.api.Assertions.assertThatThrownBy(() -> JobFailure.unreachable(false, false))
         .isInstanceOf(IllegalArgumentException.class);
   }
+
+  @Test
+  void onlyTheTwoUnreachableKindsAreOutages() {
+    for (JobFailure.Kind kind : JobFailure.Kind.values()) {
+      boolean outage =
+          kind == JobFailure.Kind.SERVICE_UNREACHABLE
+              || kind == JobFailure.Kind.SUMMARY_UNREACHABLE;
+      org.assertj.core.api.Assertions.assertThat(JobFailure.of(kind).isServiceOutage())
+          .as(kind.name())
+          .isEqualTo(outage);
+    }
+    org.assertj.core.api.Assertions.assertThat(JobFailure.unreachable(true, true).isServiceOutage())
+        .isTrue();
+  }
 }

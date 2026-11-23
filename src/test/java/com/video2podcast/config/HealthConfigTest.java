@@ -15,7 +15,7 @@ import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 class HealthConfigTest {
 
   private static AppProperties props(Duration timeout) {
-    return new AppProperties(null, null, null, null, null, new AppProperties.Health(timeout));
+    return new AppProperties(null, null, null, null, null, new AppProperties.Health(timeout), null);
   }
 
   private ApplicationContextRunner runner(Duration timeout) {

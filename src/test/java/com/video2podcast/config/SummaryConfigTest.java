@@ -18,6 +18,7 @@ class SummaryConfigTest {
         new AppProperties.Ollama("http://localhost:11434", "m", 8192, Duration.ofMinutes(10)),
         null,
         null,
+        null,
         null);
   }
 
@@ -41,7 +42,8 @@ class SummaryConfigTest {
           new AppProperties.Ollama("http://localhost:11434", "m", 8192, Duration.ofSeconds(-1))
         }) {
       new ApplicationContextRunner()
-          .withBean(AppProperties.class, () -> new AppProperties(null, null, bad, null, null, null))
+          .withBean(
+              AppProperties.class, () -> new AppProperties(null, null, bad, null, null, null, null))
           .withUserConfiguration(SummaryConfig.class)
           .run(context -> assertThat(context).hasFailed());
     }

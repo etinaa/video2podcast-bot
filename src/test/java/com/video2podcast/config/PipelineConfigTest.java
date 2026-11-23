@@ -3,10 +3,14 @@ package com.video2podcast.config;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 
+import com.video2podcast.access.AccessService;
 import com.video2podcast.bot.DeliveryCallbackHandler;
 import com.video2podcast.bot.TelegramGateway;
 import com.video2podcast.bot.UrlMessageHandler;
 import com.video2podcast.job.ButtonRefresher;
+import com.video2podcast.job.DeferredJobRunner;
+import com.video2podcast.job.DeferredJobs;
+import com.video2podcast.job.DeferredNotifier;
 import com.video2podcast.job.DeliveryService;
 import com.video2podcast.job.HealthChecks;
 import com.video2podcast.job.JobQueue;
@@ -41,7 +45,8 @@ class PipelineConfigTest {
             Duration.ofMinutes(30),
             Duration.ofMinutes(30),
             Duration.ofMinutes(1)),
-        new AppProperties.Health(Duration.ofSeconds(3)));
+        new AppProperties.Health(Duration.ofSeconds(3)),
+        new AppProperties.Deferred(Duration.ofHours(2), 12));
   }
 
   private ApplicationContextRunner runner(boolean enabled) {
@@ -58,6 +63,7 @@ class PipelineConfigTest {
         .withBean(JobQueue.class, () -> mock(JobQueue.class))
         .withBean(UrlValidator.class, UrlValidator::new)
         .withBean(HealthChecks.class, () -> mock(HealthChecks.class))
+        .withBean(AccessService.class, () -> mock(AccessService.class))
         .withBean(Clock.class, Clock::systemUTC)
         .withPropertyValues("app.telegram.enabled=" + enabled);
   }
@@ -71,6 +77,9 @@ class PipelineConfigTest {
           assertThat(context).hasSingleBean(ButtonRefresher.class);
           assertThat(context).hasSingleBean(UrlMessageHandler.class);
           assertThat(context).hasSingleBean(DeliveryService.class);
+          assertThat(context).hasSingleBean(DeferredJobs.class);
+          assertThat(context).hasSingleBean(DeferredNotifier.class);
+          assertThat(context).hasSingleBean(DeferredJobRunner.class);
           assertThat(context).hasSingleBean(DeliveryCallbackHandler.class);
           assertThat(context.getBean(SummaryPublisher.class)).isNotNull();
           assertThat(context.getBean(PipelineService.class)).isNotNull();
@@ -87,6 +96,7 @@ class PipelineConfigTest {
           assertThat(context).doesNotHaveBean(ButtonRefresher.class);
           assertThat(context).doesNotHaveBean(UrlMessageHandler.class);
           assertThat(context).doesNotHaveBean(DeliveryService.class);
+          assertThat(context).doesNotHaveBean(DeferredJobRunner.class);
           assertThat(context).doesNotHaveBean(DeliveryCallbackHandler.class);
         });
   }

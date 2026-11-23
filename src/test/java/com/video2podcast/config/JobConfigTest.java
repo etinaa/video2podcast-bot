@@ -48,7 +48,8 @@ class JobConfigTest {
             Duration.ofMinutes(30),
             Duration.ofMinutes(30),
             Duration.ofMinutes(1)),
-        new AppProperties.Health(Duration.ofSeconds(3)));
+        new AppProperties.Health(Duration.ofSeconds(3)),
+        new AppProperties.Deferred(Duration.ofHours(2), 12));
   }
 
   private ApplicationContextRunner runner() {

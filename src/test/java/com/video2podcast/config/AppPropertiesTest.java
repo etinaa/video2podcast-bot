@@ -1,6 +1,7 @@
 package com.video2podcast.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.video2podcast.access.AccessService;
 import java.nio.file.Path;
@@ -38,6 +39,25 @@ class AppPropertiesTest {
     assertThat(props.jobs().metadataTimeout()).isEqualTo(Duration.ofMinutes(1));
     assertThat(props.jobs().downloadTimeout()).isEqualTo(Duration.ofMinutes(30));
     assertThat(props.jobs().ffmpegTimeout()).isEqualTo(Duration.ofMinutes(30));
+  }
+
+  @Test
+  void deferredSettingsDefaultToTwoHoursAndTwelveAttempts() {
+    assertThat(props.deferred().retryInterval()).isEqualTo(Duration.ofHours(2));
+    assertThat(props.deferred().maxAttempts()).isEqualTo(12);
+  }
+
+  @Test
+  void deferredSettingsAreValidated() {
+    assertThat(new AppProperties.Deferred(Duration.ofSeconds(1), 1).maxAttempts()).isEqualTo(1);
+    for (Duration bad : new Duration[] {null, Duration.ZERO, Duration.ofSeconds(-1)}) {
+      assertThatThrownBy(() -> new AppProperties.Deferred(bad, 12))
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("DEFERRED_RETRY_INTERVAL");
+    }
+    assertThatThrownBy(() -> new AppProperties.Deferred(Duration.ofHours(2), 0))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("DEFERRED_MAX_ATTEMPTS");
   }
 
   @Test

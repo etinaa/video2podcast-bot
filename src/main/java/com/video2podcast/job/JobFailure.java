@@ -38,6 +38,11 @@ public class JobFailure extends RuntimeException {
     return kind;
   }
 
+  /** True when Whisper or Ollama (or both) could not be reached, so a later try may succeed. */
+  public boolean isServiceOutage() {
+    return kind == Kind.SERVICE_UNREACHABLE || kind == Kind.SUMMARY_UNREACHABLE;
+  }
+
   /** A failure with the fixed message of {@code kind}; {@code TOO_LONG} uses {@link #tooLong}. */
   public static JobFailure of(Kind kind) {
     return new JobFailure(kind, messageOf(kind));

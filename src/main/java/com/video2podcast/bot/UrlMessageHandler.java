@@ -1,5 +1,7 @@
 package com.video2podcast.bot;
 
+import com.video2podcast.job.DeferredJobs;
+import com.video2podcast.job.DeferredJobsException;
 import com.video2podcast.job.JobFailure;
 import com.video2podcast.job.JobQueue;
 import com.video2podcast.job.JobRequest;
@@ -14,6 +16,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
 import org.slf4j.Logger;
@@ -35,6 +38,7 @@ public class UrlMessageHandler {
   private final UrlValidator validator;
   private final JobQueue queue;
   private final PipelineService pipeline;
+  private final DeferredJobs deferred;
   private final Clock clock;
   private final Duration statusWait;
 
@@ -43,8 +47,9 @@ public class UrlMessageHandler {
       UrlValidator validator,
       JobQueue queue,
       PipelineService pipeline,
+      DeferredJobs deferred,
       Clock clock) {
-    this(gateway, validator, queue, pipeline, clock, STATUS_WAIT);
+    this(gateway, validator, queue, pipeline, deferred, clock, STATUS_WAIT);
   }
 
   /** {@code statusWait} is how long a started job waits for its status message to exist. */
@@ -53,12 +58,14 @@ public class UrlMessageHandler {
       UrlValidator validator,
       JobQueue queue,
       PipelineService pipeline,
+      DeferredJobs deferred,
       Clock clock,
       Duration statusWait) {
     this.gateway = gateway;
     this.validator = validator;
     this.queue = queue;
     this.pipeline = pipeline;
+    this.deferred = deferred;
     this.clock = clock;
     this.statusWait = statusWait;
   }
@@ -76,9 +83,10 @@ public class UrlMessageHandler {
         new JobRequest(JobStore.newJobId(), sender.userId(), sender.chatId(), url, clock.instant());
     CompletableFuture<Integer> statusId = new CompletableFuture<>();
     AtomicReference<JobFailure> failure = new AtomicReference<>();
+    AtomicBoolean parked = new AtomicBoolean();
     CompletableFuture<Void> future;
     try {
-      future = queue.submit(() -> runJob(request, statusId, failure));
+      future = queue.submit(() -> runJob(request, statusId, failure, parked));
     } catch (RejectedExecutionException e) {
       tellFailure(sender.chatId(), JobFailure.of(JobFailure.Kind.FAILED, e));
       return;
@@ -95,7 +103,8 @@ public class UrlMessageHandler {
     }
     statusId.complete(id);
     future.whenCompleteAsync(
-        (result, error) -> finish(request.jobId(), sender.chatId(), id, failure.get(), error),
+        (result, error) ->
+            finish(request.jobId(), sender.chatId(), id, failure.get(), parked.get(), error),
         Thread::startVirtualThread);
   }
 
@@ -103,7 +112,8 @@ public class UrlMessageHandler {
   private void runJob(
       JobRequest request,
       CompletableFuture<Integer> statusId,
-      AtomicReference<JobFailure> failure) {
+      AtomicReference<JobFailure> failure,
+      AtomicBoolean parked) {
     int id;
     try {
       id = statusId.get(statusWait.toMillis(), TimeUnit.MILLISECONDS);
@@ -126,16 +136,47 @@ public class UrlMessageHandler {
     try {
       pipeline.run(request, new StatusReporter(gateway, request.chatId(), id));
     } catch (JobFailure f) {
-      failure.set(f);
+      if (f.isServiceOutage() && tryPark(request, id)) {
+        parked.set(true);
+        // On the worker, before the next task: a retry of this entry cannot run, and so cannot
+        // edit the status, until this edit is done.
+        editStatus(request.chatId(), id, DeferredMessages.PARKED);
+      } else {
+        failure.set(f);
+      }
     } catch (RuntimeException e) {
       // PipelineService has logged the stack trace; finish logs the failure.
       failure.set(JobFailure.of(JobFailure.Kind.FAILED, e));
     }
   }
 
+  /** Keeps the link for a retry after the service is back; false if that could not be saved. */
+  private boolean tryPark(JobRequest request, int statusId) {
+    try {
+      deferred.park(request, statusId);
+      return true;
+    } catch (DeferredJobsException e) {
+      if (LOG.isWarnEnabled()) {
+        LOG.warn("Could not park job {}", request.jobId(), e);
+      }
+      return false;
+    }
+  }
+
   /** Runs after the job has left the queue. Every Telegram problem is logged and dropped. */
   private void finish(
-      String jobId, long chatId, int statusId, JobFailure failure, Throwable error) {
+      String jobId,
+      long chatId,
+      int statusId,
+      JobFailure failure,
+      boolean parked,
+      Throwable error) {
+    if (parked) {
+      if (LOG.isInfoEnabled()) {
+        LOG.info("Job {} parked until the service recovers", jobId);
+      }
+      return;
+    }
     JobFailure outcome =
         failure == null && error != null ? JobFailure.of(JobFailure.Kind.FAILED, error) : failure;
     if (outcome == null) {

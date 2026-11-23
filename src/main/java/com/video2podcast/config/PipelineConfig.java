@@ -1,11 +1,16 @@
 package com.video2podcast.config;
 
+import com.video2podcast.access.AccessService;
 import com.video2podcast.bot.DeliveryCallbackHandler;
 import com.video2podcast.bot.SummaryButtonRefresher;
 import com.video2podcast.bot.SummaryMessagePublisher;
+import com.video2podcast.bot.TelegramDeferredNotifier;
 import com.video2podcast.bot.TelegramGateway;
 import com.video2podcast.bot.UrlMessageHandler;
 import com.video2podcast.job.ButtonRefresher;
+import com.video2podcast.job.DeferredJobRunner;
+import com.video2podcast.job.DeferredJobs;
+import com.video2podcast.job.DeferredNotifier;
 import com.video2podcast.job.DeliveryService;
 import com.video2podcast.job.HealthChecks;
 import com.video2podcast.job.JobQueue;
@@ -63,8 +68,32 @@ public class PipelineConfig {
       UrlValidator validator,
       JobQueue queue,
       PipelineService pipeline,
+      DeferredJobs deferred,
       Clock clock) {
-    return new UrlMessageHandler(gateway, validator, queue, pipeline, clock);
+    return new UrlMessageHandler(gateway, validator, queue, pipeline, deferred, clock);
+  }
+
+  @Bean
+  DeferredJobs deferredJobs(AppProperties props, Clock clock) {
+    return new DeferredJobs(props.access().file().resolveSibling("deferred-jobs.json"), clock);
+  }
+
+  @Bean
+  DeferredNotifier deferredNotifier(TelegramGateway gateway) {
+    return new TelegramDeferredNotifier(gateway);
+  }
+
+  @Bean
+  DeferredJobRunner deferredJobRunner(
+      DeferredJobs jobs,
+      PipelineService pipeline,
+      JobQueue queue,
+      DeferredNotifier notifier,
+      AccessService access,
+      Clock clock,
+      AppProperties props) {
+    return new DeferredJobRunner(
+        jobs, pipeline, queue, notifier, access::isAllowed, clock, props.deferred().maxAttempts());
   }
 
   @Bean

@@ -34,7 +34,8 @@ class TelegramConfigTest {
             Duration.ofMinutes(30),
             Duration.ofMinutes(30),
             Duration.ofMinutes(1)),
-        new AppProperties.Health(Duration.ofSeconds(3)));
+        new AppProperties.Health(Duration.ofSeconds(3)),
+        new AppProperties.Deferred(Duration.ofHours(2), 12));
   }
 
   private ApplicationContextRunner runner(String token, long admin, boolean enabled) {
@@ -113,7 +114,8 @@ class TelegramConfigTest {
               props("123:abc", 1L, true).ollama(),
               props("123:abc", 1L, true).whisper(),
               props("123:abc", 1L, true).jobs(),
-              props("123:abc", 1L, true).health());
+              props("123:abc", 1L, true).health(),
+              props("123:abc", 1L, true).deferred());
 
       org.telegram.telegrambots.meta.generics.TelegramClient client =
           new TelegramConfig().telegramClient(props);

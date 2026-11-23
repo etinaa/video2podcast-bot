@@ -17,6 +17,7 @@ class TranscriptConfigTest {
         null,
         new AppProperties.Whisper("http://localhost:8081", Duration.ofMinutes(10)),
         null,
+        null,
         null);
   }
 
