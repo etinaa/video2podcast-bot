@@ -57,7 +57,7 @@ Compose down: podman compose down
 Host (once):  ollama pull qwen3:32b
 Host (run):   whisper-server --model <path-to-ggml-large-v3-turbo.bin> --port 8081
 ```
-Required env vars: `TELEGRAM_BOT_TOKEN`, `ADMIN_USER_ID`, `ACCESS_FILE` (default `/data/allowed-users.json`, on a separate volume from the job files), `OLLAMA_BASE_URL` (default `http://host.containers.internal:11434`), `OLLAMA_MODEL` (default `qwen3:32b`), `WHISPER_BASE_URL` (default `http://host.containers.internal:8081`), `WHISPER_TIMEOUT` (default `PT10M`), `WORK_DIR`, `MAX_VIDEO_DURATION` (default `PT3H`), `JOB_RETENTION` (default `PT1H`), `METADATA_TIMEOUT` (default `PT1M`), `DOWNLOAD_TIMEOUT` (default `PT30M`), `FFMPEG_TIMEOUT` (default `PT30M`), `ACCESS_REQUEST_COOLDOWN` (default `PT24H`). They are read from the environment only and never committed.
+Required env vars: `TELEGRAM_BOT_TOKEN`, `ADMIN_USER_ID`, `ACCESS_FILE` (default `/data/allowed-users.json`, on a separate volume from the job files), `OLLAMA_BASE_URL` (default `http://host.containers.internal:11434`), `OLLAMA_MODEL` (default `qwen3:32b`), `WHISPER_BASE_URL` (default `http://host.containers.internal:8081`), `WHISPER_TIMEOUT` (default `PT10M`), `WORK_DIR`, `MAX_VIDEO_DURATION` (default `PT3H`), `JOB_RETENTION` (default `PT1H`), `METADATA_TIMEOUT` (default `PT1M`), `DOWNLOAD_TIMEOUT` (default `PT30M`), `FFMPEG_TIMEOUT` (default `PT30M`), `ACCESS_REQUEST_COOLDOWN` (default `PT24H`), `DEFERRED_RETRY_INTERVAL` (default `PT2H`), `DEFERRED_MAX_ATTEMPTS` (default `12`). They are read from the environment only and never committed.
 
 ## Project Structure
 ```
@@ -131,7 +131,7 @@ Access is an allowlist of Telegram **user ids** (not chat ids), checked on every
 3. On Approve, the user is added to the allowlist and notified. On Deny, the request is removed and the user is notified. A denied user can't send a new request for 24 hours (`ACCESS_REQUEST_COOLDOWN`, default `PT24H`). The same cooldown applies to an allowed user the owner removes with `/deny`.
 4. Any other message from an unknown user gets a short reply: "No access. Send /start to request it. Your id: 123". These replies are rate-limited to one per minute per user.
 
-**Storage:** `allowed-users.json` holds the allowed users (id, username, addedAt, addedBy) pending requests (id, username, name, requestedAt, request message id), so the Approve and Deny buttons keep working after a restart, and recent denials (id, deniedAt), so the 24-hour cooldown survives a restart. A file that is not valid JSON is renamed to `allowed-users.json.corrupt-<time>` and the bot starts with an empty allowlist (only the owner has access). It is written atomically (temp file and rename) behind a lock and cached in memory. No database.
+**Storage:** `deferred-jobs.json`, next to `allowed-users.json`, holds the links parked while Whisper or Ollama is down (id, url, owner, chat, status message id, attempts, parkedAt), in parking order; it is written atomically behind a lock, and a corrupt file is renamed to `deferred-jobs.json.corrupt-<time>`. `allowed-users.json` holds the allowed users (id, username, addedAt, addedBy) pending requests (id, username, name, requestedAt, request message id), so the Approve and Deny buttons keep working after a restart, and recent denials (id, deniedAt), so the 24-hour cooldown survives a restart. A file that is not valid JSON is renamed to `allowed-users.json.corrupt-<time>` and the bot starts with an empty allowlist (only the owner has access). It is written atomically (temp file and rename) behind a lock and cached in memory. No database.
 
 **Job ownership:** `job.json` stores `ownerUserId`. A button tap on a job is accepted only from its owner, even if the tapper is on the allowlist. The queue is shared and first come, first served.
 
@@ -208,7 +208,7 @@ While work is running, one status message is edited with the current stage (queu
 11. The allowlist and pending requests survive a bot restart, and a pending request's buttons still work afterwards.
 12. A user can't tap another user's **Download audio** or **Download transcript** button.
 13. Invalid, private, too-long, or unsupported URLs produce a clear failure message, and the working directory is removed.
-14. The user is told if Ollama or the Whisper server is unreachable, instead of a silent hang.
+14. The user is told if Ollama or the Whisper server is unreachable, instead of a silent hang. The link is kept in `deferred-jobs.json` and retried from scratch every `DEFERRED_RETRY_INTERVAL` until it succeeds, fails for another reason, the owner loses access, or `DEFERRED_MAX_ATTEMPTS` retries are used up.
 15. `./mvnw clean verify` passes: unit tests and JaCoCo demonstrate at least 90% line coverage and 90% branch coverage across all production code, with the build failing below either threshold. No test needs network access.
 
 ## Out of Scope (Deferred)
