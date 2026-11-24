@@ -38,3 +38,13 @@ Rebuild: `podman compose build` → exit 0 (`comms/build-2.log`), `yt-dlp_linux_
 Decision (orchestrator): no signature check (`SHA2-256SUMS.sig`), because no independently checkable key fingerprint is available. Residual risk: an attacker who replaces both the binary and the checksum file in the release. Accepted for a locally run personal bot; adding a pinned key later is a small change if the owner supplies the fingerprint.
 
 No Java files changed, so no `src/it` zone and no new full `clean verify`; the last full gate is TD8's (803 unit tests, 392 IT entries, mutation 92%).
+
+## Re-check from a clean checkout (2026-11-24, after T18)
+
+`git clone` of HEAD `af86e15` into a new directory, `.env` from `.env.example` with the real token and admin id, Whisper started on the host (Ollama already running).
+
+- `podman compose build` → exit 0; Maven recompiled 89 source files, `BUILD SUCCESS`.
+- `podman compose up -d` → exit 0; `Started Video2PodcastApplication in 1.131 seconds`; `Health check: whisper reachable` and `Health check: ollama reachable`; no WARN or ERROR at start.
+- The owner sent a short English video to the containerized bot: summary with `Duration` in minutes and seconds and both buttons, transcript delivered.
+- Download audio failed on the first tap: three Telegram calls in a row ended with `java.net.SocketTimeoutException: timeout` (`sendAudio` at 08:40:38 and 08:41:12, `answerCallbackQuery` at 08:40:39 UTC). The bot answered "Could not send the audio. Tap the button to try again." Afterwards six `getMe` calls from the container took 0.27 s each, and the next tap delivered an audio that plays. The cause of the timeouts is not established (a short network stall of the Podman VM is the likely one). No code change was made.
+- `podman compose down` removed only the `clean-checkout` project; the other containers on the machine were not touched.
