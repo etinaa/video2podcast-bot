@@ -86,7 +86,7 @@ Sizes: S = 1-2 files, M = 3-5 files.
   - Files: `access/AdminCommands.java`, `access/AccessRequestFlow.java`, `bot/Keyboards.java`, tests
 
 ### Checkpoint 2: Access control
-- [ ] All tests pass
+- [x] All tests pass
 - [ ] Manual: a second Telegram account sends `/start`, the owner approves from chat, and the second account is let in. A denied account is refused for 24 hours.
 - [ ] Review with human before proceeding
 
@@ -146,7 +146,7 @@ Sizes: S = 1-2 files, M = 3-5 files.
   - Files: `job/PipelineService.java`, `bot/UrlMessageHandler.java`, `bot/SummaryMessageFormatter.java`, `bot/BotUpdateHandler.java`, test
 
 ### Checkpoint 3: Summary pipeline
-- [ ] All tests pass and `./mvnw verify` meets the coverage target
+- [x] All tests pass and `./mvnw verify` meets the coverage target
 - [x] Manual with real services: a short real video produces a summary message with both buttons and nothing else (checked by the owner 2026-11-19 on a 125-second YouTube trailer: 40 seconds end to end, summary with title, duration, 9 bullets and both buttons, no files; the intermediate status stages `Transcribing` and `Summarizing` were not seen live, the owner accepted the checkpoint on the strength of `SummaryFlowIT`)
 - [ ] Review with human before proceeding
 
