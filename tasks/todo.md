@@ -42,7 +42,7 @@ Sizes: S = 1-2 files, M = 3-5 files.
 - [x] `./mvnw verify` passes on Java 27 with Spotless and JaCoCo
 - [x] The bot answers `/whoami` from a real Telegram account
 - [x] Whisper and Ollama contracts are documented and match the spec's assumptions (or the spec is updated)
-- [x] Review with human before proceeding
+- [ ] Review with human before proceeding
 
 ## Phase 2: Access control
 
@@ -88,7 +88,7 @@ Sizes: S = 1-2 files, M = 3-5 files.
 ### Checkpoint 2: Access control
 - [ ] All tests pass
 - [ ] Manual: a second Telegram account sends `/start`, the owner approves from chat, and the second account is let in. A denied account is refused for 24 hours.
-- [x] Review with human before proceeding
+- [ ] Review with human before proceeding
 
 ## Phase 3: Summary pipeline
 
@@ -148,7 +148,7 @@ Sizes: S = 1-2 files, M = 3-5 files.
 ### Checkpoint 3: Summary pipeline
 - [ ] All tests pass and `./mvnw verify` meets the coverage target
 - [x] Manual with real services: a short real video produces a summary message with both buttons and nothing else (checked by the owner 2026-11-19 on a 125-second YouTube trailer: 40 seconds end to end, summary with title, duration, 9 bullets and both buttons, no files; the intermediate status stages `Transcribing` and `Summarizing` were not seen live, the owner accepted the checkpoint on the strength of `SummaryFlowIT`)
-- [x] Review with human before proceeding
+- [ ] Review with human before proceeding
 
 ## Phase 4: On-demand delivery and cleanup
 
