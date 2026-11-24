@@ -72,7 +72,7 @@ public class FailureModeWorld {
     logger.addAppender(appender);
   }
 
-  @After(value = "@T16", order = 110)
+  @After(value = "@T16 or @T18", order = 110)
   public void close() throws Exception {
     try {
       w.holds.forEach(h -> h.release.countDown());
@@ -251,8 +251,8 @@ public class FailureModeWorld {
   }
 
   void rejected() {
-    terminal(w.user, "Failed.");
-    assertThat(failures(w.user)).hasSize(1);
+    queuedTerminal(w.user, DeferredSupport.PARKED);
+    assertThat(failures(w.user)).isEmpty();
   }
 
   void noWork(String url) {
@@ -260,7 +260,23 @@ public class FailureModeWorld {
   }
 
   void noRejectedDirectory() {
-    rejected();
+    PipelineWorld.until(() -> {
+      Path queue = w.root.resolve("deferred-jobs.json");
+      assertThat(queue).isRegularFile();
+      var entries =
+          PipelineWorld.json(PipelineWorld.read(queue))
+              .path("jobs")
+              .valueStream()
+              .filter(j -> j.path("ownerUserId").asLong() == w.user)
+              .toList();
+      assertThat(entries).isNotEmpty();
+      var entry = entries.getFirst();
+      assertThat(w.calls("editMessageText"))
+          .anyMatch(e ->
+              e.json().path("chat_id").asLong() == entry.path("chatId").asLong()
+                  && e.json().path("message_id").asInt() == entry.path("statusMessageId").asInt()
+                  && e.text().equals(DeferredSupport.PARKED));
+    });
     Set<Path> legitimate = new HashSet<>();
     if (retained != null) legitimate.add(retained);
     for (var summary : w.summaries()) {

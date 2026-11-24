@@ -202,6 +202,8 @@ final class RetentionSupport {
 
     @Override
     public ScheduledFuture<?> scheduleWithFixedDelay(Runnable task, Instant start, Duration delay) {
+      if (task.toString().endsWith(".retryAll"))
+        return super.scheduleWithFixedDelay(task, start, delay);
       registrations.incrementAndGet();
       assertThat(delay).isEqualTo(Duration.ofMillis(100));
       return super.scheduleWithFixedDelay(

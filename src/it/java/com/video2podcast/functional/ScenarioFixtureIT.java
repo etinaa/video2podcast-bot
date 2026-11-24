@@ -128,8 +128,13 @@ class ScenarioFixtureIT {
       w.fake = true;
       new PipelineSetupSteps(w).failure("connection refusal on both Whisper attempts");
       w.send("http://videos.example/t11-refusal");
-      assertThat(w.finishOne().text()).isEqualTo("Failed.");
-      w.reply(FailureModeWorld.WHISPER);
+      assertThat(w.finishOne().text()).isEqualTo(DeferredSupport.PARKED);
+      assertThat(w.calls("sendMessage")).noneMatch(e -> e.text().equals(FailureModeWorld.WHISPER));
+      var entries =
+          PipelineWorld.json(PipelineWorld.read(w.root.resolve("deferred-jobs.json"))).path("jobs");
+      assertThat(entries).hasSize(1);
+      assertThat(entries.get(0).path("url").asText())
+          .isEqualTo("http://videos.example/t11-refusal");
       assertThat(w.commands.stream().map(PipelineWorld::stage).toList())
           .containsExactly("metadata", "download", "WAV", "split");
       assertThat(w.calls("editMessageText")).anyMatch(e -> e.text().equals("Transcribing 1/1…"));

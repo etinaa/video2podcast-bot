@@ -50,6 +50,10 @@ public class WhoamiSteps {
 
   @Then("the bot replies with the user's Telegram id")
   public void repliesWithTheId() {
+    if (pipeline.active) {
+      pipeline.reply("Your Telegram id: <code>" + pipeline.user + "</code>");
+      return;
+    }
     assertThat(FunctionalTest.sentTo(userId))
         .singleElement()
         .satisfies(call ->
@@ -64,7 +68,10 @@ public class WhoamiSteps {
       return;
     }
     if (pipeline.active) {
-      assertThat(pipeline.calls("sendMessage")).isEmpty();
+      assertThat(
+              pipeline.calls("sendMessage").stream()
+                  .filter(e -> e.nanos() >= pipeline.lastUpdateNanos))
+          .isEmpty();
       return;
     }
     assertThat(FunctionalTest.telegramCalls("sendMessage")).isEmpty();

@@ -50,13 +50,14 @@ class FailureModesIT {
       health.message(202, "Your Telegram id: <code>202</code>");
       health.send(202, "http://videos.example/refused");
       health.rejected();
-      String expected =
-          whisperDown
-              ? FailureModeWorld.WHISPER + (ollamaDown ? " " + FailureModeWorld.OLLAMA : "")
-              : FailureModeWorld.OLLAMA;
-      assertThat(health.failures(202))
-          .singleElement()
-          .satisfies(e -> assertThat(e.text()).isEqualTo(expected));
+      health.queuedTerminal(202, DeferredSupport.PARKED);
+      assertThat(health.failures(202)).isEmpty();
+      var jobs =
+          PipelineWorld.json(PipelineWorld.read(pipeline.root.resolve("deferred-jobs.json")))
+              .path("jobs");
+      assertThat(jobs).hasSize(1);
+      assertThat(jobs.get(0).path("ownerUserId").asLong()).isEqualTo(202);
+      assertThat(jobs.get(0).path("attempts").asInt()).isZero();
       assertThat(health.tools).isEmpty();
       assertThat(pipeline.dirs()).isEmpty();
       assertThat(pipeline.service("whisper")).isEmpty();

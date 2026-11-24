@@ -10,6 +10,7 @@ import java.util.*;
 /** T14 observations use persisted state and external requests, never sweeper return values. */
 public class RetentionAssertionSteps {
   final TranscriptWorld w;
+  @org.springframework.beans.factory.annotation.Autowired private PipelineWorld pipeline;
 
   public RetentionAssertionSteps(TranscriptWorld world) {
     w = world;
@@ -174,6 +175,10 @@ public class RetentionAssertionSteps {
 
   @Then("the Telegram mock receives no sendAudio request")
   public void noAudio() {
+    if (pipeline.active) {
+      assertThat(pipeline.calls("sendAudio")).isEmpty();
+      return;
+    }
     none("sendAudio");
   }
 

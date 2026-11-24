@@ -39,10 +39,12 @@ import org.springframework.context.annotation.Primary;
 /** Scenario-owned application and external fixtures. No processing service is invoked by steps. */
 public class PipelineWorld implements AutoCloseable {
   static final ObjectMapper JSON = new ObjectMapper();
-  static final String TAGS = "@T8 or @T9 or @T10 or @T11 or @TD2";
+  static final String TAGS = "@T8 or @T9 or @T10 or @T11 or @TD2 or @T18";
   static final Duration WAIT = Duration.ofSeconds(30);
   final List<Event> events = new CopyOnWriteArrayList<>();
   final List<List<String>> commands = new CopyOnWriteArrayList<>();
+  final List<ProcessWindow> processWindows = new CopyOnWriteArrayList<>();
+  String privateMetadataUrl;
   final Map<String, String> properties = new LinkedHashMap<>();
   final Map<Event, byte[]> expectedWavs = new ConcurrentHashMap<>();
   final Map<Path, byte[]> audioSnapshot = new ConcurrentHashMap<>();
@@ -76,6 +78,7 @@ public class PipelineWorld implements AutoCloseable {
   boolean timeout, splitThree;
   boolean refuseWhisperDuringWork, refuseOllamaDuringWork;
   FailureModeWorld health;
+  DeferredSupport deferred;
   int exitCode = 1, summaryId = 701;
   long seconds = 300;
   String extension = "m4a",
@@ -89,6 +92,8 @@ public class PipelineWorld implements AutoCloseable {
   Predicate<JsonNode> reject = n -> false;
   int withdrawalStatus = 200;
   boolean rejectSummary;
+  int rejectionStatus = 500;
+  int whisperPort, ollamaPort;
   final List<Path> seenJobs = new CopyOnWriteArrayList<>();
   Map<Path, byte[]> preserved = new HashMap<>();
   String wholeTranscript;
@@ -102,6 +107,8 @@ public class PipelineWorld implements AutoCloseable {
     whisper = server("whisper");
     ollama = server("ollama");
     proxy = server("media");
+    whisperPort = whisper.port();
+    ollamaPort = ollama.port();
     telegram.stubFor(
         any(anyUrl()).willReturn(aResponse().withHeader("Content-Type", "application/json")));
     whisper.stubFor(
@@ -129,6 +136,10 @@ public class PipelineWorld implements AutoCloseable {
               c.getBeanFactory().registerSingleton("pipelineFixtureClock", clock);
               c.getBeanFactory()
                   .registerSingleton("pipelineFixtureProcesses", (ProcessRunner) this::run);
+              if (deferred != null) {
+                deferred.schedule.initialize();
+                c.getBeanFactory().registerSingleton("taskScheduler", deferred.schedule);
+              }
             })
             .run(
                 properties.entrySet().stream()
@@ -236,6 +247,17 @@ public class PipelineWorld implements AutoCloseable {
   }
 
   ProcessResult run(List<String> original, Duration limit) {
+    long began = System.nanoTime();
+    try {
+      return runCommand(original, limit);
+    } finally {
+      processWindows.add(new ProcessWindow(began, System.nanoTime()));
+    }
+  }
+
+  record ProcessWindow(long start, long end) {}
+
+  private ProcessResult runCommand(List<String> original, Duration limit) {
     if (refuseWhisperDuringWork) {
       refuseWhisperDuringWork = false;
       whisper.stop();
@@ -248,6 +270,10 @@ public class PipelineWorld implements AutoCloseable {
     commands.add(List.copyOf(original));
     String stage = stage(original);
     try {
+      if (stage.equals("metadata")
+          && privateMetadataUrl != null
+          && original.contains(privateMetadataUrl))
+        return new ProcessResult(1, "", "This video is private");
       if (stage.equals(failStage)) {
         if (stage.equals("download")) {
           Path dir = output(original).getParent();
@@ -397,7 +423,7 @@ public class PipelineWorld implements AutoCloseable {
   }
 
   Event latestTerminal() {
-    return latestStatus(Set.of("Done.", "Failed."));
+    return latestStatus(Set.of("Done.", "Failed.", DeferredSupport.PARKED));
   }
 
   Event latestStatus(Set<String> statuses) {
@@ -608,7 +634,8 @@ public class PipelineWorld implements AutoCloseable {
             .atMost(Duration.ofSeconds(10))
             .until(() ->
                 calls("editMessageText").stream()
-                        .filter(e -> Set.of("Done.", "Failed.").contains(e.text()))
+                        .filter(e ->
+                            Set.of("Done.", "Failed.", DeferredSupport.PARKED).contains(e.text()))
                         .count()
                     >= acceptedStatuses.get());
       } catch (org.awaitility.core.ConditionTimeoutException e) {
@@ -617,6 +644,7 @@ public class PipelineWorld implements AutoCloseable {
       context.close();
       context = null;
     }
+    if (deferred != null) deferred.schedule.shutdown();
     List<Map<String, Object>> whisperTimings =
         whisper == null
             ? List.of()
@@ -855,7 +883,7 @@ public class PipelineWorld implements AutoCloseable {
         boolean summary = send && n.has("reply_markup");
         if (reject.test(n) || (rejectSummary && summary))
           return aResponse()
-              .withStatus(500)
+              .withStatus(rejectionStatus)
               .withBody("{\"ok\":false,\"description\":\"private /tmp/secret\"}")
               .build();
         if (!send && n.path("message_id").asInt() == summaryId && withdrawalStatus != 200)

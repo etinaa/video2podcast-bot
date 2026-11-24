@@ -16,6 +16,19 @@ public class FailureModeSteps {
     w = h.w;
   }
 
+  @Then(
+      "^the original queued status is edited to \"([^\"]+)\" within HEALTH_TIMEOUT plus 1 second and a 500 millisecond test scheduling tolerance$")
+  public void statusDeadline(String text) {
+    h.queuedTerminal(w.user, text);
+    var e =
+        w.calls("editMessageText").stream()
+            .filter(v -> v.text().equals(text))
+            .findFirst()
+            .orElseThrow();
+    assertThat(e.nanos() - w.lastUpdateNanos)
+        .isLessThanOrEqualTo(h.timeout().plusMillis(1500).toNanos());
+  }
+
   @Given("^the (Whisper|Ollama) health HTTP mock answers with (HTTP \\d+|connection refusal)$")
   public void initial(String service, String response) {
     h.policy(service, response);
@@ -30,6 +43,7 @@ public class FailureModeSteps {
   @Given("both health HTTP mocks answer HTTP 200 for the next accepted link")
   @When("both health HTTP mocks begin answering HTTP 200")
   public void healthy() {
+    if (w.deferred != null) w.deferred.restoreModels();
     for (String s : List.of("whisper", "ollama")) h.next(s, "HTTP 200");
   }
 
@@ -395,7 +409,8 @@ public class FailureModeSteps {
     assertThat(h.messages(w.user)).noneMatch(e -> e.text().equals(text));
   }
 
-  @Then("only {string} is downloaded and receives a successful summary")
+  @Then(
+      "^before the next deferred retry interval only \"([^\"]+)\" is downloaded and receives a successful summary$")
   public void recovered(String url) {
     h.summary(w.user);
     assertThat(h.tools.stream().filter(t -> PipelineWorld.stage(t.args()).equals("download")))
@@ -428,6 +443,29 @@ public class FailureModeSteps {
     h.noWork("http://videos.example/video");
   }
 
+  @Then("user 202's queued status is edited to {string}")
+  public void user202Status(String text) {
+    h.queuedTerminal(202, text);
+  }
+
+  @Then("user 101 receives no outage notification")
+  public void no101Outage() {
+    assertThat(h.failures(101)).isEmpty();
+  }
+
+  @Then(
+      "^Alice's queued status is edited to \"([^\"]+)\" within HEALTH_TIMEOUT plus 1 second and a 500 millisecond test scheduling tolerance$")
+  public void parkedDeadline(String text) {
+    h.queuedTerminal(w.user, text);
+    var e =
+        w.calls("editMessageText").stream()
+            .filter(v -> v.text().equals(text) && v.json().path("chat_id").asLong() == w.user)
+            .findFirst()
+            .orElseThrow();
+    var p = h.since("whisper", h.observation).getFirst();
+    assertThat(e.nanos() - p.received).isLessThanOrEqualTo(h.timeout().plusMillis(1500).toNanos());
+  }
+
   @Then("Alice's queued status is edited to {string}")
   public void aliceStatus(String text) {
     h.queuedTerminal(w.user, text);
@@ -442,7 +480,14 @@ public class FailureModeSteps {
       "Bob's first yt-dlp invocation occurs after Alice's preflight ends and before the held HTTP response is released")
   public void workerReleased() {
     h.summary(w.bob);
-    long failure = h.message(w.user, FailureModeWorld.WHISPER).nanos();
+    long failure =
+        w.calls("editMessageText").stream()
+            .filter(e ->
+                e.text().equals(DeferredSupport.PARKED)
+                    && e.json().path("chat_id").asLong() == w.user)
+            .findFirst()
+            .orElseThrow()
+            .nanos();
     var first = h.tools.getFirst();
     assertThat(first.nanos()).isGreaterThan(failure);
     assertThat(first.args()).contains("http://videos.example/following");

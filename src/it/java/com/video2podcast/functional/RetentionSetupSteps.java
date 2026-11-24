@@ -14,6 +14,7 @@ import java.util.concurrent.TimeUnit;
  */
 public class RetentionSetupSteps {
   final TranscriptWorld w;
+  @org.springframework.beans.factory.annotation.Autowired private PipelineWorld pipeline;
 
   public RetentionSetupSteps(TranscriptWorld world) {
     w = world;
@@ -84,6 +85,10 @@ public class RetentionSetupSteps {
 
   @When("the application restarts using the same work directory and access store")
   public void restart() throws Exception {
+    if (pipeline.deferred != null) {
+      pipeline.deferred.restart();
+      return;
+    }
     support().restart();
   }
 
@@ -215,6 +220,11 @@ public class RetentionSetupSteps {
 
   @When("the Whisper mock releases the successful response")
   public void releaseWhisper() {
+    if (pipeline.deferred != null) {
+      pipeline.release(pipeline.whisperHold);
+      pipeline.deferred.heldPass = false;
+      return;
+    }
     w.audio.releaseWhisper.countDown();
   }
 }
