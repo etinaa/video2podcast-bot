@@ -252,7 +252,7 @@ Sizes: S = 1-2 files, M = 3-5 files.
 
 ### Checkpoint: Complete
 - [x] All 15 success criteria in `SPEC.md` are met
-- [ ] `./mvnw verify` is green and `podman compose up -d` works from a clean checkout
+- [x] `./mvnw verify` is green and `podman compose up -d` works from a clean checkout
 - [ ] Ready for review
 
 ## Backlog
