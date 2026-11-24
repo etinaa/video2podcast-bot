@@ -376,7 +376,7 @@ Work that is not scheduled in a phase. Technical debt carries the `[debt]` mark.
   - Verify: `./mvnw clean verify` three times, `-Pmutation` at least 85%.
   - Depends on: TD6, T16
   - Files: `src/it/java/com/video2podcast/functional/WireMocks.java` and the other users of `WireMockServer` in `src/it`, `src/test/java/com/video2podcast/config/TelegramConfigTest.java`
-- [~] **TD12 [debt]: Ollama through Spring AI instead of the hand-written client** (M)
+- [x] **TD12 [debt]: Ollama through Spring AI instead of the hand-written client** (M)
   - Raised by the owner (2026-11-24): `OllamaClient` is written by hand on the JDK `HttpClient`, but the project is on Spring. Technical task, ollama client only.
   - Acceptance:
     - First step, a compatibility check, with the result in `tasks/TD12/evidence.md`: a Spring AI version that works with Spring Boot 4.1.x, and proof that `OllamaChatModel` lets us set `num_ctx`, `num_predict`, `think:false` and the model on every request and returns `prompt_eval_count`. If one of them is missing, the Developer stops and the owner decides whether to go on.

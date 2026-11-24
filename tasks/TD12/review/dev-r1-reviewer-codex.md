@@ -1,0 +1,18 @@
+VERDICT: CHANGES_REQUESTED
+
+## Findings
+- [Important] src/main/java/com/video2podcast/summary/OllamaLlmClient.java:84 - An answer timeout after HTTP headers arrive is classified as OTHER, not TIMEOUT. With the configured Spring Framework 7.0.10 `JdkClientHttpRequestFactory`, the deadline closes the response input stream; JSON extraction then throws a cause chain ending in ordinary `IOException`s (`closed`, `subscription cancelled`), without either timeout type checked here. Reproduced through `SummaryConfig` against a loopback server sending HTTP 200, JSON headers and partial JSON immediately, then stalling for 2.5 seconds with a 500 ms configured timeout: `LlmException.reason()` was OTHER. `SummaryService` consequently reports FAILED / "Summary failed. Please try again later." instead of the required TIMEOUT message. Preserve a typed timeout signal for expiry during body consumption and add a transport-level regression test for headers/partial body followed by a stall. The existing fixed-delay test only exercises expiry before headers; do not classify every closed/reset stream as a timeout.
+- [Important] pom.xml:26 - The required mutation gate has no result for this implementation. The supplied checks cover normal verification, not `verify -Pmutation -Dno-it`; the available `target/pit-reports/index.html` is dated 2026-11-24 10:09:59, predates the round-1 patch (11:18:14), and its report contains removed `OllamaClient` rather than `OllamaLlmClient`. Keeping the threshold at 85 does not establish that the replacement tests meet it. Have the Developer/orchestrator run the required mutation check after the fix and record the result without weakening thresholds or adding suppressions.
+
+## Requirements
+- R1: met - `tasks/TD12/evidence.md` records the Boot 4.1.2 compatibility check and proves per-request model, context, output limit, thinking flag and prompt-token usage.
+- R2: met - The starter/BOM implement `LlmClient` through Spring AI; the handwritten chat client is removed. The interface, `SummaryService`, prompts and user-facing error text definitions are unchanged.
+- R3: not met - Request settings, environment bindings, truncation guard, no-retry policy and bean isolation are covered, but body-read deadline expiry produces the wrong failure kind (first finding).
+- R4: met - `OllamaProbe` preserves the original GET /api/version probe implementation and transport settings; Whisper is untouched.
+- R5: not met - D17 records the dependency/version and no new suppressions or weakened gates appear. Supplied Spotless, JaCoCo, SpotBugs and PMD checks are green, but mutation >=85% is unverified for this patch (second finding).
+- R6: not met - The evidence file contains the compatibility stub check only; the required real qwen3:32b request through the bot has no recorded result. This is a task-level acceptance gate still to complete, not a request to add live/network-dependent unit tests.
+
+## Review evidence
+- Reviewed the fixed `dev-r1.patch`, both sides of the client replacement, full touched files, TD12 brief/backlog/evidence, D17 and relevant existing T10/T16 contracts. Verified that all surviving touched files have Git blob hashes matching the patch. No other reviewer's report was read.
+- Accepted the supplied green results: 910 unit tests with quality checks, and the Developer's full verification with 488 integration tests. Did not run Maven or mutate production/test files, as required by the reviewer role.
+- Ran only the isolated loopback diagnostic described in the first finding, using the built application classes and its resolved runtime dependencies. No bot messages or real inference requests were sent.
