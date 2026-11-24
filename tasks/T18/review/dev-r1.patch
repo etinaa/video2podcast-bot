@@ -1,0 +1,1852 @@
+diff --git a/.env.example b/.env.example
+index 205e9de..48f7e18 100644
+--- a/.env.example
++++ b/.env.example
+@@ -38,3 +38,9 @@ ADMIN_USER_ID=
+ # DOWNLOAD_TIMEOUT=PT30M
+ # FFMPEG_TIMEOUT=PT30M
+ # JOB_SWEEP_INTERVAL=PT1M
++
++# Links parked while Whisper or Ollama is down (deferred-jobs.json next to ACCESS_FILE)
++# Wait between two retry passes, also before the first one after a start (ISO-8601 duration)
++# DEFERRED_RETRY_INTERVAL=PT2H
++# Retries per link before giving up (at least 1); 12 at two hours is about 24 hours
++# DEFERRED_MAX_ATTEMPTS=12
+diff --git a/docs/host-setup.md b/docs/host-setup.md
+index 9da096e..f0349c8 100644
+--- a/docs/host-setup.md
++++ b/docs/host-setup.md
+@@ -125,6 +125,15 @@ Health check: ollama unreachable (connection refused)
+ 
+ Before every job the bot checks both services again (`GET /` on whisper-server, `GET /api/version` on Ollama; any HTTP answer counts as reachable). If one does not answer, the job fails before any download with "The transcription server is unreachable." and/or "The summary server is unreachable.". `HEALTH_TIMEOUT` (default `PT3S`) is how long one probe may take; a down service delays the next queued job by at most that plus one second.
+ 
++### Links parked during an outage
++
++When Whisper or Ollama is down, the bot keeps the link instead of failing it. The status message says "Service temporarily unavailable. We will send the result after it recovers." and the bot retries from scratch (nothing but the link and the owner data is stored; working files are deleted at once). Settings:
++
++- `DEFERRED_RETRY_INTERVAL` (default `PT2H`): the wait between two retry passes, also before the first pass after a start.
++- `DEFERRED_MAX_ATTEMPTS` (default `12`, at least 1): retries per link before the bot tells the user to send it again; 12 at two hours is about 24 hours.
++
++The queue is the file `deferred-jobs.json` in the directory of `ACCESS_FILE` (the `data` volume). It survives `podman compose down` and is lost if the volume is removed. It contains user links, so do not share it.
++
+ ## whisper-server contract
+ 
+ Captured against the real server with a 7-second WAV (`say` + `ffmpeg -ar 16000 -ac 1 -c:a pcm_s16le`).
+diff --git a/src/main/java/com/video2podcast/bot/DeferredMessages.java b/src/main/java/com/video2podcast/bot/DeferredMessages.java
+new file mode 100644
+index 0000000..da02f63
+--- /dev/null
++++ b/src/main/java/com/video2podcast/bot/DeferredMessages.java
+@@ -0,0 +1,11 @@
++package com.video2podcast.bot;
++
++/** The fixed texts of the deferred-job flow. */
++final class DeferredMessages {
++
++  static final String PARKED =
++      "Service temporarily unavailable. We will send the result after it recovers.";
++  static final String GAVE_UP = "We could not process this link. Please send it again later.";
++
++  private DeferredMessages() {}
++}
+diff --git a/src/main/java/com/video2podcast/bot/TelegramDeferredNotifier.java b/src/main/java/com/video2podcast/bot/TelegramDeferredNotifier.java
+new file mode 100644
+index 0000000..4916ba8
+--- /dev/null
++++ b/src/main/java/com/video2podcast/bot/TelegramDeferredNotifier.java
+@@ -0,0 +1,56 @@
++package com.video2podcast.bot;
++
++import com.video2podcast.job.DeferredNotifier;
++import com.video2podcast.job.JobFailure;
++import java.util.List;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
++/** Tells the user how a deferred retry ended. Every Telegram problem is logged and dropped. */
++public class TelegramDeferredNotifier implements DeferredNotifier {
++
++  private static final Logger LOG = LoggerFactory.getLogger(TelegramDeferredNotifier.class);
++
++  private final TelegramGateway gateway;
++
++  public TelegramDeferredNotifier(TelegramGateway gateway) {
++    this.gateway = gateway;
++  }
++
++  @Override
++  public void completed(long chatId, int statusMessageId) {
++    editStatus(chatId, statusMessageId, "Done.");
++  }
++
++  @Override
++  public void gaveUp(long chatId, int statusMessageId) {
++    send(chatId, DeferredMessages.GAVE_UP);
++    editStatus(chatId, statusMessageId, "Failed.");
++  }
++
++  @Override
++  public void failed(long chatId, int statusMessageId, JobFailure failure) {
++    send(chatId, Html.escape(failure.getMessage()));
++    editStatus(chatId, statusMessageId, "Failed.");
++  }
++
++  private void send(long chatId, String html) {
++    try {
++      gateway.sendMessage(chatId, html, List.of());
++    } catch (RuntimeException e) {
++      if (LOG.isWarnEnabled()) {
++        LOG.warn("Could not send a deferred-job message to chat {}", chatId, e);
++      }
++    }
++  }
++
++  private void editStatus(long chatId, int statusMessageId, String text) {
++    try {
++      gateway.editMessage(chatId, statusMessageId, text, List.of());
++    } catch (RuntimeException e) {
++      if (LOG.isWarnEnabled()) {
++        LOG.warn("Could not edit the status message {} in chat {}", statusMessageId, chatId, e);
++      }
++    }
++  }
++}
+diff --git a/src/main/java/com/video2podcast/bot/UrlMessageHandler.java b/src/main/java/com/video2podcast/bot/UrlMessageHandler.java
+index 6db89f9..64dcbce 100644
+--- a/src/main/java/com/video2podcast/bot/UrlMessageHandler.java
++++ b/src/main/java/com/video2podcast/bot/UrlMessageHandler.java
+@@ -1,5 +1,7 @@
+ package com.video2podcast.bot;
+ 
++import com.video2podcast.job.DeferredJobs;
++import com.video2podcast.job.DeferredJobsException;
+ import com.video2podcast.job.JobFailure;
+ import com.video2podcast.job.JobQueue;
+ import com.video2podcast.job.JobRequest;
+@@ -14,6 +16,7 @@ import java.util.concurrent.ExecutionException;
+ import java.util.concurrent.RejectedExecutionException;
+ import java.util.concurrent.TimeUnit;
+ import java.util.concurrent.TimeoutException;
++import java.util.concurrent.atomic.AtomicBoolean;
+ import java.util.concurrent.atomic.AtomicReference;
+ import java.util.regex.Pattern;
+ import org.slf4j.Logger;
+@@ -35,6 +38,7 @@ public class UrlMessageHandler {
+   private final UrlValidator validator;
+   private final JobQueue queue;
+   private final PipelineService pipeline;
++  private final DeferredJobs deferred;
+   private final Clock clock;
+   private final Duration statusWait;
+ 
+@@ -43,8 +47,9 @@ public class UrlMessageHandler {
+       UrlValidator validator,
+       JobQueue queue,
+       PipelineService pipeline,
++      DeferredJobs deferred,
+       Clock clock) {
+-    this(gateway, validator, queue, pipeline, clock, STATUS_WAIT);
++    this(gateway, validator, queue, pipeline, deferred, clock, STATUS_WAIT);
+   }
+ 
+   /** {@code statusWait} is how long a started job waits for its status message to exist. */
+@@ -53,12 +58,14 @@ public class UrlMessageHandler {
+       UrlValidator validator,
+       JobQueue queue,
+       PipelineService pipeline,
++      DeferredJobs deferred,
+       Clock clock,
+       Duration statusWait) {
+     this.gateway = gateway;
+     this.validator = validator;
+     this.queue = queue;
+     this.pipeline = pipeline;
++    this.deferred = deferred;
+     this.clock = clock;
+     this.statusWait = statusWait;
+   }
+@@ -76,9 +83,10 @@ public class UrlMessageHandler {
+         new JobRequest(JobStore.newJobId(), sender.userId(), sender.chatId(), url, clock.instant());
+     CompletableFuture<Integer> statusId = new CompletableFuture<>();
+     AtomicReference<JobFailure> failure = new AtomicReference<>();
++    AtomicBoolean parked = new AtomicBoolean();
+     CompletableFuture<Void> future;
+     try {
+-      future = queue.submit(() -> runJob(request, statusId, failure));
++      future = queue.submit(() -> runJob(request, statusId, failure, parked));
+     } catch (RejectedExecutionException e) {
+       tellFailure(sender.chatId(), JobFailure.of(JobFailure.Kind.FAILED, e));
+       return;
+@@ -95,7 +103,8 @@ public class UrlMessageHandler {
+     }
+     statusId.complete(id);
+     future.whenCompleteAsync(
+-        (result, error) -> finish(request.jobId(), sender.chatId(), id, failure.get(), error),
++        (result, error) ->
++            finish(request.jobId(), sender.chatId(), id, failure.get(), parked.get(), error),
+         Thread::startVirtualThread);
+   }
+ 
+@@ -103,7 +112,8 @@ public class UrlMessageHandler {
+   private void runJob(
+       JobRequest request,
+       CompletableFuture<Integer> statusId,
+-      AtomicReference<JobFailure> failure) {
++      AtomicReference<JobFailure> failure,
++      AtomicBoolean parked) {
+     int id;
+     try {
+       id = statusId.get(statusWait.toMillis(), TimeUnit.MILLISECONDS);
+@@ -126,16 +136,45 @@ public class UrlMessageHandler {
+     try {
+       pipeline.run(request, new StatusReporter(gateway, request.chatId(), id));
+     } catch (JobFailure f) {
+-      failure.set(f);
++      if (f.isServiceOutage() && tryPark(request, id)) {
++        parked.set(true);
++      } else {
++        failure.set(f);
++      }
+     } catch (RuntimeException e) {
+       // PipelineService has logged the stack trace; finish logs the failure.
+       failure.set(JobFailure.of(JobFailure.Kind.FAILED, e));
+     }
+   }
+ 
++  /** Keeps the link for a retry after the service is back; false if that could not be saved. */
++  private boolean tryPark(JobRequest request, int statusId) {
++    try {
++      deferred.park(request, statusId);
++      return true;
++    } catch (DeferredJobsException e) {
++      if (LOG.isWarnEnabled()) {
++        LOG.warn("Could not park job {}", request.jobId(), e);
++      }
++      return false;
++    }
++  }
++
+   /** Runs after the job has left the queue. Every Telegram problem is logged and dropped. */
+   private void finish(
+-      String jobId, long chatId, int statusId, JobFailure failure, Throwable error) {
++      String jobId,
++      long chatId,
++      int statusId,
++      JobFailure failure,
++      boolean parked,
++      Throwable error) {
++    if (parked) {
++      if (LOG.isInfoEnabled()) {
++        LOG.info("Job {} parked until the service recovers", jobId);
++      }
++      editStatus(chatId, statusId, DeferredMessages.PARKED);
++      return;
++    }
+     JobFailure outcome =
+         failure == null && error != null ? JobFailure.of(JobFailure.Kind.FAILED, error) : failure;
+     if (outcome == null) {
+diff --git a/src/main/java/com/video2podcast/config/AppProperties.java b/src/main/java/com/video2podcast/config/AppProperties.java
+index 171e560..8966cc6 100644
+--- a/src/main/java/com/video2podcast/config/AppProperties.java
++++ b/src/main/java/com/video2podcast/config/AppProperties.java
+@@ -6,7 +6,13 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
+ 
+ @ConfigurationProperties(prefix = "app")
+ public record AppProperties(
+-    Telegram telegram, Access access, Ollama ollama, Whisper whisper, Jobs jobs, Health health) {
++    Telegram telegram,
++    Access access,
++    Ollama ollama,
++    Whisper whisper,
++    Jobs jobs,
++    Health health,
++    Deferred deferred) {
+ 
+   /** {@code apiUrl} overrides the Telegram Bot API base URL (blank means the real API). */
+   public record Telegram(String botToken, long adminUserId, boolean enabled, String apiUrl) {}
+@@ -33,4 +39,20 @@ public record AppProperties(
+       Duration downloadTimeout,
+       Duration ffmpegTimeout,
+       Duration sweepInterval) {}
++
++  /**
++   * {@code retryInterval} is the wait between two passes over the parked links (and before the
++   * first one after a start); {@code maxAttempts} is how many retries an entry gets.
++   */
++  public record Deferred(Duration retryInterval, int maxAttempts) {
++
++    public Deferred {
++      if (retryInterval == null || retryInterval.isZero() || retryInterval.isNegative()) {
++        throw new IllegalArgumentException("DEFERRED_RETRY_INTERVAL must be a positive duration");
++      }
++      if (maxAttempts < 1) {
++        throw new IllegalArgumentException("DEFERRED_MAX_ATTEMPTS must be at least 1");
++      }
++    }
++  }
+ }
+diff --git a/src/main/java/com/video2podcast/config/PipelineConfig.java b/src/main/java/com/video2podcast/config/PipelineConfig.java
+index e08954c..7e94c7a 100644
+--- a/src/main/java/com/video2podcast/config/PipelineConfig.java
++++ b/src/main/java/com/video2podcast/config/PipelineConfig.java
+@@ -1,11 +1,16 @@
+ package com.video2podcast.config;
+ 
++import com.video2podcast.access.AccessService;
+ import com.video2podcast.bot.DeliveryCallbackHandler;
+ import com.video2podcast.bot.SummaryButtonRefresher;
+ import com.video2podcast.bot.SummaryMessagePublisher;
++import com.video2podcast.bot.TelegramDeferredNotifier;
+ import com.video2podcast.bot.TelegramGateway;
+ import com.video2podcast.bot.UrlMessageHandler;
+ import com.video2podcast.job.ButtonRefresher;
++import com.video2podcast.job.DeferredJobRunner;
++import com.video2podcast.job.DeferredJobs;
++import com.video2podcast.job.DeferredNotifier;
+ import com.video2podcast.job.DeliveryService;
+ import com.video2podcast.job.HealthChecks;
+ import com.video2podcast.job.JobQueue;
+@@ -63,8 +68,32 @@ public class PipelineConfig {
+       UrlValidator validator,
+       JobQueue queue,
+       PipelineService pipeline,
++      DeferredJobs deferred,
+       Clock clock) {
+-    return new UrlMessageHandler(gateway, validator, queue, pipeline, clock);
++    return new UrlMessageHandler(gateway, validator, queue, pipeline, deferred, clock);
++  }
++
++  @Bean
++  DeferredJobs deferredJobs(AppProperties props, Clock clock) {
++    return new DeferredJobs(props.access().file().resolveSibling("deferred-jobs.json"), clock);
++  }
++
++  @Bean
++  DeferredNotifier deferredNotifier(TelegramGateway gateway) {
++    return new TelegramDeferredNotifier(gateway);
++  }
++
++  @Bean
++  DeferredJobRunner deferredJobRunner(
++      DeferredJobs jobs,
++      PipelineService pipeline,
++      JobQueue queue,
++      DeferredNotifier notifier,
++      AccessService access,
++      Clock clock,
++      AppProperties props) {
++    return new DeferredJobRunner(
++        jobs, pipeline, queue, notifier, access::isAllowed, clock, props.deferred().maxAttempts());
+   }
+ 
+   @Bean
+diff --git a/src/main/java/com/video2podcast/job/DeferredJob.java b/src/main/java/com/video2podcast/job/DeferredJob.java
+new file mode 100644
+index 0000000..df9e40c
+--- /dev/null
++++ b/src/main/java/com/video2podcast/job/DeferredJob.java
+@@ -0,0 +1,21 @@
++package com.video2podcast.job;
++
++import java.time.Instant;
++
++/**
++ * One parked link. Only what a retry from scratch needs is kept: the link, who asked and where, the
++ * status message to keep up to date, and how many retries ended in an outage.
++ */
++public record DeferredJob(
++    String id,
++    String url,
++    long ownerUserId,
++    long chatId,
++    int statusMessageId,
++    int attempts,
++    Instant parkedAt) {
++
++  public DeferredJob withAttempts(int newAttempts) {
++    return new DeferredJob(id, url, ownerUserId, chatId, statusMessageId, newAttempts, parkedAt);
++  }
++}
+diff --git a/src/main/java/com/video2podcast/job/DeferredJobRunner.java b/src/main/java/com/video2podcast/job/DeferredJobRunner.java
+new file mode 100644
+index 0000000..07a7475
+--- /dev/null
++++ b/src/main/java/com/video2podcast/job/DeferredJobRunner.java
+@@ -0,0 +1,192 @@
++package com.video2podcast.job;
++
++import java.time.Clock;
++import java.util.List;
++import java.util.Optional;
++import java.util.concurrent.CancellationException;
++import java.util.concurrent.RejectedExecutionException;
++import java.util.concurrent.atomic.AtomicBoolean;
++import java.util.function.LongPredicate;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++import org.springframework.scheduling.annotation.Scheduled;
++
++/**
++ * Retries the parked links from scratch. A pass walks a snapshot of the queue; each entry runs on
++ * the shared {@link JobQueue} and the next one is submitted when it is done, so the scheduler
++ * thread never waits for a job and user jobs slip in between entries. Logs carry the entry id,
++ * never the link.
++ */
++public class DeferredJobRunner {
++
++  private static final Logger LOG = LoggerFactory.getLogger(DeferredJobRunner.class);
++
++  /** A retry shows no stage progress: the status message keeps the parked text. */
++  private static final JobProgress NO_PROGRESS =
++      new JobProgress() {
++        @Override
++        public void downloading() {
++          // silent on purpose
++        }
++
++        @Override
++        public void transcribing(int n, int total) {
++          // silent on purpose
++        }
++
++        @Override
++        public void summarizing() {
++          // silent on purpose
++        }
++      };
++
++  private final DeferredJobs jobs;
++  private final PipelineService pipeline;
++  private final JobQueue queue;
++  private final DeferredNotifier notifier;
++  private final LongPredicate hasAccess;
++  private final Clock clock;
++  private final int maxAttempts;
++  private final AtomicBoolean passRunning;
++
++  public DeferredJobRunner(
++      DeferredJobs jobs,
++      PipelineService pipeline,
++      JobQueue queue,
++      DeferredNotifier notifier,
++      LongPredicate hasAccess,
++      Clock clock,
++      int maxAttempts) {
++    this(jobs, pipeline, queue, notifier, hasAccess, clock, maxAttempts, new AtomicBoolean());
++  }
++
++  /** {@code passRunning} is true while a pass is in flight. */
++  DeferredJobRunner(
++      DeferredJobs jobs,
++      PipelineService pipeline,
++      JobQueue queue,
++      DeferredNotifier notifier,
++      LongPredicate hasAccess,
++      Clock clock,
++      int maxAttempts,
++      AtomicBoolean passRunning) {
++    this.passRunning = passRunning;
++    this.jobs = jobs;
++    this.pipeline = pipeline;
++    this.queue = queue;
++    this.notifier = notifier;
++    this.hasAccess = hasAccess;
++    this.clock = clock;
++    this.maxAttempts = maxAttempts;
++  }
++
++  /**
++   * One pass over a snapshot of the queue. Returns at once; does nothing if a pass is still running
++   * or the queue is empty.
++   */
++  @Scheduled(
++      fixedDelayString = "${app.deferred.retry-interval}",
++      initialDelayString = "${app.deferred.retry-interval}")
++  public void retryAll() {
++    if (!passRunning.compareAndSet(false, true)) {
++      return;
++    }
++    List<String> ids = jobs.entries().stream().map(DeferredJob::id).toList();
++    submitFrom(ids, 0);
++  }
++
++  private void submitFrom(List<String> ids, int index) {
++    if (index >= ids.size()) {
++      passRunning.set(false);
++      return;
++    }
++    try {
++      queue
++          .submit(() -> retry(ids.get(index)))
++          .whenComplete((result, error) -> {
++            if (error instanceof CancellationException) {
++              passRunning.set(false);
++            } else {
++              submitFrom(ids, index + 1);
++            }
++          });
++    } catch (RejectedExecutionException e) {
++      passRunning.set(false);
++    }
++  }
++
++  /** The work of one entry, on the worker thread. */
++  void retry(String id) {
++    Optional<DeferredJob> found = jobs.find(id);
++    if (found.isEmpty()) {
++      return;
++    }
++    DeferredJob job = found.get();
++    if (!hasAccess.test(job.ownerUserId())) {
++      removeQuietly(id);
++      if (LOG.isInfoEnabled()) {
++        LOG.info("Deferred job {} dropped: the user has no access any more", id);
++      }
++      return;
++    }
++    try {
++      pipeline.run(
++          new JobRequest(
++              JobStore.newJobId(), job.ownerUserId(), job.chatId(), job.url(), clock.instant()),
++          NO_PROGRESS);
++    } catch (JobFailure failure) {
++      onFailure(job, failure);
++      return;
++    } catch (RuntimeException e) {
++      onFailure(job, JobFailure.of(JobFailure.Kind.FAILED, e));
++      return;
++    }
++    removeQuietly(id);
++    notifier.completed(job.chatId(), job.statusMessageId());
++  }
++
++  private void onFailure(DeferredJob job, JobFailure failure) {
++    if (Thread.currentThread().isInterrupted()) {
++      return;
++    }
++    if (failure.isServiceOutage()) {
++      onOutage(job, failure);
++      return;
++    }
++    if (LOG.isWarnEnabled()) {
++      LOG.warn("Deferred job {} failed: {}", job.id(), failure.kind());
++    }
++    removeQuietly(job.id());
++    notifier.failed(job.chatId(), job.statusMessageId(), failure);
++  }
++
++  private void onOutage(DeferredJob job, JobFailure failure) {
++    int attempts = job.attempts() + 1;
++    try {
++      if (jobs.recordFailedAttempt(job.id()).isEmpty()) {
++        return;
++      }
++    } catch (DeferredJobsException e) {
++      if (LOG.isWarnEnabled()) {
++        LOG.warn("Could not record attempt {} of deferred job {}", attempts, job.id(), e);
++      }
++    }
++    if (LOG.isInfoEnabled()) {
++      LOG.info("Deferred job {} attempt {} ended in {}", job.id(), attempts, failure.kind());
++    }
++    if (attempts >= maxAttempts) {
++      removeQuietly(job.id());
++      notifier.gaveUp(job.chatId(), job.statusMessageId());
++    }
++  }
++
++  private void removeQuietly(String id) {
++    try {
++      jobs.remove(id);
++    } catch (DeferredJobsException e) {
++      if (LOG.isWarnEnabled()) {
++        LOG.warn("Could not remove deferred job {}", id, e);
++      }
++    }
++  }
++}
+diff --git a/src/main/java/com/video2podcast/job/DeferredJobs.java b/src/main/java/com/video2podcast/job/DeferredJobs.java
+new file mode 100644
+index 0000000..f31a913
+--- /dev/null
++++ b/src/main/java/com/video2podcast/job/DeferredJobs.java
+@@ -0,0 +1,169 @@
++package com.video2podcast.job;
++
++import com.video2podcast.storage.AtomicFiles;
++import com.video2podcast.storage.Json;
++import java.io.IOException;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.nio.file.StandardCopyOption;
++import java.time.Clock;
++import java.time.Instant;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Optional;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
++/**
++ * The links waiting for Whisper or Ollama to come back, kept in {@code deferred-jobs.json}. Every
++ * change is written to the file first and becomes visible only after the write succeeded, so a
++ * failed write leaves the previous queue in place. The file holds user links: never log it.
++ */
++public final class DeferredJobs {
++
++  private static final Logger LOG = LoggerFactory.getLogger(DeferredJobs.class);
++
++  /** The shape of the file. */
++  private record Content(List<DeferredJob> jobs) {}
++
++  private final Path file;
++  private final Clock clock;
++  private final List<DeferredJob> queue = new ArrayList<>();
++
++  /**
++   * Loads the file now. A missing file is an empty queue. A file that is not valid JSON or has an
++   * invalid entry is renamed to {@code <name>.corrupt-<epoch seconds>} and the queue starts empty.
++   *
++   * @throws DeferredJobsException if the file cannot be read or renamed
++   */
++  public DeferredJobs(Path file, Clock clock) {
++    this.file = file;
++    this.clock = clock;
++    this.queue.addAll(load());
++  }
++
++  private List<DeferredJob> load() {
++    if (!Files.exists(file)) {
++      return List.of();
++    }
++    try {
++      Optional<List<DeferredJob>> parsed = parse(Files.readAllBytes(file));
++      if (parsed.isPresent()) {
++        return parsed.get();
++      }
++      Path aside =
++          file.resolveSibling(file.getFileName() + ".corrupt-" + clock.instant().getEpochSecond());
++      Files.move(file, aside, StandardCopyOption.REPLACE_EXISTING);
++      if (LOG.isErrorEnabled()) {
++        LOG.error(
++            "{} is not a valid queue, moved to {}. Starting with an empty queue.", file, aside);
++      }
++      return List.of();
++    } catch (IOException e) {
++      throw new DeferredJobsException("Cannot read " + file, e);
++    }
++  }
++
++  /** The entries, or empty when the content is not valid JSON or has an invalid entry. */
++  private static Optional<List<DeferredJob>> parse(byte[] bytes) {
++    try {
++      Content content = Json.MAPPER.readValue(bytes, Content.class);
++      if (content == null) {
++        return Optional.empty();
++      }
++      if (content.jobs() == null) {
++        return Optional.of(List.of());
++      }
++      return content.jobs().stream().allMatch(DeferredJobs::isValid)
++          ? Optional.of(List.copyOf(content.jobs()))
++          : Optional.empty();
++    } catch (IOException e) {
++      return Optional.empty();
++    }
++  }
++
++  private static boolean isValid(DeferredJob job) {
++    return job != null
++        && job.id() != null
++        && !job.id().isBlank()
++        && job.url() != null
++        && !job.url().isBlank()
++        && job.ownerUserId() != 0
++        && job.chatId() != 0
++        && job.statusMessageId() != 0
++        && job.parkedAt() != null
++        && job.attempts() >= 0;
++  }
++
++  /**
++   * Appends an entry for {@code request}, with the job id of the first run, no attempts and the
++   * current time as the parking time.
++   *
++   * @throws DeferredJobsException if the file cannot be written
++   */
++  public synchronized DeferredJob park(JobRequest request, int statusMessageId) {
++    Instant now = clock.instant();
++    DeferredJob job =
++        new DeferredJob(
++            request.jobId(),
++            request.url(),
++            request.ownerUserId(),
++            request.chatId(),
++            statusMessageId,
++            0,
++            now);
++    List<DeferredJob> next = new ArrayList<>(queue);
++    next.add(job);
++    replace(next);
++    return job;
++  }
++
++  /** The entries in queue order, as an immutable copy. */
++  public synchronized List<DeferredJob> entries() {
++    return List.copyOf(queue);
++  }
++
++  public synchronized Optional<DeferredJob> find(String id) {
++    return queue.stream().filter(job -> job.id().equals(id)).findFirst();
++  }
++
++  /**
++   * Adds one to the attempt count of an entry, keeping its place in the queue.
++   *
++   * @return the updated entry, empty if there is no such entry
++   * @throws DeferredJobsException if the file cannot be written
++   */
++  public synchronized Optional<DeferredJob> recordFailedAttempt(String id) {
++    Optional<DeferredJob> found = find(id);
++    if (found.isEmpty()) {
++      return Optional.empty();
++    }
++    DeferredJob updated = found.get().withAttempts(found.get().attempts() + 1);
++    replace(queue.stream().map(job -> job.id().equals(id) ? updated : job).toList());
++    return Optional.of(updated);
++  }
++
++  /**
++   * @return false if there was no such entry
++   * @throws DeferredJobsException if the file cannot be written
++   */
++  public synchronized boolean remove(String id) {
++    if (find(id).isEmpty()) {
++      return false;
++    }
++    replace(queue.stream().filter(job -> !job.id().equals(id)).toList());
++    return true;
++  }
++
++  /** Writes {@code next} and, only when that worked, makes it the queue. */
++  private void replace(List<DeferredJob> next) {
++    try {
++      AtomicFiles.write(
++          file, Json.MAPPER.writerWithDefaultPrettyPrinter().writeValueAsBytes(new Content(next)));
++    } catch (IOException e) {
++      throw new DeferredJobsException("Cannot write " + file, e);
++    }
++    queue.clear();
++    queue.addAll(next);
++  }
++}
+diff --git a/src/main/java/com/video2podcast/job/DeferredJobsException.java b/src/main/java/com/video2podcast/job/DeferredJobsException.java
+new file mode 100644
+index 0000000..5d0774b
+--- /dev/null
++++ b/src/main/java/com/video2podcast/job/DeferredJobsException.java
+@@ -0,0 +1,11 @@
++package com.video2podcast.job;
++
++/** The deferred-jobs file could not be read, renamed or written. */
++public class DeferredJobsException extends RuntimeException {
++
++  private static final long serialVersionUID = 1L;
++
++  public DeferredJobsException(String message, Throwable cause) {
++    super(message, cause);
++  }
++}
+diff --git a/src/main/java/com/video2podcast/job/DeferredNotifier.java b/src/main/java/com/video2podcast/job/DeferredNotifier.java
+new file mode 100644
+index 0000000..a25c6b4
+--- /dev/null
++++ b/src/main/java/com/video2podcast/job/DeferredNotifier.java
+@@ -0,0 +1,18 @@
++package com.video2podcast.job;
++
++/**
++ * The Telegram side of the end of a deferred retry. Every method is best effort and must not throw.
++ */
++public interface DeferredNotifier {
++
++  /** The summary was sent; marks the status message done. */
++  void completed(long chatId, int statusMessageId);
++
++  /**
++   * The retries ran out; tells the user to send the link again later and marks the status failed.
++   */
++  void gaveUp(long chatId, int statusMessageId);
++
++  /** The retry failed for a reason other than an outage. */
++  void failed(long chatId, int statusMessageId, JobFailure failure);
++}
+diff --git a/src/main/java/com/video2podcast/job/JobFailure.java b/src/main/java/com/video2podcast/job/JobFailure.java
+index d4b6eb3..4b91ac8 100644
+--- a/src/main/java/com/video2podcast/job/JobFailure.java
++++ b/src/main/java/com/video2podcast/job/JobFailure.java
+@@ -38,6 +38,11 @@ public class JobFailure extends RuntimeException {
+     return kind;
+   }
+ 
++  /** True when Whisper or Ollama (or both) could not be reached, so a later try may succeed. */
++  public boolean isServiceOutage() {
++    return kind == Kind.SERVICE_UNREACHABLE || kind == Kind.SUMMARY_UNREACHABLE;
++  }
++
+   /** A failure with the fixed message of {@code kind}; {@code TOO_LONG} uses {@link #tooLong}. */
+   public static JobFailure of(Kind kind) {
+     return new JobFailure(kind, messageOf(kind));
+diff --git a/src/main/resources/application.yml b/src/main/resources/application.yml
+index 8e35fbe..485843d 100644
+--- a/src/main/resources/application.yml
++++ b/src/main/resources/application.yml
+@@ -29,3 +29,6 @@ app:
+     download-timeout: ${DOWNLOAD_TIMEOUT:PT30M}
+     ffmpeg-timeout: ${FFMPEG_TIMEOUT:PT30M}
+     sweep-interval: ${JOB_SWEEP_INTERVAL:PT1M}
++  deferred:
++    retry-interval: ${DEFERRED_RETRY_INTERVAL:PT2H}
++    max-attempts: ${DEFERRED_MAX_ATTEMPTS:12}
+diff --git a/src/test/java/com/video2podcast/bot/TelegramDeferredNotifierTest.java b/src/test/java/com/video2podcast/bot/TelegramDeferredNotifierTest.java
+new file mode 100644
+index 0000000..6788c94
+--- /dev/null
++++ b/src/test/java/com/video2podcast/bot/TelegramDeferredNotifierTest.java
+@@ -0,0 +1,58 @@
++package com.video2podcast.bot;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.assertj.core.api.Assertions.assertThatCode;
++
++import com.video2podcast.job.JobFailure;
++import java.util.List;
++import org.junit.jupiter.api.Test;
++
++class TelegramDeferredNotifierTest {
++
++  private final RecordingGateway gateway = new RecordingGateway();
++  private final TelegramDeferredNotifier notifier = new TelegramDeferredNotifier(gateway);
++
++  @Test
++  void completedEditsTheStatusToDone() {
++    notifier.completed(5, 9);
++
++    assertThat(gateway.messages).isEmpty();
++    assertThat(gateway.edits).containsExactly(new RecordingGateway.Edit(5, 9, "Done.", List.of()));
++  }
++
++  @Test
++  void gaveUpSendsTheMessageAndEditsTheStatusToFailed() {
++    notifier.gaveUp(5, 9);
++
++    assertThat(gateway.messages)
++        .containsExactly(
++            new RecordingGateway.Sent(
++                5, "We could not process this link. Please send it again later.", List.of()));
++    assertThat(gateway.edits)
++        .containsExactly(new RecordingGateway.Edit(5, 9, "Failed.", List.of()));
++  }
++
++  @Test
++  void failedSendsTheEscapedFailureMessage() {
++    notifier.failed(5, 9, new JobFailure(JobFailure.Kind.FAILED, "a <b> & c"));
++
++    assertThat(gateway.messages).hasSize(1);
++    assertThat(gateway.messages.get(0).html()).isEqualTo("a &lt;b&gt; &amp; c");
++    assertThat(gateway.edits.get(0).html()).isEqualTo("Failed.");
++  }
++
++  @Test
++  void telegramErrorsAreDropped() {
++    gateway.failMessages = true;
++    gateway.failEdits = true;
++    TelegramDeferredNotifier broken = notifier;
++
++    assertThatCode(
++            () -> {
++              broken.completed(1, 2);
++              broken.gaveUp(1, 2);
++              broken.failed(1, 2, JobFailure.of(JobFailure.Kind.PRIVATE));
++            })
++        .doesNotThrowAnyException();
++  }
++}
+diff --git a/src/test/java/com/video2podcast/bot/UrlMessageHandlerTest.java b/src/test/java/com/video2podcast/bot/UrlMessageHandlerTest.java
+index 48097fb..eed171f 100644
+--- a/src/test/java/com/video2podcast/bot/UrlMessageHandlerTest.java
++++ b/src/test/java/com/video2podcast/bot/UrlMessageHandlerTest.java
+@@ -12,6 +12,8 @@ import ch.qos.logback.classic.Level;
+ import ch.qos.logback.classic.Logger;
+ import ch.qos.logback.classic.spi.ILoggingEvent;
+ import ch.qos.logback.core.read.ListAppender;
++import com.video2podcast.job.DeferredJobs;
++import com.video2podcast.job.DeferredJobsException;
+ import com.video2podcast.job.JobFailure;
+ import com.video2podcast.job.JobProgress;
+ import com.video2podcast.job.JobQueue;
+@@ -44,8 +46,10 @@ class UrlMessageHandlerTest {
+   private final ThreadSafeGateway gateway = new ThreadSafeGateway();
+   private final JobQueue queue = new JobQueue(Duration.ofMillis(100));
+   private final PipelineService pipeline = mock(PipelineService.class);
++  private final DeferredJobs deferred = mock(DeferredJobs.class);
+   private final UrlMessageHandler handler =
+-      new UrlMessageHandler(gateway, new UrlValidator(), queue, pipeline, new MutableClock(NOW));
++      new UrlMessageHandler(
++          gateway, new UrlValidator(), queue, pipeline, deferred, new MutableClock(NOW));
+ 
+   /** The gateway is called from the worker and from the completion thread. */
+   private static class ThreadSafeGateway implements TelegramGateway {
+@@ -331,7 +335,8 @@ class UrlMessageHandlerTest {
+           }
+         };
+     UrlMessageHandler other =
+-        new UrlMessageHandler(watching, new UrlValidator(), queue, pipeline, new MutableClock(NOW));
++        new UrlMessageHandler(
++            watching, new UrlValidator(), queue, pipeline, deferred, new MutableClock(NOW));
+ 
+     other.handle(SENDER, URL);
+ 
+@@ -466,6 +471,7 @@ class UrlMessageHandlerTest {
+             new UrlValidator(),
+             shortQueue,
+             pipeline,
++            deferred,
+             new MutableClock(NOW),
+             Duration.ofMillis(50));
+     CountDownLatch slowSend = new CountDownLatch(1);
+@@ -487,7 +493,7 @@ class UrlMessageHandlerTest {
+     JobQueue closing = new JobQueue(Duration.ofMillis(100));
+     UrlMessageHandler other =
+         new UrlMessageHandler(
+-            gateway, new UrlValidator(), closing, pipeline, new MutableClock(NOW));
++            gateway, new UrlValidator(), closing, pipeline, deferred, new MutableClock(NOW));
+     CountDownLatch slowSend = new CountDownLatch(1);
+     gateway.blockSend = slowSend;
+     Thread sender = Thread.ofVirtual().start(() -> other.handle(SENDER, URL));
+@@ -502,4 +508,55 @@ class UrlMessageHandlerTest {
+     verify(pipeline, never()).run(any(), any());
+     assertThat(gateway.calls).contains("send " + FAILED, "edit Failed.");
+   }
++
++  @Test
++  void anOutageParksTheJobAndOnlyEditsTheStatusMessage() throws Exception {
++    for (JobFailure.Kind kind :
++        List.of(JobFailure.Kind.SERVICE_UNREACHABLE, JobFailure.Kind.SUMMARY_UNREACHABLE)) {
++      gateway.calls.clear();
++      gateway.edits.clear();
++      doThrow(JobFailure.of(kind)).when(pipeline).run(any(), any());
++
++      handler.handle(SENDER, URL);
++
++      await(() -> gateway.edits.size() == 1);
++      assertThat(gateway.calls)
++          .containsExactly(
++              "send Queued: position 1",
++              "edit Service temporarily unavailable. We will send the result after it recovers.");
++    }
++    ArgumentCaptor<JobRequest> request = ArgumentCaptor.forClass(JobRequest.class);
++    verify(deferred, org.mockito.Mockito.times(2))
++        .park(request.capture(), org.mockito.ArgumentMatchers.anyInt());
++    assertThat(request.getValue().url()).isEqualTo(URL);
++    assertThat(request.getValue().ownerUserId()).isEqualTo(7);
++    assertThat(request.getValue().chatId()).isEqualTo(555);
++  }
++
++  @Test
++  void anOutageThatCannotBeParkedIsReportedAsAFailure() throws Exception {
++    doThrow(JobFailure.of(JobFailure.Kind.SERVICE_UNREACHABLE)).when(pipeline).run(any(), any());
++    doThrow(new DeferredJobsException("disk", null))
++        .when(deferred)
++        .park(any(), org.mockito.ArgumentMatchers.anyInt());
++
++    handler.handle(SENDER, URL);
++
++    await(() -> gateway.edits.size() == 1);
++    assertThat(gateway.calls)
++        .containsExactly(
++            "send Queued: position 1",
++            "send The transcription server is unreachable.",
++            "edit Failed.");
++  }
++
++  @Test
++  void aFailureThatIsNotAnOutageIsNotParked() throws Exception {
++    doThrow(JobFailure.of(JobFailure.Kind.PRIVATE)).when(pipeline).run(any(), any());
++
++    handler.handle(SENDER, URL);
++
++    await(() -> gateway.edits.size() == 1);
++    verify(deferred, never()).park(any(), org.mockito.ArgumentMatchers.anyInt());
++  }
+ }
+diff --git a/src/test/java/com/video2podcast/config/AppPropertiesTest.java b/src/test/java/com/video2podcast/config/AppPropertiesTest.java
+index 7a4f42b..a7d37ba 100644
+--- a/src/test/java/com/video2podcast/config/AppPropertiesTest.java
++++ b/src/test/java/com/video2podcast/config/AppPropertiesTest.java
+@@ -1,6 +1,7 @@
+ package com.video2podcast.config;
+ 
+ import static org.assertj.core.api.Assertions.assertThat;
++import static org.assertj.core.api.Assertions.assertThatThrownBy;
+ 
+ import com.video2podcast.access.AccessService;
+ import java.nio.file.Path;
+@@ -40,6 +41,25 @@ class AppPropertiesTest {
+     assertThat(props.jobs().ffmpegTimeout()).isEqualTo(Duration.ofMinutes(30));
+   }
+ 
++  @Test
++  void deferredSettingsDefaultToTwoHoursAndTwelveAttempts() {
++    assertThat(props.deferred().retryInterval()).isEqualTo(Duration.ofHours(2));
++    assertThat(props.deferred().maxAttempts()).isEqualTo(12);
++  }
++
++  @Test
++  void deferredSettingsAreValidated() {
++    assertThat(new AppProperties.Deferred(Duration.ofSeconds(1), 1).maxAttempts()).isEqualTo(1);
++    for (Duration bad : new Duration[] {null, Duration.ZERO, Duration.ofSeconds(-1)}) {
++      assertThatThrownBy(() -> new AppProperties.Deferred(bad, 12))
++          .isInstanceOf(IllegalArgumentException.class)
++          .hasMessageContaining("DEFERRED_RETRY_INTERVAL");
++    }
++    assertThatThrownBy(() -> new AppProperties.Deferred(Duration.ofHours(2), 0))
++        .isInstanceOf(IllegalArgumentException.class)
++        .hasMessageContaining("DEFERRED_MAX_ATTEMPTS");
++  }
++
+   @Test
+   void accessServiceKnowsTheConfiguredOwner() {
+     assertThat(accessService.isOwner(42L)).isTrue();
+diff --git a/src/test/java/com/video2podcast/config/HealthConfigTest.java b/src/test/java/com/video2podcast/config/HealthConfigTest.java
+index a5960c5..d90f9a5 100644
+--- a/src/test/java/com/video2podcast/config/HealthConfigTest.java
++++ b/src/test/java/com/video2podcast/config/HealthConfigTest.java
+@@ -15,7 +15,7 @@ import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+ class HealthConfigTest {
+ 
+   private static AppProperties props(Duration timeout) {
+-    return new AppProperties(null, null, null, null, null, new AppProperties.Health(timeout));
++    return new AppProperties(null, null, null, null, null, new AppProperties.Health(timeout), null);
+   }
+ 
+   private ApplicationContextRunner runner(Duration timeout) {
+diff --git a/src/test/java/com/video2podcast/config/JobConfigTest.java b/src/test/java/com/video2podcast/config/JobConfigTest.java
+index 8a34cc2..398abd5 100644
+--- a/src/test/java/com/video2podcast/config/JobConfigTest.java
++++ b/src/test/java/com/video2podcast/config/JobConfigTest.java
+@@ -48,7 +48,8 @@ class JobConfigTest {
+             Duration.ofMinutes(30),
+             Duration.ofMinutes(30),
+             Duration.ofMinutes(1)),
+-        new AppProperties.Health(Duration.ofSeconds(3)));
++        new AppProperties.Health(Duration.ofSeconds(3)),
++        new AppProperties.Deferred(Duration.ofHours(2), 12));
+   }
+ 
+   private ApplicationContextRunner runner() {
+diff --git a/src/test/java/com/video2podcast/config/MediaConfigTest.java b/src/test/java/com/video2podcast/config/MediaConfigTest.java
+index 9c36682..7408f71 100644
+--- a/src/test/java/com/video2podcast/config/MediaConfigTest.java
++++ b/src/test/java/com/video2podcast/config/MediaConfigTest.java
+@@ -30,7 +30,8 @@ class MediaConfigTest {
+             Duration.ofMinutes(30),
+             Duration.ofMinutes(30),
+             Duration.ofMinutes(1)),
+-        new AppProperties.Health(Duration.ofSeconds(3)));
++        new AppProperties.Health(Duration.ofSeconds(3)),
++        new AppProperties.Deferred(Duration.ofHours(2), 12));
+   }
+ 
+   private ApplicationContextRunner runner() {
+diff --git a/src/test/java/com/video2podcast/config/PipelineConfigTest.java b/src/test/java/com/video2podcast/config/PipelineConfigTest.java
+index d1a22f7..26f9f24 100644
+--- a/src/test/java/com/video2podcast/config/PipelineConfigTest.java
++++ b/src/test/java/com/video2podcast/config/PipelineConfigTest.java
+@@ -3,10 +3,14 @@ package com.video2podcast.config;
+ import static org.assertj.core.api.Assertions.assertThat;
+ import static org.mockito.Mockito.mock;
+ 
++import com.video2podcast.access.AccessService;
+ import com.video2podcast.bot.DeliveryCallbackHandler;
+ import com.video2podcast.bot.TelegramGateway;
+ import com.video2podcast.bot.UrlMessageHandler;
+ import com.video2podcast.job.ButtonRefresher;
++import com.video2podcast.job.DeferredJobRunner;
++import com.video2podcast.job.DeferredJobs;
++import com.video2podcast.job.DeferredNotifier;
+ import com.video2podcast.job.DeliveryService;
+ import com.video2podcast.job.HealthChecks;
+ import com.video2podcast.job.JobQueue;
+@@ -41,7 +45,8 @@ class PipelineConfigTest {
+             Duration.ofMinutes(30),
+             Duration.ofMinutes(30),
+             Duration.ofMinutes(1)),
+-        new AppProperties.Health(Duration.ofSeconds(3)));
++        new AppProperties.Health(Duration.ofSeconds(3)),
++        new AppProperties.Deferred(Duration.ofHours(2), 12));
+   }
+ 
+   private ApplicationContextRunner runner(boolean enabled) {
+@@ -58,6 +63,7 @@ class PipelineConfigTest {
+         .withBean(JobQueue.class, () -> mock(JobQueue.class))
+         .withBean(UrlValidator.class, UrlValidator::new)
+         .withBean(HealthChecks.class, () -> mock(HealthChecks.class))
++        .withBean(AccessService.class, () -> mock(AccessService.class))
+         .withBean(Clock.class, Clock::systemUTC)
+         .withPropertyValues("app.telegram.enabled=" + enabled);
+   }
+@@ -71,6 +77,9 @@ class PipelineConfigTest {
+           assertThat(context).hasSingleBean(ButtonRefresher.class);
+           assertThat(context).hasSingleBean(UrlMessageHandler.class);
+           assertThat(context).hasSingleBean(DeliveryService.class);
++          assertThat(context).hasSingleBean(DeferredJobs.class);
++          assertThat(context).hasSingleBean(DeferredNotifier.class);
++          assertThat(context).hasSingleBean(DeferredJobRunner.class);
+           assertThat(context).hasSingleBean(DeliveryCallbackHandler.class);
+           assertThat(context.getBean(SummaryPublisher.class)).isNotNull();
+           assertThat(context.getBean(PipelineService.class)).isNotNull();
+@@ -87,6 +96,7 @@ class PipelineConfigTest {
+           assertThat(context).doesNotHaveBean(ButtonRefresher.class);
+           assertThat(context).doesNotHaveBean(UrlMessageHandler.class);
+           assertThat(context).doesNotHaveBean(DeliveryService.class);
++          assertThat(context).doesNotHaveBean(DeferredJobRunner.class);
+           assertThat(context).doesNotHaveBean(DeliveryCallbackHandler.class);
+         });
+   }
+diff --git a/src/test/java/com/video2podcast/config/SummaryConfigTest.java b/src/test/java/com/video2podcast/config/SummaryConfigTest.java
+index 21ee21d..ee60b1e 100644
+--- a/src/test/java/com/video2podcast/config/SummaryConfigTest.java
++++ b/src/test/java/com/video2podcast/config/SummaryConfigTest.java
+@@ -18,6 +18,7 @@ class SummaryConfigTest {
+         new AppProperties.Ollama("http://localhost:11434", "m", 8192, Duration.ofMinutes(10)),
+         null,
+         null,
++        null,
+         null);
+   }
+ 
+@@ -41,7 +42,8 @@ class SummaryConfigTest {
+           new AppProperties.Ollama("http://localhost:11434", "m", 8192, Duration.ofSeconds(-1))
+         }) {
+       new ApplicationContextRunner()
+-          .withBean(AppProperties.class, () -> new AppProperties(null, null, bad, null, null, null))
++          .withBean(
++              AppProperties.class, () -> new AppProperties(null, null, bad, null, null, null, null))
+           .withUserConfiguration(SummaryConfig.class)
+           .run(context -> assertThat(context).hasFailed());
+     }
+diff --git a/src/test/java/com/video2podcast/config/TelegramConfigTest.java b/src/test/java/com/video2podcast/config/TelegramConfigTest.java
+index f8220fb..b77e150 100644
+--- a/src/test/java/com/video2podcast/config/TelegramConfigTest.java
++++ b/src/test/java/com/video2podcast/config/TelegramConfigTest.java
+@@ -34,7 +34,8 @@ class TelegramConfigTest {
+             Duration.ofMinutes(30),
+             Duration.ofMinutes(30),
+             Duration.ofMinutes(1)),
+-        new AppProperties.Health(Duration.ofSeconds(3)));
++        new AppProperties.Health(Duration.ofSeconds(3)),
++        new AppProperties.Deferred(Duration.ofHours(2), 12));
+   }
+ 
+   private ApplicationContextRunner runner(String token, long admin, boolean enabled) {
+@@ -113,7 +114,8 @@ class TelegramConfigTest {
+               props("123:abc", 1L, true).ollama(),
+               props("123:abc", 1L, true).whisper(),
+               props("123:abc", 1L, true).jobs(),
+-              props("123:abc", 1L, true).health());
++              props("123:abc", 1L, true).health(),
++              props("123:abc", 1L, true).deferred());
+ 
+       org.telegram.telegrambots.meta.generics.TelegramClient client =
+           new TelegramConfig().telegramClient(props);
+diff --git a/src/test/java/com/video2podcast/config/TranscriptConfigTest.java b/src/test/java/com/video2podcast/config/TranscriptConfigTest.java
+index 0c0dcfa..4bac41d 100644
+--- a/src/test/java/com/video2podcast/config/TranscriptConfigTest.java
++++ b/src/test/java/com/video2podcast/config/TranscriptConfigTest.java
+@@ -17,6 +17,7 @@ class TranscriptConfigTest {
+         null,
+         new AppProperties.Whisper("http://localhost:8081", Duration.ofMinutes(10)),
+         null,
++        null,
+         null);
+   }
+ 
+diff --git a/src/test/java/com/video2podcast/job/DeferredJobRunnerTest.java b/src/test/java/com/video2podcast/job/DeferredJobRunnerTest.java
+new file mode 100644
+index 0000000..c65d945
+--- /dev/null
++++ b/src/test/java/com/video2podcast/job/DeferredJobRunnerTest.java
+@@ -0,0 +1,392 @@
++package com.video2podcast.job;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.Mockito.doAnswer;
++import static org.mockito.Mockito.doThrow;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.never;
++import static org.mockito.Mockito.verify;
++
++import com.video2podcast.support.MutableClock;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.time.Duration;
++import java.time.Instant;
++import java.util.List;
++import java.util.concurrent.CopyOnWriteArrayList;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicBoolean;
++import java.util.function.BooleanSupplier;
++import java.util.function.LongPredicate;
++import org.junit.jupiter.api.AfterEach;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.io.TempDir;
++import org.mockito.ArgumentCaptor;
++import org.springframework.scheduling.annotation.Scheduled;
++
++class DeferredJobRunnerTest {
++
++  private static final Instant T0 = Instant.parse("2026-11-23T10:00:00Z");
++
++  @TempDir Path dir;
++
++  private final MutableClock clock = new MutableClock(T0);
++  private final PipelineService pipeline = mock(PipelineService.class);
++  private final JobQueue queue = new JobQueue(Duration.ofMillis(200));
++  private final List<String> events = new CopyOnWriteArrayList<>();
++  private final AtomicBoolean access = new AtomicBoolean(true);
++  private DeferredJobs jobs;
++  private DeferredJobRunner runner;
++
++  private final DeferredNotifier notifier =
++      new DeferredNotifier() {
++        @Override
++        public void completed(long chatId, int statusMessageId) {
++          events.add("completed " + chatId + " " + statusMessageId);
++        }
++
++        @Override
++        public void gaveUp(long chatId, int statusMessageId) {
++          events.add("gaveUp " + chatId + " " + statusMessageId);
++        }
++
++        @Override
++        public void failed(long chatId, int statusMessageId, JobFailure failure) {
++          events.add("failed " + chatId + " " + statusMessageId + " " + failure.kind());
++        }
++      };
++
++  private void setUp(int maxAttempts) {
++    jobs = new DeferredJobs(dir.resolve("deferred-jobs.json"), clock);
++    LongPredicate hasAccess = user -> access.get() && user == 7;
++    runner = new DeferredJobRunner(jobs, pipeline, queue, notifier, hasAccess, clock, maxAttempts);
++  }
++
++  private String park(String id, String url) {
++    jobs.park(new JobRequest(id, 7, 555, url, T0), 42);
++    return id;
++  }
++
++  @AfterEach
++  void tearDown() {
++    queue.close();
++  }
++
++  private static void await(BooleanSupplier condition) throws InterruptedException {
++    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
++    while (!condition.getAsBoolean()) {
++      if (System.nanoTime() > deadline) {
++        throw new AssertionError("condition not reached in 10 s");
++      }
++      Thread.sleep(5);
++    }
++  }
++
++  @Test
++  void aSuccessfulRetryRunsFromScratchWithANewJobIdAndNoProgress() {
++    setUp(12);
++    clock.advance(Duration.ofHours(2));
++    park("first", "https://v/1");
++    doAnswer(
++            call -> {
++              JobProgress progress = call.getArgument(1);
++              progress.downloading();
++              progress.transcribing(1, 2);
++              progress.summarizing();
++              return null;
++            })
++        .when(pipeline)
++        .run(any(), any());
++
++    runner.retry("first");
++
++    ArgumentCaptor<JobRequest> request = ArgumentCaptor.forClass(JobRequest.class);
++    verify(pipeline).run(request.capture(), any());
++    assertThat(request.getValue().jobId()).isNotBlank().isNotEqualTo("first");
++    assertThat(request.getValue().url()).isEqualTo("https://v/1");
++    assertThat(request.getValue().ownerUserId()).isEqualTo(7);
++    assertThat(request.getValue().chatId()).isEqualTo(555);
++    assertThat(request.getValue().createdAt()).isEqualTo(clock.instant());
++    assertThat(jobs.entries()).isEmpty();
++    assertThat(events).containsExactly("completed 555 42");
++  }
++
++  @Test
++  void anUnknownEntryDoesNothing() {
++    setUp(12);
++
++    runner.retry("gone");
++
++    verify(pipeline, never()).run(any(), any());
++    assertThat(events).isEmpty();
++  }
++
++  @Test
++  void anOutageCountsAnAttemptAndSaysNothing() {
++    setUp(3);
++    park("a", "https://v/1");
++    doThrow(JobFailure.of(JobFailure.Kind.SERVICE_UNREACHABLE)).when(pipeline).run(any(), any());
++
++    runner.retry("a");
++    runner.retry("a");
++
++    assertThat(jobs.find("a").orElseThrow().attempts()).isEqualTo(2);
++    assertThat(events).isEmpty();
++  }
++
++  @Test
++  void theLastAllowedAttemptGivesUpOnce() {
++    setUp(2);
++    park("a", "https://v/1");
++    doThrow(JobFailure.of(JobFailure.Kind.SUMMARY_UNREACHABLE)).when(pipeline).run(any(), any());
++
++    runner.retry("a");
++    assertThat(events).isEmpty();
++    runner.retry("a");
++
++    assertThat(jobs.entries()).isEmpty();
++    assertThat(events).containsExactly("gaveUp 555 42");
++  }
++
++  @Test
++  void anAttemptThatCannotBeSavedStillGivesUpAtTheLimit() throws Exception {
++    setUp(1);
++    park("a", "https://v/1");
++    Files.createDirectory(dir.resolve("deferred-jobs.json.tmp"));
++    doThrow(JobFailure.of(JobFailure.Kind.SERVICE_UNREACHABLE)).when(pipeline).run(any(), any());
++
++    runner.retry("a");
++
++    assertThat(events).containsExactly("gaveUp 555 42");
++    assertThat(jobs.entries()).hasSize(1);
++  }
++
++  @Test
++  void anOutageForAnEntryThatIsGoneSendsNothing() {
++    setUp(1);
++    park("a", "https://v/1");
++    doAnswer(
++            call -> {
++              jobs.remove("a");
++              throw JobFailure.of(JobFailure.Kind.SERVICE_UNREACHABLE);
++            })
++        .when(pipeline)
++        .run(any(), any());
++
++    runner.retry("a");
++
++    assertThat(events).isEmpty();
++  }
++
++  @Test
++  void anotherFailureClosesTheEntryWithItsMessage() {
++    setUp(12);
++    park("a", "https://v/1");
++    doThrow(JobFailure.of(JobFailure.Kind.PRIVATE)).when(pipeline).run(any(), any());
++
++    runner.retry("a");
++
++    assertThat(jobs.entries()).isEmpty();
++    assertThat(events).containsExactly("failed 555 42 PRIVATE");
++  }
++
++  @Test
++  void anUnexpectedExceptionClosesTheEntryAsFailed() {
++    setUp(12);
++    park("a", "https://v/1");
++    doThrow(new IllegalStateException("boom")).when(pipeline).run(any(), any());
++
++    runner.retry("a");
++
++    assertThat(jobs.entries()).isEmpty();
++    assertThat(events).containsExactly("failed 555 42 FAILED");
++  }
++
++  @Test
++  void aRetryThatCannotRemoveTheEntryStillTellsTheUser() throws Exception {
++    setUp(12);
++    park("a", "https://v/1");
++    Files.createDirectory(dir.resolve("deferred-jobs.json.tmp"));
++
++    runner.retry("a");
++
++    assertThat(events).containsExactly("completed 555 42");
++    assertThat(jobs.entries()).hasSize(1);
++  }
++
++  @Test
++  void aFailureOnAnInterruptedThreadLeavesTheEntryAlone() {
++    setUp(1);
++    park("a", "https://v/1");
++    park("b", "https://v/2");
++    doAnswer(
++            call -> {
++              Thread.currentThread().interrupt();
++              throw JobFailure.of(JobFailure.Kind.SERVICE_UNREACHABLE);
++            })
++        .when(pipeline)
++        .run(any(), any());
++
++    try {
++      runner.retry("a");
++      assertThat(Thread.currentThread().isInterrupted()).isTrue();
++    } finally {
++      Thread.interrupted();
++    }
++
++    assertThat(jobs.find("a").orElseThrow().attempts()).isZero();
++    assertThat(events).isEmpty();
++  }
++
++  @Test
++  void aUserWithoutAccessIsDroppedSilently() {
++    setUp(12);
++    park("a", "https://v/1");
++    access.set(false);
++
++    runner.retry("a");
++
++    assertThat(jobs.entries()).isEmpty();
++    verify(pipeline, never()).run(any(), any());
++    assertThat(events).isEmpty();
++  }
++
++  @Test
++  void dropForNoAccessSurvivesAFailedWrite() throws Exception {
++    setUp(12);
++    park("a", "https://v/1");
++    access.set(false);
++    Files.createDirectory(dir.resolve("deferred-jobs.json.tmp"));
++
++    runner.retry("a");
++
++    verify(pipeline, never()).run(any(), any());
++    assertThat(events).isEmpty();
++  }
++
++  @Test
++  void retryAllRunsEveryEntryOnceInOrder() throws Exception {
++    setUp(12);
++    park("a", "https://v/1");
++    park("b", "https://v/2");
++    park("c", "https://v/3");
++    List<String> urls = new CopyOnWriteArrayList<>();
++    doAnswer(
++            call -> {
++              urls.add(call.<JobRequest>getArgument(0).url());
++              throw JobFailure.of(JobFailure.Kind.SERVICE_UNREACHABLE);
++            })
++        .when(pipeline)
++        .run(any(), any());
++
++    runner.retryAll();
++    await(() -> urls.size() == 3 && queue.size() == 0);
++
++    assertThat(urls).containsExactly("https://v/1", "https://v/2", "https://v/3");
++    assertThat(jobs.entries()).extracting(DeferredJob::attempts).containsExactly(1, 1, 1);
++  }
++
++  @Test
++  void aNewPassIsPossibleOnceThePreviousOneEnded() throws Exception {
++    setUp(12);
++    park("a", "https://v/1");
++    doThrow(JobFailure.of(JobFailure.Kind.SERVICE_UNREACHABLE)).when(pipeline).run(any(), any());
++
++    runner.retryAll();
++    await(() -> jobs.find("a").orElseThrow().attempts() == 1);
++    await(() -> runnerIdle());
++    runner.retryAll();
++    await(() -> jobs.find("a").orElseThrow().attempts() == 2);
++  }
++
++  private boolean runnerIdle() {
++    // a pass that finished lets the next retryAll() submit again
++    return queue.size() == 0;
++  }
++
++  @Test
++  void aPassDoesNotOverlapAnotherPass() throws Exception {
++    setUp(12);
++    park("a", "https://v/1");
++    CountDownLatch inside = new CountDownLatch(1);
++    CountDownLatch release = new CountDownLatch(1);
++    doAnswer(
++            call -> {
++              inside.countDown();
++              release.await(10, TimeUnit.SECONDS);
++              return null;
++            })
++        .when(pipeline)
++        .run(any(), any());
++
++    runner.retryAll();
++    assertThat(inside.await(10, TimeUnit.SECONDS)).isTrue();
++    runner.retryAll();
++    release.countDown();
++    await(() -> !events.isEmpty());
++
++    verify(pipeline, org.mockito.Mockito.times(1)).run(any(), any());
++  }
++
++  @Test
++  void anEmptyQueueStartsNothing() {
++    setUp(12);
++
++    runner.retryAll();
++    runner.retryAll();
++
++    assertThat(queue.size()).isZero();
++    verify(pipeline, never()).run(any(), any());
++  }
++
++  @Test
++  void aClosedQueueEndsThePassAndAllowsTheNextOne() {
++    setUp(12);
++    park("a", "https://v/1");
++    queue.close();
++
++    runner.retryAll();
++    runner.retryAll();
++
++    verify(pipeline, never()).run(any(), any());
++    assertThat(jobs.entries()).hasSize(1);
++  }
++
++  @Test
++  void aCancelledEntryEndsThePass() throws Exception {
++    setUp(12);
++    park("a", "https://v/1");
++    park("b", "https://v/2");
++    CountDownLatch inside = new CountDownLatch(1);
++    doAnswer(
++            call -> {
++              inside.countDown();
++              try {
++                Thread.sleep(10_000);
++              } catch (InterruptedException e) {
++                Thread.currentThread().interrupt();
++              }
++              throw JobFailure.of(JobFailure.Kind.SERVICE_UNREACHABLE);
++            })
++        .when(pipeline)
++        .run(any(), any());
++
++    runner.retryAll();
++    assertThat(inside.await(10, TimeUnit.SECONDS)).isTrue();
++    queue.close();
++
++    verify(pipeline, org.mockito.Mockito.times(1)).run(any(), any());
++    assertThat(jobs.entries()).extracting(DeferredJob::attempts).containsExactly(0, 0);
++  }
++
++  @Test
++  void retryAllIsScheduledWithAFullIntervalDelay() throws Exception {
++    Scheduled scheduled =
++        DeferredJobRunner.class.getMethod("retryAll").getAnnotation(Scheduled.class);
++
++    assertThat(scheduled.fixedDelayString()).isEqualTo("${app.deferred.retry-interval}");
++    assertThat(scheduled.initialDelayString()).isEqualTo("${app.deferred.retry-interval}");
++  }
++}
+diff --git a/src/test/java/com/video2podcast/job/DeferredJobsTest.java b/src/test/java/com/video2podcast/job/DeferredJobsTest.java
+new file mode 100644
+index 0000000..d868e1b
+--- /dev/null
++++ b/src/test/java/com/video2podcast/job/DeferredJobsTest.java
+@@ -0,0 +1,251 @@
++package com.video2podcast.job;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.assertj.core.api.Assertions.assertThatThrownBy;
++
++import com.video2podcast.support.MutableClock;
++import java.io.IOException;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.time.Duration;
++import java.time.Instant;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.concurrent.ExecutorService;
++import java.util.concurrent.Executors;
++import java.util.concurrent.Future;
++import java.util.stream.Stream;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.io.TempDir;
++
++class DeferredJobsTest {
++
++  private static final Instant T0 = Instant.parse("2026-11-23T10:15:30Z");
++
++  @TempDir Path dir;
++
++  private final MutableClock clock = new MutableClock(T0);
++
++  private Path file() {
++    return dir.resolve("deferred-jobs.json");
++  }
++
++  private DeferredJobs open() {
++    return new DeferredJobs(file(), clock);
++  }
++
++  private static JobRequest request(String id, String url) {
++    return new JobRequest(id, 7, 555, url, T0);
++  }
++
++  private List<Path> corruptFiles() throws IOException {
++    try (Stream<Path> files = Files.list(dir)) {
++      return files.filter(f -> f.getFileName().toString().contains(".corrupt-")).toList();
++    }
++  }
++
++  @Test
++  void aMissingFileIsAnEmptyQueue() {
++    assertThat(open().entries()).isEmpty();
++    assertThat(file()).doesNotExist();
++  }
++
++  @Test
++  void parkAppendsWithZeroAttemptsAndTheCurrentTime() {
++    DeferredJobs jobs = open();
++    clock.advance(Duration.ofMinutes(5));
++
++    DeferredJob parked = jobs.park(request("a", "https://v/1"), 42);
++
++    assertThat(parked)
++        .isEqualTo(new DeferredJob("a", "https://v/1", 7, 555, 42, 0, T0.plusSeconds(300)));
++    assertThat(jobs.entries()).containsExactly(parked);
++    assertThat(jobs.find("a")).contains(parked);
++    assertThat(jobs.find("zzz")).isEmpty();
++  }
++
++  @Test
++  void entriesKeepParkingOrderAndSurviveARestart() {
++    DeferredJobs jobs = open();
++    jobs.park(request("a", "https://v/1"), 1);
++    jobs.park(request("b", "https://v/2"), 2);
++    jobs.park(request("c", "https://v/3"), 3);
++    jobs.recordFailedAttempt("b");
++    jobs.recordFailedAttempt("b");
++
++    DeferredJobs reopened = open();
++
++    assertThat(reopened.entries()).extracting(DeferredJob::id).containsExactly("a", "b", "c");
++    assertThat(reopened.find("b").orElseThrow().attempts()).isEqualTo(2);
++    assertThat(reopened.find("a").orElseThrow().attempts()).isZero();
++    assertThat(reopened.entries()).isEqualTo(jobs.entries());
++  }
++
++  @Test
++  void recordFailedAttemptKeepsThePlaceAndTheOtherFields() {
++    DeferredJobs jobs = open();
++    jobs.park(request("a", "https://v/1"), 1);
++    jobs.park(request("b", "https://v/2"), 2);
++
++    DeferredJob updated = jobs.recordFailedAttempt("a").orElseThrow();
++
++    assertThat(updated.attempts()).isEqualTo(1);
++    assertThat(updated.url()).isEqualTo("https://v/1");
++    assertThat(updated.parkedAt()).isEqualTo(T0);
++    assertThat(jobs.entries()).extracting(DeferredJob::id).containsExactly("a", "b");
++    assertThat(jobs.recordFailedAttempt("gone")).isEmpty();
++  }
++
++  @Test
++  void removeDeletesOneEntryAndReportsAMissingOne() {
++    DeferredJobs jobs = open();
++    jobs.park(request("a", "https://v/1"), 1);
++    jobs.park(request("b", "https://v/2"), 2);
++
++    assertThat(jobs.remove("a")).isTrue();
++    assertThat(jobs.remove("a")).isFalse();
++
++    assertThat(open().entries()).extracting(DeferredJob::id).containsExactly("b");
++  }
++
++  @Test
++  void theFileIsPrettyJsonWithAJobsArray() throws IOException {
++    open().park(request("a", "https://v/1"), 42);
++
++    String json = Files.readString(file());
++
++    assertThat(json)
++        .contains("\"jobs\"", "\"id\" : \"a\"", "\"ownerUserId\" : 7", "\"statusMessageId\" : 42")
++        .contains("\"parkedAt\" : \"2026-11-23T10:15:30Z\"");
++  }
++
++  @Test
++  void anEmptyJobsListOrNoJobsFieldIsValid() throws IOException {
++    Files.writeString(file(), "{}");
++    assertThat(open().entries()).isEmpty();
++    Files.writeString(file(), "{\"jobs\": []}");
++    assertThat(open().entries()).isEmpty();
++    Files.writeString(file(), "{\"jobs\": null}");
++    assertThat(open().entries()).isEmpty();
++    assertThat(corruptFiles()).isEmpty();
++  }
++
++  @Test
++  void aCorruptFileIsRenamedAndTheQueueStartsEmpty() throws IOException {
++    for (String bad :
++        List.of(
++            "not json",
++            "{\"jobs\": []} trailing",
++            "null",
++            "",
++            entry("\"\"", "\"u\"", 1, 1, 1, "\"2026-11-23T10:15:30Z\"", 0),
++            entry("\"a\"", "\" \"", 1, 1, 1, "\"2026-11-23T10:15:30Z\"", 0),
++            entry("\"a\"", "\"u\"", 0, 1, 1, "\"2026-11-23T10:15:30Z\"", 0),
++            entry("\"a\"", "\"u\"", 1, 0, 1, "\"2026-11-23T10:15:30Z\"", 0),
++            entry("\"a\"", "\"u\"", 1, 1, 0, "\"2026-11-23T10:15:30Z\"", 0),
++            entry("\"a\"", "\"u\"", 1, 1, 1, "null", 0),
++            entry("\"a\"", "\"u\"", 1, 1, 1, "\"2026-11-23T10:15:30Z\"", -1),
++            entry("null", "\"u\"", 1, 1, 1, "\"2026-11-23T10:15:30Z\"", 0),
++            entry("\"a\"", "null", 1, 1, 1, "\"2026-11-23T10:15:30Z\"", 0),
++            "{\"jobs\": [null]}")) {
++      Files.writeString(file(), bad);
++
++      DeferredJobs jobs = open();
++
++      assertThat(jobs.entries()).as(bad).isEmpty();
++      assertThat(file()).doesNotExist();
++      List<Path> aside = corruptFiles();
++      assertThat(aside).hasSize(1);
++      assertThat(aside.get(0).getFileName().toString())
++          .isEqualTo("deferred-jobs.json.corrupt-" + T0.getEpochSecond());
++      assertThat(Files.readString(aside.get(0))).isEqualTo(bad);
++      Files.delete(aside.get(0));
++    }
++  }
++
++  private static String entry(
++      String id, String url, long owner, long chat, int status, String parkedAt, int attempts) {
++    return "{\"jobs\": [{\"id\": %s, \"url\": %s, \"ownerUserId\": %d, \"chatId\": %d,"
++            .formatted(id, url, owner, chat)
++        + " \"statusMessageId\": %d, \"attempts\": %d, \"parkedAt\": %s}]}"
++            .formatted(status, attempts, parkedAt);
++  }
++
++  @Test
++  void aCorruptFileDoesNotStopTheNextWrite() throws IOException {
++    Files.writeString(file(), "garbage");
++    DeferredJobs jobs = open();
++
++    jobs.park(request("a", "https://v/1"), 1);
++
++    assertThat(open().entries()).extracting(DeferredJob::id).containsExactly("a");
++  }
++
++  @Test
++  void aFileThatCannotBeReadFailsTheStart() throws IOException {
++    Files.createDirectory(file());
++
++    assertThatThrownBy(this::open)
++        .isInstanceOf(DeferredJobsException.class)
++        .hasMessageContaining("Cannot read")
++        .hasCauseInstanceOf(IOException.class);
++  }
++
++  @Test
++  void aFailedWriteLeavesTheQueueAndTheFileAsTheyWere() throws IOException {
++    DeferredJobs jobs = open();
++    jobs.park(request("a", "https://v/1"), 1);
++    String before = Files.readString(file());
++    // a directory where the temporary file must go makes every write fail
++    Files.createDirectory(dir.resolve("deferred-jobs.json.tmp"));
++
++    assertThatThrownBy(() -> jobs.park(request("b", "https://v/2"), 2))
++        .isInstanceOf(DeferredJobsException.class)
++        .hasMessageContaining("Cannot write");
++    assertThatThrownBy(() -> jobs.recordFailedAttempt("a"))
++        .isInstanceOf(DeferredJobsException.class);
++    assertThatThrownBy(() -> jobs.remove("a")).isInstanceOf(DeferredJobsException.class);
++
++    assertThat(jobs.entries()).extracting(DeferredJob::id).containsExactly("a");
++    assertThat(jobs.find("a").orElseThrow().attempts()).isZero();
++    assertThat(Files.readString(file())).isEqualTo(before);
++  }
++
++  @Test
++  void entriesIsAnImmutableCopy() {
++    DeferredJobs jobs = open();
++    jobs.park(request("a", "https://v/1"), 1);
++    List<DeferredJob> snapshot = jobs.entries();
++
++    jobs.park(request("b", "https://v/2"), 2);
++
++    assertThat(snapshot).hasSize(1);
++    assertThatThrownBy(() -> snapshot.add(snapshot.get(0)))
++        .isInstanceOf(UnsupportedOperationException.class);
++  }
++
++  @Test
++  void parallelWritersLoseNothing() throws Exception {
++    DeferredJobs jobs = open();
++    int threads = 8;
++    int each = 10;
++    try (ExecutorService pool = Executors.newFixedThreadPool(threads)) {
++      List<Future<?>> futures = new ArrayList<>();
++      for (int t = 0; t < threads; t++) {
++        int base = t * each;
++        futures.add(
++            pool.submit(() -> {
++              for (int i = 0; i < each; i++) {
++                jobs.park(request("j" + (base + i), "https://v/" + (base + i)), base + i + 1);
++              }
++            }));
++      }
++      for (Future<?> f : futures) {
++        f.get();
++      }
++    }
++
++    assertThat(jobs.entries()).hasSize(threads * each);
++    assertThat(open().entries()).isEqualTo(jobs.entries());
++  }
++}
+diff --git a/src/test/java/com/video2podcast/job/JobFailureTest.java b/src/test/java/com/video2podcast/job/JobFailureTest.java
+index ee21581..d9fab7d 100644
+--- a/src/test/java/com/video2podcast/job/JobFailureTest.java
++++ b/src/test/java/com/video2podcast/job/JobFailureTest.java
+@@ -102,4 +102,18 @@ class JobFailureTest {
+     org.assertj.core.api.Assertions.assertThatThrownBy(() -> JobFailure.unreachable(false, false))
+         .isInstanceOf(IllegalArgumentException.class);
+   }
++
++  @Test
++  void onlyTheTwoUnreachableKindsAreOutages() {
++    for (JobFailure.Kind kind : JobFailure.Kind.values()) {
++      boolean outage =
++          kind == JobFailure.Kind.SERVICE_UNREACHABLE
++              || kind == JobFailure.Kind.SUMMARY_UNREACHABLE;
++      org.assertj.core.api.Assertions.assertThat(JobFailure.of(kind).isServiceOutage())
++          .as(kind.name())
++          .isEqualTo(outage);
++    }
++    org.assertj.core.api.Assertions.assertThat(JobFailure.unreachable(true, true).isServiceOutage())
++        .isTrue();
++  }
+ }

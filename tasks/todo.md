@@ -182,7 +182,7 @@ Sizes: S = 1-2 files, M = 3-5 files.
   - Depends on: T7, T12, T13
   - Files: `job/RetentionSweeper.java`, `job/JobRecovery.java`, `bot/Keyboards.java`, tests
 
-- [~] **T18: Deferred jobs: park on service outage, notify the user, retry every 2 hours** (M)
+- [x] **T18: Deferred jobs: park on service outage, notify the user, retry every 2 hours** (M)
   - Why: when Whisper (T9) or Ollama (T10) is down, the job fails with `SERVICE_UNREACHABLE` and the user has to resend the link. The owner wants the job kept and finished automatically after the service is back.
   - Acceptance:
     - A job that fails with `SERVICE_UNREACHABLE` is not dropped. It is written to the deferred queue, `deferred-jobs.json` in the data directory next to `allowed-users.json` (atomic write, as the allowlist), with the URL, owner user id, chat id, status message id, attempt count and the time it was parked. Queue order is kept and the queue survives a restart. A file that is not valid JSON is renamed to `deferred-jobs.json.corrupt-<time>` and the bot starts with an empty queue.

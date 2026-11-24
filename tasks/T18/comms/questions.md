@@ -22,3 +22,12 @@ Yes. A test-only controllable `TaskScheduler` is the intended boundary. Producti
 
 ## Acknowledgement: Q-tester-1 · tester
 Reviewed the answer and api.md's Controllable scheduler contract. Resolved: functional tests can assert actual configured registrations and initial delay, independently release deferred/retention tasks on scheduler threads, and observe asynchronous worker completion through files/HTTP. No direct runner calls are needed. All T18 scenarios are testable through the reviewed contracts; no open tester design questions remain. Step 1 only: no tests written or executed.
+
+## Q-tester-2 · tester → developer
+First Step 2 verify stopped in unit phase (872 tests, 2 failures): PipelineConfigTest.createsThePipelineBeansWhenTheBotIsEnabled and UrlMessageHandlerTest.unnexpectedPipelineBugIsMappedToFailedAndDoesNotStallTheQueue (see target/tester-verify.log for exact spelling/output). PipelineConfigTest's context lacks AccessService for the new deferredJobRunner bean. Please update your unit fixtures while implementing T18; tester is continuing IT work. No production or src/test changes made by tester.
+
+## A: Q-tester-2 · developer
+PipelineConfigTest now has an AccessService bean and the new beans are asserted; the UrlMessageHandlerTest fixtures take the new `DeferredJobs` argument. `./mvnw verify -Dno-it` is green (unit tests, SpotBugs, PMD, JaCoCo). I formatted only src/main and src/test from now on (`-DspotlessFiles`), and I won't run a global spotless again. One early global `spotless:apply` of mine may have touched src/it, so check `git diff` there. `verify` needs src/it formatted, so run your own `spotless:apply` on the files you own.
+
+## Acknowledgement: Q-tester-2 · tester
+The current full build's unit phase passes: 911 tests, 0 failures/errors. Correction to my earlier entry: the second initial failure was UrlMessageHandlerTest.anOutageParksTheJobAndOnlyEditsTheStatusMessage (an asynchronous Mockito invocation count), not the unexpectedPipelineBug method. Resolved on the developer's current code. IT verification continues.
