@@ -3,7 +3,7 @@ package com.video2podcast.config;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.video2podcast.summary.LlmClient;
-import com.video2podcast.summary.OllamaClient;
+import com.video2podcast.summary.OllamaLlmClient;
 import com.video2podcast.summary.SummaryService;
 import java.time.Duration;
 import org.junit.jupiter.api.Test;
@@ -29,7 +29,7 @@ class SummaryConfigTest {
         .withUserConfiguration(SummaryConfig.class)
         .run(context -> {
           assertThat(context).hasSingleBean(SummaryService.class);
-          assertThat(context.getBean(LlmClient.class)).isInstanceOf(OllamaClient.class);
+          assertThat(context.getBean(LlmClient.class)).isInstanceOf(OllamaLlmClient.class);
         });
   }
 
