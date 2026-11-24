@@ -196,6 +196,20 @@ Sizes: S = 1-2 files, M = 3-5 files.
   - Depends on: T9, T10, T11, T14
   - Files: `job/DeferredJobs.java`, `job/DeferredJobRunner.java`, `job/PipelineService.java`, `config/AppProperties.java`, `application.yml`, `.env.example`, `docs/host-setup.md`, `SPEC.md` (criterion 14 and storage), tests
 
+- [ ] **T19: Russian videos: transcript and summary in Russian, language auto-detection** (M)
+  - Why: Whisper runs with `-l en`, so a Russian video gives a garbled transcript with loops (seen in T17). The owner wants the transcript and the summary of a Russian video in Russian.
+  - Acceptance:
+    - The language is detected by Whisper (`-l en` is removed from the Whisper command, the bot asks for detection, `docs/host-setup.md` is updated). English and Russian are supported.
+    - Russian video: Russian transcript and Russian summary (the summary prompts carry the language and the Ollama answer is in it). English video works as before. One language is used for all chunks of a long video.
+    - Any other language: the job stops right after the language is detected on the first chunk, the working files are deleted and the user gets "Only English and Russian videos are supported. Detected language: <code>." This is not a service failure and does not go to the deferred queue (T18).
+    - The bot's own texts (buttons, statuses, errors, captions) stay in English. File names come from the video title as now (Cyrillic and Telegram's file-name limits are checked).
+    - The 1500-character summary limit, HTML escaping and all other rules stay.
+    - Manual check on a Russian video; the result goes into `docs/host-setup.md`.
+    - `SPEC.md` is updated (it says English only and other languages out of scope).
+  - Verify: `./mvnw test` (unit tests: detection, the prompt per language, the refusal) and `./mvnw verify -Dit.test=LanguageIT` (the Whisper mock answers `ru`, `en` and `de`; the language of the Ollama request and the refusal without model calls are checked).
+  - Depends on: T9, T10, T11, T18
+  - Files: `transcribe/WhisperClient.java`, `summary/*` (prompts), `job/PipelineService.java`, `bot` (refusal message), `docs/host-setup.md`, `SPEC.md`, tests
+
 ### Checkpoint 4: Full flow
 - [x] All tests pass
 - [x] Manual: link, summary, tap transcript, tap audio, and the job directory is deleted. A second job left alone is deleted after 1 hour.
@@ -362,3 +376,15 @@ Work that is not scheduled in a phase. Technical debt carries the `[debt]` mark.
   - Verify: `./mvnw clean verify` three times, `-Pmutation` at least 85%.
   - Depends on: TD6, T16
   - Files: `src/it/java/com/video2podcast/functional/WireMocks.java` and the other users of `WireMockServer` in `src/it`, `src/test/java/com/video2podcast/config/TelegramConfigTest.java`
+- [ ] **TD12 [debt]: Ollama through Spring AI instead of the hand-written client** (M)
+  - Raised by the owner (2026-11-24): `OllamaClient` is written by hand on the JDK `HttpClient`, but the project is on Spring. Technical task, ollama client only.
+  - Acceptance:
+    - First step, a compatibility check, with the result in `tasks/TD12/evidence.md`: a Spring AI version that works with Spring Boot 4.1.x, and proof that `OllamaChatModel` lets us set `num_ctx`, `num_predict`, `think:false` and the model on every request and returns `prompt_eval_count`. If one of them is missing, the Developer stops and the owner decides whether to go on.
+    - `LlmClient` is implemented on Spring AI (`spring-ai-starter-model-ollama`) and the `HttpClient` version of `OllamaClient` is removed. The `LlmClient` interface, `SummaryService`, the prompts and the error texts do not change.
+    - Behaviour stays: the request parameters, the truncation guard on `prompt_eval_count`, the failure kinds (`SUMMARY_UNREACHABLE` when Ollama is down, `TIMEOUT` on an answer timeout, `FAILED` otherwise), and `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `OLLAMA_NUM_CTX`, `OLLAMA_TIMEOUT` work as before. Spring AI auto-configuration must not change any other bean.
+    - The Ollama health check (`GET /api/version`, T16) and the Whisper client do not change.
+    - The new dependency and its version are recorded in `docs/decisions.md`. SpotBugs, PMD, JaCoCo 90% and mutation 85% stay green, with no new suppressions.
+    - Live check: one real request to Ollama `qwen3:32b` through the bot, with the result in `tasks/TD12/evidence.md`.
+  - Verify: `./mvnw verify -Dno-it`, `./mvnw clean verify`, `./mvnw verify -Pmutation -Dno-it`.
+  - Depends on: T10, T16
+  - Files: `pom.xml`, `summary/OllamaClient.java` (removed), the new `LlmClient` implementation, `config/*`, `application.yml`, `docs/decisions.md`, tests
