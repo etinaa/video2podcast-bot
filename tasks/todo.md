@@ -388,3 +388,15 @@ Work that is not scheduled in a phase. Technical debt carries the `[debt]` mark.
   - Verify: `./mvnw verify -Dno-it`, `./mvnw clean verify`, `./mvnw verify -Pmutation -Dno-it`.
   - Depends on: T10, T16
   - Files: `pom.xml`, `summary/OllamaClient.java` (removed), the new `LlmClient` implementation, `config/*`, `application.yml`, `docs/decisions.md`, tests
+
+- [~] **TD13 [debt]: Spring AI cleanup: plain spring-ai-ollama, no dead interrupt branch** (S)
+  - Raised by the owner (2026-11-25) after the review of TD12. Technical task: Architect, Developer, both reviewers; no Analyst, no Tester.
+  - Acceptance:
+    - `spring-ai-starter-model-ollama` is replaced by `spring-ai-ollama` (same `spring-ai-bom` 2.1.0). The `spring.autoconfigure.exclude` block for Spring AI is removed from `application.yml`. No Spring AI auto-configuration is on the classpath (checked with `dependency:tree`, recorded in `tasks/TD13/evidence.md`).
+    - Spring AI still adds no bean except `ollamaApi` and `ollamaChatModel`, and the model is never pulled (`SpringAiWiringTest` passes unchanged).
+    - `OllamaLlmClient.failure()` no longer sets the interrupt flag of the caller for an `InterruptedException` from the call's own thread: that case is an `OTHER` failure and the caller's flag stays clear. `anInterruptionIsAnOtherFailureAndKeepsTheFlag` is changed to check this. The caller-side interrupt in `callWithin` is unchanged.
+    - Behaviour otherwise stays: the request fields, the failure kinds, the timeouts, the `OLLAMA_*` settings, the health check.
+    - D17 in `docs/decisions.md` is updated (the dependency, the consequences). SpotBugs, PMD, JaCoCo 90% and mutation 85% stay green, with no new suppressions.
+  - Verify: `./mvnw verify -Dno-it`, `./mvnw clean verify`, `./mvnw verify -Pmutation -Dno-it`.
+  - Depends on: TD12
+  - Files: `pom.xml`, `application.yml`, `summary/OllamaLlmClient.java`, `summary/OllamaLlmClientTest.java`, `docs/decisions.md`
