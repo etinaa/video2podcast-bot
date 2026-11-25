@@ -1,7 +1,7 @@
 @T10
 Feature: Summarize a video link through the local Ollama HTTP API
-  Future acceptance: T11 supplies the Telegram trigger and step definitions.
-  Exclude @T10 until then; T10 itself is verified by unit tests.
+  T11 supplies the Telegram trigger and step definitions.
+  T19 detects English from the Whisper fixture and preserves these English summary contracts.
   Transcript fixtures are returned by the Whisper mock, not by internal service calls.
   Counts and budgets in the fixture setup use the agreed context-estimation contract.
 
@@ -13,7 +13,7 @@ Feature: Summarize a video link through the local Ollama HTTP API
     And the Ollama base URL points to the Ollama mock
     And the configured Ollama model is "qwen3:32b"
     And the configured Ollama context window is 8192 tokens
-    And the Whisper mock returns JSON {"text":"The budget meeting is on Tuesday. Engineering spending increased."}
+    And the Whisper mock returns JSON {"text":"The budget meeting is on Tuesday. Engineering spending increased.","language":"english"}
 
   @R1 @R3 @R6
   Scenario: Summarize a short transcript in one non-thinking request

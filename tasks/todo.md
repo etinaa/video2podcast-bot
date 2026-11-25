@@ -201,7 +201,7 @@ Sizes: S = 1-2 files, M = 3-5 files.
   - Acceptance:
     - The language is detected by Whisper (`-l en` is removed from the Whisper command, the bot asks for detection, `docs/host-setup.md` is updated). English and Russian are supported.
     - Russian video: Russian transcript and Russian summary (the summary prompts carry the language and the Ollama answer is in it). English video works as before. One language is used for all chunks of a long video.
-    - Any other language: the job stops right after the language is detected on the first chunk, the working files are deleted and the user gets "Only English and Russian videos are supported. Detected language: <code>." This is not a service failure and does not go to the deferred queue (T18).
+    - Any other language: the job stops right after the language is detected on the first chunk with speech (a silent first chunk is sent with `auto` again on the next one; owner, Q-analyst-2), the working files are deleted and the user gets "Only English and Russian videos are supported. Detected language: <code>." This is not a service failure and does not go to the deferred queue (T18).
     - The bot's own texts (buttons, statuses, errors, captions) stay in English. File names come from the video title as now (Cyrillic and Telegram's file-name limits are checked).
     - The 1500-character summary limit, HTML escaping and all other rules stay.
     - Manual check on a Russian video; the result goes into `docs/host-setup.md`.

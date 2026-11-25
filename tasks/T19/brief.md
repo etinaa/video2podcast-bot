@@ -13,3 +13,7 @@ Agreed task: see T19 in `tasks/todo.md`.
 ## Start (2026-11-25)
 
 Owner: "Начни задачу T19". The intake above stands. Since it was written, TD12 and TD13 moved the Ollama client to Spring AI (`summary/OllamaLlmClient.java`, D17), so the summary prompts and the language reach Ollama through `OllamaLlmClient`. The Files line `summary/*` still covers it. Depends on T9, T10, T11, T18 are all done.
+
+## Owner decisions during design
+
+- Q-analyst-2 (2026-11-25): **Yes**. The language is detected on the first chunk with non-empty text, not literally on chunk 1. A silent first chunk is retried with `auto` on the next chunk. If no chunk has text: "No speech was found in this video." as now. This refines the Acceptance line "the job stops right after the language is detected on the first chunk".
