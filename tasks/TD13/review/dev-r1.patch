@@ -1,0 +1,103 @@
+diff --git a/pom.xml b/pom.xml
+index 45af1c5..4096335 100644
+--- a/pom.xml
++++ b/pom.xml
+@@ -55,7 +55,7 @@
+ 
+     <dependency>
+       <groupId>org.springframework.ai</groupId>
+-      <artifactId>spring-ai-starter-model-ollama</artifactId>
++      <artifactId>spring-ai-ollama</artifactId>
+     </dependency>
+ 
+     <dependency>
+diff --git a/src/main/java/com/video2podcast/config/SummaryConfig.java b/src/main/java/com/video2podcast/config/SummaryConfig.java
+index 84a365b..4ba5919 100644
+--- a/src/main/java/com/video2podcast/config/SummaryConfig.java
++++ b/src/main/java/com/video2podcast/config/SummaryConfig.java
+@@ -44,7 +44,7 @@ public class SummaryConfig {
+               .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+               .build());
+ 
+-  /** The Spring AI model is built here, so the starter's own chat beans back off. */
++  /** The Spring AI model is built here, so no other Spring AI chat bean exists. */
+   @Bean
+   OllamaApi ollamaApi(AppProperties props) {
+     AppProperties.Ollama config = props.ollama();
+diff --git a/src/main/java/com/video2podcast/summary/OllamaLlmClient.java b/src/main/java/com/video2podcast/summary/OllamaLlmClient.java
+index aaf6fbb..5cc93e4 100644
+--- a/src/main/java/com/video2podcast/summary/OllamaLlmClient.java
++++ b/src/main/java/com/video2podcast/summary/OllamaLlmClient.java
+@@ -108,10 +108,6 @@ public final class OllamaLlmClient implements LlmClient {
+       if (t instanceof HttpTimeoutException || t instanceof SocketTimeoutException) {
+         return new LlmException("Ollama did not answer in time", LlmException.Reason.TIMEOUT, e);
+       }
+-      if (t instanceof InterruptedException) {
+-        Thread.currentThread().interrupt();
+-        return other("Ollama request interrupted", e);
+-      }
+     }
+     if (LOG.isWarnEnabled()) {
+       LOG.warn("Ollama request failed: {}", abbreviate(e.getMessage()));
+diff --git a/src/main/resources/application.yml b/src/main/resources/application.yml
+index b8f9ed3..485843d 100644
+--- a/src/main/resources/application.yml
++++ b/src/main/resources/application.yml
+@@ -1,22 +1,6 @@
+ spring:
+   application:
+     name: video2podcast-bot
+-  autoconfigure:
+-    # Spring AI is used for the Ollama chat model only. SummaryConfig builds it from app.ollama.*
+-    # (no retries, answer timeout on the request factory, no model pull), so none of the starter's
+-    # own beans are wanted.
+-    exclude:
+-      - org.springframework.ai.model.ollama.autoconfigure.OllamaApiAutoConfiguration
+-      - org.springframework.ai.model.ollama.autoconfigure.OllamaChatAutoConfiguration
+-      - org.springframework.ai.model.ollama.autoconfigure.OllamaDecisionAutoConfiguration
+-      - org.springframework.ai.model.chat.client.autoconfigure.ChatClientAutoConfiguration
+-      - org.springframework.ai.model.chat.memory.autoconfigure.ChatMemoryAutoConfiguration
+-      - org.springframework.ai.model.tool.autoconfigure.ToolCallingAutoConfiguration
+-      - org.springframework.ai.retry.autoconfigure.SpringAiRetryAutoConfiguration
+-      - org.springframework.ai.model.ollama.autoconfigure.OllamaEmbeddingAutoConfiguration
+-      - org.springframework.ai.model.chat.observation.autoconfigure.ChatObservationAutoConfiguration
+-      - org.springframework.ai.model.decision.observation.autoconfigure.DecisionObservationAutoConfiguration
+-      - org.springframework.ai.model.embedding.observation.autoconfigure.EmbeddingObservationAutoConfiguration
+ 
+ app:
+   telegram:
+diff --git a/src/test/java/com/video2podcast/config/SpringAiWiringTest.java b/src/test/java/com/video2podcast/config/SpringAiWiringTest.java
+index 9e84455..5cdf2b8 100644
+--- a/src/test/java/com/video2podcast/config/SpringAiWiringTest.java
++++ b/src/test/java/com/video2podcast/config/SpringAiWiringTest.java
+@@ -21,7 +21,7 @@ import org.springframework.context.ApplicationContext;
+ import org.springframework.test.context.DynamicPropertyRegistry;
+ import org.springframework.test.context.DynamicPropertySource;
+ 
+-/** The OLLAMA_* settings reach Spring AI, and the Spring AI starter adds nothing else. */
++/** The OLLAMA_* settings reach Spring AI, and Spring AI adds nothing else. */
+ @SpringBootTest(
+     properties = {
+       "app.telegram.bot-token=test-token",
+diff --git a/src/test/java/com/video2podcast/summary/OllamaLlmClientTest.java b/src/test/java/com/video2podcast/summary/OllamaLlmClientTest.java
+index 8d993c8..2bd015e 100644
+--- a/src/test/java/com/video2podcast/summary/OllamaLlmClientTest.java
++++ b/src/test/java/com/video2podcast/summary/OllamaLlmClientTest.java
+@@ -508,14 +508,15 @@ class OllamaLlmClientTest {
+   }
+ 
+   @Test
+-  void anInterruptionIsAnOtherFailureAndKeepsTheFlag() {
++  void anInterruptionInTheCallThreadIsAnOtherFailureAndLeavesTheCallerFlagClear() {
+     try {
+       LlmException e =
+           failureWith(
+               new ResourceAccessException("I/O", new IOException(new InterruptedException())));
+ 
+       assertThat(e.reason()).isEqualTo(LlmException.Reason.OTHER);
+-      assertThat(Thread.currentThread().isInterrupted()).isTrue();
++      assertThat(e).hasMessage("Ollama request failed");
++      assertThat(Thread.currentThread().isInterrupted()).isFalse();
+     } finally {
+       Thread.interrupted();
+     }

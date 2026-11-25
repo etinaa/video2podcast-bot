@@ -389,7 +389,7 @@ Work that is not scheduled in a phase. Technical debt carries the `[debt]` mark.
   - Depends on: T10, T16
   - Files: `pom.xml`, `summary/OllamaClient.java` (removed), the new `LlmClient` implementation, `config/*`, `application.yml`, `docs/decisions.md`, tests
 
-- [~] **TD13 [debt]: Spring AI cleanup: plain spring-ai-ollama, no dead interrupt branch** (S)
+- [x] **TD13 [debt]: Spring AI cleanup: plain spring-ai-ollama, no dead interrupt branch** (S)
   - Raised by the owner (2026-11-25) after the review of TD12. Technical task: Architect, Developer, both reviewers; no Analyst, no Tester.
   - Acceptance:
     - `spring-ai-starter-model-ollama` is replaced by `spring-ai-ollama` (same `spring-ai-bom` 2.1.0). The `spring.autoconfigure.exclude` block for Spring AI is removed from `application.yml`. No Spring AI auto-configuration is on the classpath (checked with `dependency:tree`, recorded in `tasks/TD13/evidence.md`).
