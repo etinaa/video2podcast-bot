@@ -124,7 +124,8 @@ public class FailureModeSteps {
   @When("the Whisper and Ollama mocks begin returning successful answers")
   public void successful() {
     w.defaultOllama = null;
-    w.defaultWhisper = PipelineWorld.Answer.json("{\"text\":\"A useful transcript.\"}");
+    w.defaultWhisper =
+        PipelineWorld.Answer.json("{\"text\":\"A useful transcript.\",\"language\":\"english\"}");
   }
 
   @When("a fresh bot application starts against the local HTTP mocks")

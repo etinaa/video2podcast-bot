@@ -39,7 +39,7 @@ import org.springframework.context.annotation.Primary;
 /** Scenario-owned application and external fixtures. No processing service is invoked by steps. */
 public class PipelineWorld implements AutoCloseable {
   static final ObjectMapper JSON = new ObjectMapper();
-  static final String TAGS = "@T8 or @T9 or @T10 or @T11 or @TD2 or @T18";
+  static final String TAGS = "@T8 or @T9 or @T10 or @T11 or @TD2 or @T18 or @T19";
   static final Duration WAIT = Duration.ofSeconds(30);
   final List<Event> events = new CopyOnWriteArrayList<>();
   final List<List<String>> commands = new CopyOnWriteArrayList<>();
@@ -78,6 +78,7 @@ public class PipelineWorld implements AutoCloseable {
   boolean timeout, splitThree;
   boolean refuseWhisperDuringWork, refuseOllamaDuringWork;
   FailureModeWorld health;
+  TelegramUploadRecorder telegramUploads;
   DeferredSupport deferred;
   int exitCode = 1, summaryId = 701;
   long seconds = 300;
@@ -86,7 +87,7 @@ public class PipelineWorld implements AutoCloseable {
   String defaultContent = "- The budget meeting is on Tuesday.\n- Engineering spending increased.";
   Answer defaultWhisper =
       Answer.json(
-          "{\"text\":\"The budget meeting is on Tuesday. Engineering spending increased.\"}");
+          "{\"text\":\"The budget meeting is on Tuesday. Engineering spending increased.\",\"language\":\"english\"}");
   Answer defaultOllama;
   Hold whisperHold, ollamaHold, summaryHold;
   Predicate<JsonNode> reject = n -> false;
@@ -541,6 +542,17 @@ public class PipelineWorld implements AutoCloseable {
     }
   }
 
+  static int estimatedTokens(String text, JsonNode request) {
+    int divisor =
+        request.path("messages").get(0).path("content").asText().contains("Russian") ? 2 : 3;
+    return (text.length() + divisor - 1) / divisor;
+  }
+
+  /** Await already-submitted work, without inserting a task or changing queue positions. */
+  void drained() {
+    until(() -> assertThat(context.getBean(com.video2podcast.job.JobQueue.class).size()).isZero());
+  }
+
   static String read(Path p) {
     try {
       return Files.readString(p);
@@ -866,7 +878,7 @@ public class PipelineWorld implements AutoCloseable {
       Answer answer;
       if (name.equals("media")) return serve.getResponseDefinition();
       if (name.equals("telegram")) {
-        if (health != null && r.getUrl().endsWith("/senddocument")) {
+        if (r.getUrl().endsWith("/senddocument") || r.getUrl().endsWith("/sendaudio")) {
           return aResponse()
               .withHeader("Content-Type", "application/json")
               .withBody(
@@ -918,7 +930,7 @@ public class PipelineWorld implements AutoCloseable {
           JsonNode n = event.json();
           int count = 32;
           for (var msg : n.path("messages"))
-            count += (msg.path("content").asText().length() + 2) / 3;
+            count += estimatedTokens(msg.path("content").asText(), n);
           answer =
               Answer.json(
                   stringify(
@@ -934,7 +946,7 @@ public class PipelineWorld implements AutoCloseable {
       if (answer.content != null) {
         int count = 32;
         for (JsonNode msg : event.json().path("messages"))
-          count += (msg.path("content").asText().length() + 2) / 3;
+          count += estimatedTokens(msg.path("content").asText(), event.json());
         answer =
             Answer.json(
                 stringify(

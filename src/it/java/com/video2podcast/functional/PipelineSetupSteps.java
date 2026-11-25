@@ -49,7 +49,8 @@ public class PipelineSetupSteps {
 
   @Given("the Whisper and Ollama mocks return successful answers")
   public void success() {
-    w.defaultWhisper = Answer.json(PipelineWorld.stringify(Map.of("text", w.transcript)));
+    w.defaultWhisper =
+        Answer.json(PipelineWorld.stringify(Map.of("text", w.transcript, "language", "english")));
     w.defaultOllama = null;
   }
 
@@ -389,17 +390,21 @@ public class PipelineSetupSteps {
   @Given("the Whisper mock returns text {string}, {string} and {string} for those chunks")
   public void whisperThree(String a, String b, String c) {
     for (String s : List.of(a, b, c))
-      w.whisperAnswers.add(Answer.json(PipelineWorld.stringify(Map.of("text", s))));
+      w.whisperAnswers.add(
+          Answer.json(PipelineWorld.stringify(Map.of("text", s, "language", "english"))));
   }
 
   @Given("the Whisper mock returns text {string} through {string} for the corresponding chunks")
   public void eighteen(String a, String b) {
     for (int i = 0; i < 18; i++)
       w.whisperAnswers.add(
-          Answer.json(PipelineWorld.stringify(Map.of("text", "part-%02d".formatted(i)))));
+          Answer.json(
+              PipelineWorld.stringify(
+                  Map.of("text", "part-%02d".formatted(i), "language", "english"))));
   }
 
-  @Given("^the Whisper mock returns JSON (.+) for \"(chunk-\\d+.wav)\"$")
+  @Given(
+      "^the Whisper mock returns JSON (\\{.*\\})(?: on both attempts)? for \"(chunk-\\d+.wav)\"$")
   public void chunkJson(String s, String chunk) {
     w.chunkAnswers
         .computeIfAbsent(chunk, k -> new java.util.concurrent.ConcurrentLinkedDeque<>())
@@ -446,7 +451,7 @@ public class PipelineSetupSteps {
 
   @Given("the Whisper mock returns nonempty text for all other chunks")
   public void otherChunks() {
-    w.defaultWhisper = Answer.json("{\"text\":\"Speech\"}");
+    w.defaultWhisper = Answer.json("{\"text\":\"Speech\",\"language\":\"english\"}");
   }
 
   @Given("the Whisper mock returns nonempty text for both chunks")
@@ -456,13 +461,13 @@ public class PipelineSetupSteps {
 
   @Given("the Whisper mock returns nonempty text for {string}")
   public void nonempty(String s) {
-    chunkJson("{\"text\":\"Speech\"}", s);
+    chunkJson("{\"text\":\"Speech\",\"language\":\"english\"}", s);
   }
 
   @Given("the Whisper mock fails once for {string} and then returns nonempty text on retry")
   public void failsOnce(String s) {
     firstFailure(s, "status 500");
-    chunkJson("{\"text\":\"Recovered\"}", s);
+    chunkJson("{\"text\":\"Recovered\",\"language\":\"english\"}", s);
   }
 
   @Given("the Whisper mock returns status {int} for both attempts for {string}")
@@ -478,7 +483,7 @@ public class PipelineSetupSteps {
 
   @Given("the Whisper mock holds the answer for {string} within its answer timeout")
   public void holdChunk(String s) {
-    Answer a = Answer.json("{\"text\":\"Last\"}");
+    Answer a = Answer.json("{\"text\":\"Last\",\"language\":\"english\"}");
     a.hold = w.hold();
     w.whisperHold = a.hold;
     w.chunkAnswers.put(s, new java.util.concurrent.ConcurrentLinkedDeque<>(List.of(a)));
@@ -519,7 +524,7 @@ public class PipelineSetupSteps {
     w.whisperAnswers.clear();
     w.whisperAnswers.add(Answer.failure("status 500"));
     w.whisperAnswers.add(Answer.failure("status 500"));
-    w.defaultWhisper = Answer.json("{\"text\":\"Next job succeeded\"}");
+    w.defaultWhisper = Answer.json("{\"text\":\"Next job succeeded\",\"language\":\"english\"}");
     w.release(w.whisperHold);
   }
 
@@ -597,9 +602,9 @@ public class PipelineSetupSteps {
   @Given(
       "the Whisper mock returns an ordered English transcript that fills exactly {int} summary input chunks at context 8192")
   public void longTranscript(int n) {
-    // T10 contract: largest system prompt is 322 UTF-16 units (108 tokens).
-    int budget = (8192 - 1024 - 108 - 32) * 3;
-    w.wholeTranscript = "Opening " + "word ".repeat((budget * (n - 1) + 100) / 5) + "Closing";
+    // Keep the fixture comfortably inside the requested chunk count as prompt text evolves.
+    int budget = 21000;
+    w.wholeTranscript = "Opening " + "word ".repeat((budget * n - budget / 2) / 5) + "Closing";
     w.whisperAnswers.clear();
     List<String> words = Arrays.asList(w.wholeTranscript.split(" "));
     int count = (int) ((w.seconds + 599) / 600), at = 0;
@@ -607,7 +612,9 @@ public class PipelineSetupSteps {
       int end = (i + 1) * words.size() / count;
       w.whisperAnswers.add(
           Answer.json(
-              PipelineWorld.stringify(Map.of("text", String.join(" ", words.subList(at, end))))));
+              PipelineWorld.stringify(
+                  Map.of(
+                      "text", String.join(" ", words.subList(at, end)), "language", "english"))));
       at = end;
     }
   }
@@ -644,7 +651,9 @@ public class PipelineSetupSteps {
   @Given(
       "the Whisper mock returns an English transcript whose complete prompt has an expected input size of approximately 4831 tokens")
   public void count4831() {
-    w.defaultWhisper = Answer.json(PipelineWorld.stringify(Map.of("text", "word ".repeat(2818))));
+    w.defaultWhisper =
+        Answer.json(
+            PipelineWorld.stringify(Map.of("text", "word ".repeat(2818), "language", "english")));
   }
 
   @Given(

@@ -351,7 +351,7 @@ final class AudioSupport implements AutoCloseable {
         }
         return aResponse()
             .withHeader("Content-Type", "application/json")
-            .withBody("{\"text\":\"Earlier speech\"}")
+            .withBody("{\"text\":\"Earlier speech\",\"language\":\"english\"}")
             .build();
       }
       int count = 32;

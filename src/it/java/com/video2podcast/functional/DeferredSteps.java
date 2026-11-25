@@ -22,7 +22,7 @@ public class DeferredSteps {
     d = new DeferredSupport(w, h);
   }
 
-  @Before(value = "@T18", order = 20)
+  @Before(value = "@T18 or @T19", order = 20)
   public void begin() {
     w.health = h;
     for (String s : List.of("whisper", "ollama")) h.policy(s, "HTTP 200");
@@ -86,7 +86,7 @@ public class DeferredSteps {
       "^the (Whisper|Ollama) base URL refuses (?:inference|chat) connections after its successful health response$")
   public void midOutage(String service) {
     if (service.equals("Ollama"))
-      w.defaultWhisper = Answer.json("{\"text\":\"First transcription\"}");
+      w.defaultWhisper = Answer.json("{\"text\":\"First transcription\",\"language\":\"english\"}");
     if (service.equals("Whisper")) w.refuseWhisperDuringWork = true;
     else w.refuseOllamaDuringWork = true;
   }
@@ -372,7 +372,8 @@ public class DeferredSteps {
 
   @When("the Whisper mock begins returning text {string}")
   public void freshText(String text) {
-    w.defaultWhisper = Answer.json(PipelineWorld.stringify(Map.of("text", text)));
+    w.defaultWhisper =
+        Answer.json(PipelineWorld.stringify(Map.of("text", text, "language", "english")));
   }
 
   @When("the Ollama mock begins returning successful answers")

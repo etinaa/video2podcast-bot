@@ -56,10 +56,12 @@ public class SummaryAssertionSteps {
   }
 
   @Then(
-      "the Ollama request contains the complete transcript and instructions for English bullet points")
-  public void prompt() {
-    assertThat(input(w.service("ollama").getFirst())).isEqualTo(w.transcript);
-    english(w.service("ollama").getFirst());
+      "^the Ollama request contains the complete transcript and instructions for (English|Russian) bullet points$")
+  public void prompt(String language) {
+    w.finishOne();
+    assertThat(input(w.service("ollama").getFirst()))
+        .isEqualTo(PipelineWorld.read(w.publishedDir().resolve("transcript.txt")).strip());
+    LanguageSupport.prompt(w.service("ollama").getFirst(), language);
   }
 
   void english(Event e) {
@@ -105,7 +107,11 @@ public class SummaryAssertionSteps {
       "each recorded Ollama request fits its context including instructions, chat overhead and reserved output")
   public void budget() {
     for (Event e : w.service("ollama")) {
-      long count = (system(e).length() + 2) / 3 + (input(e).length() + 2) / 3 + 32 + 1024;
+      long count =
+          PipelineWorld.estimatedTokens(system(e), e.json())
+              + PipelineWorld.estimatedTokens(input(e), e.json())
+              + 32
+              + 1024;
       assertThat(count).isLessThanOrEqualTo(e.json().path("options").path("num_ctx").asInt());
     }
   }

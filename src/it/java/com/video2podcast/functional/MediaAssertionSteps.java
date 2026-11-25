@@ -265,9 +265,10 @@ public class MediaAssertionSteps {
   @Then(
       "{string} contains {string} through {string} in order separated by single spaces and followed by one LF newline")
   public void allParts(String file, String a, String b) {
+    assertThat(b).isEqualTo(a.substring(0, a.length() - 2) + "17");
     String expected =
         IntStream.range(0, 18)
-            .mapToObj(i -> "part-%02d".formatted(i))
+            .mapToObj(i -> a.substring(0, a.length() - 2) + "%02d".formatted(i))
             .collect(Collectors.joining(" "));
     transcript(file, expected);
   }
@@ -341,13 +342,19 @@ public class MediaAssertionSteps {
     assertThat(w.service("whisper")).noneMatch(e -> e.chunk().equals(s));
   }
 
-  @Then("every attempt uses the same multipart English JSON contract and corresponding chunk bytes")
+  @Then(
+      "every retry uses the same multipart language and response_format fields as that chunk's first attempt and the corresponding chunk bytes")
   public void everyMultipart() throws Exception {
     for (Event e : w.service("whisper")) {
       assertMultipartWav(e);
       assertThat(PipelineWorld.wavDigest(e)).isEqualTo(w.expectedWavs.get(e));
     }
-    fields("response_format", "json", "language", "en");
+    var calls = w.service("whisper");
+    for (Event e : calls) {
+      boolean detect = e.chunk().equals("chunk-000.wav");
+      LanguageSupport.field(e, "language", detect ? "auto" : "en");
+      LanguageSupport.field(e, "response_format", detect ? "verbose_json" : "json");
+    }
     var byChunk = w.service("whisper").stream().collect(Collectors.groupingBy(Event::chunk));
     for (var list : byChunk.values())
       if (list.size() > 1) {

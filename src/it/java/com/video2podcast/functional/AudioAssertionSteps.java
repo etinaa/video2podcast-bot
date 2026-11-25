@@ -11,6 +11,7 @@ import java.util.*;
 
 /** Checks uploaded media, Telegram requests and durable files without calling delivery services. */
 public class AudioAssertionSteps {
+  @org.springframework.beans.factory.annotation.Autowired private PipelineWorld pipeline;
   final TranscriptWorld w;
 
   public AudioAssertionSteps(TranscriptWorld w) {
@@ -87,6 +88,12 @@ public class AudioAssertionSteps {
 
   @Then("the sendAudio multipart caption is exactly {string}")
   public void caption(String value) {
+    if (pipeline != null && pipeline.active) {
+      var request = pipeline.telegramUploads.one("sendAudio");
+      assertThat(request.part("caption").text()).isEqualTo(value);
+      assertThat(request.part("parse_mode").text()).isEqualTo("HTML");
+      return;
+    }
     part("caption", value);
     assertThat(w.audio.part("parse_mode")).isEqualTo("HTML");
   }

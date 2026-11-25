@@ -72,7 +72,7 @@ public class FailureModeWorld {
     logger.addAppender(appender);
   }
 
-  @After(value = "@T16 or @T18", order = 110)
+  @After(value = "@T16 or @T18 or @T19", order = 110)
   public void close() throws Exception {
     try {
       w.holds.forEach(h -> h.release.countDown());
