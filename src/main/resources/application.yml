@@ -1,22 +1,6 @@
 spring:
   application:
     name: video2podcast-bot
-  autoconfigure:
-    # Spring AI is used for the Ollama chat model only. SummaryConfig builds it from app.ollama.*
-    # (no retries, answer timeout on the request factory, no model pull), so none of the starter's
-    # own beans are wanted.
-    exclude:
-      - org.springframework.ai.model.ollama.autoconfigure.OllamaApiAutoConfiguration
-      - org.springframework.ai.model.ollama.autoconfigure.OllamaChatAutoConfiguration
-      - org.springframework.ai.model.ollama.autoconfigure.OllamaDecisionAutoConfiguration
-      - org.springframework.ai.model.chat.client.autoconfigure.ChatClientAutoConfiguration
-      - org.springframework.ai.model.chat.memory.autoconfigure.ChatMemoryAutoConfiguration
-      - org.springframework.ai.model.tool.autoconfigure.ToolCallingAutoConfiguration
-      - org.springframework.ai.retry.autoconfigure.SpringAiRetryAutoConfiguration
-      - org.springframework.ai.model.ollama.autoconfigure.OllamaEmbeddingAutoConfiguration
-      - org.springframework.ai.model.chat.observation.autoconfigure.ChatObservationAutoConfiguration
-      - org.springframework.ai.model.decision.observation.autoconfigure.DecisionObservationAutoConfiguration
-      - org.springframework.ai.model.embedding.observation.autoconfigure.EmbeddingObservationAutoConfiguration
 
 app:
   telegram:

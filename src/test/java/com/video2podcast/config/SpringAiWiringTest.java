@@ -21,7 +21,7 @@ import org.springframework.context.ApplicationContext;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 
-/** The OLLAMA_* settings reach Spring AI, and the Spring AI starter adds nothing else. */
+/** The OLLAMA_* settings reach Spring AI, and Spring AI adds nothing else. */
 @SpringBootTest(
     properties = {
       "app.telegram.bot-token=test-token",

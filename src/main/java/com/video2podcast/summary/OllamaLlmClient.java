@@ -108,10 +108,6 @@ public final class OllamaLlmClient implements LlmClient {
       if (t instanceof HttpTimeoutException || t instanceof SocketTimeoutException) {
         return new LlmException("Ollama did not answer in time", LlmException.Reason.TIMEOUT, e);
       }
-      if (t instanceof InterruptedException) {
-        Thread.currentThread().interrupt();
-        return other("Ollama request interrupted", e);
-      }
     }
     if (LOG.isWarnEnabled()) {
       LOG.warn("Ollama request failed: {}", abbreviate(e.getMessage()));

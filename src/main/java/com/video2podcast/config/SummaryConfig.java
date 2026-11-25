@@ -44,7 +44,7 @@ public class SummaryConfig {
               .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
               .build());
 
-  /** The Spring AI model is built here, so the starter's own chat beans back off. */
+  /** The Spring AI model is built here, so no other Spring AI chat bean exists. */
   @Bean
   OllamaApi ollamaApi(AppProperties props) {
     AppProperties.Ollama config = props.ollama();

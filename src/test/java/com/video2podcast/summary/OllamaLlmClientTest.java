@@ -508,14 +508,15 @@ class OllamaLlmClientTest {
   }
 
   @Test
-  void anInterruptionIsAnOtherFailureAndKeepsTheFlag() {
+  void anInterruptionInTheCallThreadIsAnOtherFailureAndLeavesTheCallerFlagClear() {
     try {
       LlmException e =
           failureWith(
               new ResourceAccessException("I/O", new IOException(new InterruptedException())));
 
       assertThat(e.reason()).isEqualTo(LlmException.Reason.OTHER);
-      assertThat(Thread.currentThread().isInterrupted()).isTrue();
+      assertThat(e).hasMessage("Ollama request failed");
+      assertThat(Thread.currentThread().isInterrupted()).isFalse();
     } finally {
       Thread.interrupted();
     }
