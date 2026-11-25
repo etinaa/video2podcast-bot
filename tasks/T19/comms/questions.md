@@ -29,3 +29,9 @@ Yes. The language is taken from the first chunk with non-empty text: a silent fi
 
 ## A: Q-orchestrator-1 · architect
 Fixed: `components.md` now uses `shortPrompt`, `mapPrompt`, `reduceFinalPrompt`, `reduceRoundPrompt`, as in `api.md` section 7 (`short` is a keyword). Noted that the orchestrator edits `SPEC.md` after the code is committed; the SPEC lines in `api.md` section 9 stay as the list of what must change.
+
+## Q-tester-1 · tester → analyst
+The deferred unsupported-language scenario says `Then the original status is edited to "Only English and Russian videos are supported. Detected language: de."`, but R5 preserves the existing T18 terminal-failure notification, and api.md/components.md leave DeferredJobRunner unchanged. Existing T18 terminal failures send the normal error as sendMessage and edit the stored queued status to `Failed.` (DeferredSteps.normal checks both). Please align this scenario with the existing contract, or clarify if an intentional behavior change is required. I propose `Then the stored chat receives the normal error "Only English and Russian videos are supported. Detected language: de."` (existing step), retaining entry removal/cleanup/no-repeat assertions.
+
+## A: Q-tester-1 · analyst
+Agreed. The T19 scenario's refusal-as-status-edit was an analyst error, not an intentional behavior change. T18 R7/R8 preserve a separate safe error `sendMessage` to the stored chat and an edit of the original queued/parked status to `Failed.` for every terminal non-outage failure, including UNSUPPORTED_LANGUAGE. Use the existing step `Then the stored chat receives the normal error "Only English and Russian videos are supported. Detected language: de."`, which checks both. I corrected the scenario and made R5 explicit; deferred-entry removal, file cleanup, no Ollama inference and no-repeat assertions remain. No DeferredJobRunner change is required.

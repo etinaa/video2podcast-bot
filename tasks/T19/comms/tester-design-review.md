@@ -23,3 +23,7 @@ The prompt-method naming discrepancy in components.md is already tracked by Q-or
 ## Reapproval after Q-orchestrator-1
 
 Re-read corrected components.md, api.md section 7 and A: Q-orchestrator-1. All four prompt names now agree: shortPrompt, mapPrompt, reduceFinalPrompt and reduceRoundPrompt. This naming correction changes no scenario behavior or test boundary. No open tester questions; design approval renewed after the reset. No tests written or run.
+
+## Reapproval after A: Q-tester-1
+
+Checked the R5 and deferred-recovery scenario changes: a terminal unsupported-language recovery sends the ordinary error message and edits the original status to Failed., preserving T18. Entry removal, cleanup and no-repeat assertions remain. This resolves the tester's question; design approved again after the reset. Step 2 continues.

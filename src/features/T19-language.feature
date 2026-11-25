@@ -214,7 +214,7 @@ Feature: Keep Russian and English video content in its detected language
     And both service health endpoints now answer HTTP 200
     And the Whisper mock returns JSON {"text":"Das Treffen ist am Dienstag.","language":"german"}
     When the deferred retry interval elapses
-    Then the original status is edited to "Only English and Russian videos are supported. Detected language: de."
+    Then the stored chat receives the normal error "Only English and Russian videos are supported. Detected language: de."
     And deferred-jobs.json contains no entry for this submission
     And the Ollama mock receives no POST request to "/api/chat"
     And after this submission finishes no working directory for it remains

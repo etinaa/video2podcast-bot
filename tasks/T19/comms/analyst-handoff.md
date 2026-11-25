@@ -13,3 +13,5 @@ Architect follow-up note: use the same Unicode-whitespace normalization when dec
 The full task still needs implementation, `LanguageIT`, full gates, SPEC/host documentation changes and the real Russian-video check with both filenames. Other agents' files and untracked workspace items were not changed by Analyst.
 
 Finalization after owner answer: Gherkin re-parsed successfully with 42 T19, 37 T9 and 31 T10 expanded cases; requirement-tag and whitespace checks passed. Analyst step is complete; implementation and manual acceptance remain team work.
+
+Correction A: Q-tester-1: deferred unsupported-language refusal uses T18 normal error sendMessage plus original status `Failed.`, not refusal text in the status edit. R5 and the scenario now explicitly preserve that contract; existing normal-error step is reused. Cleanup, queue removal, no inference and no-repeat checks are retained.
