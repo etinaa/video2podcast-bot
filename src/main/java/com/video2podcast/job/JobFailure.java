@@ -19,7 +19,8 @@ public class JobFailure extends RuntimeException {
     TIMEOUT,
     NO_SPEECH,
     SERVICE_UNREACHABLE,
-    SUMMARY_UNREACHABLE
+    SUMMARY_UNREACHABLE,
+    UNSUPPORTED_LANGUAGE
   }
 
   private final Kind kind;
@@ -81,6 +82,16 @@ public class JobFailure extends RuntimeException {
     return new JobFailure(Kind.TOO_LONG, "The video is longer than " + formatLimit(limit) + ".");
   }
 
+  /**
+   * The refusal of a video in another language. {@code code} comes from Whisper's language list
+   * (letters only, or "unknown").
+   */
+  public static JobFailure unsupportedLanguage(String code) {
+    return new JobFailure(
+        Kind.UNSUPPORTED_LANGUAGE,
+        messageOf(Kind.UNSUPPORTED_LANGUAGE) + " Detected language: " + code + ".");
+  }
+
   /** A {@code FAILED} with the transcription message; {@code cause} may be null. */
   public static JobFailure transcriptionFailed(Throwable cause) {
     return new JobFailure(Kind.FAILED, "Transcription failed. Please try again later.", cause);
@@ -101,6 +112,7 @@ public class JobFailure extends RuntimeException {
       case NO_SPEECH -> "No speech was found in this video.";
       case SERVICE_UNREACHABLE -> "The transcription server is unreachable.";
       case SUMMARY_UNREACHABLE -> "The summary server is unreachable.";
+      case UNSUPPORTED_LANGUAGE -> "Only English and Russian videos are supported.";
     };
   }
 

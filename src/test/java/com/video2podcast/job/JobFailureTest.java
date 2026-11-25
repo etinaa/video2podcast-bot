@@ -116,4 +116,16 @@ class JobFailureTest {
     org.assertj.core.api.Assertions.assertThat(JobFailure.unreachable(true, true).isServiceOutage())
         .isTrue();
   }
+
+  @Test
+  void anUnsupportedLanguageNamesTheDetectedCode() {
+    JobFailure failure = JobFailure.unsupportedLanguage("de");
+
+    assertThat(failure.kind()).isEqualTo(JobFailure.Kind.UNSUPPORTED_LANGUAGE);
+    assertThat(failure.getMessage())
+        .isEqualTo("Only English and Russian videos are supported. Detected language: de.");
+    assertThat(failure.isServiceOutage()).isFalse();
+    assertThat(JobFailure.of(JobFailure.Kind.UNSUPPORTED_LANGUAGE).getMessage())
+        .isEqualTo("Only English and Russian videos are supported.");
+  }
 }

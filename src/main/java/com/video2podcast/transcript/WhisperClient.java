@@ -3,6 +3,7 @@ package com.video2podcast.transcript;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.video2podcast.config.AppProperties;
 import com.video2podcast.job.HttpProbe;
+import com.video2podcast.job.Language;
 import com.video2podcast.job.ProbeResult;
 import com.video2podcast.storage.Json;
 import java.io.FileNotFoundException;
@@ -21,14 +22,21 @@ import java.nio.channels.UnresolvedAddressException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.Objects;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-/** One call to the whisper.cpp server: sends a WAV chunk and returns the recognized text. */
+/**
+ * One call to the whisper.cpp server: sends a WAV chunk, returns the text and maybe the language.
+ */
 public class WhisperClient {
 
   private static final Logger LOG = LoggerFactory.getLogger(WhisperClient.class);
+
+  /** The value of the {@code language} field that asks Whisper to detect the language. */
+  public static final String AUTO = "auto";
+
   private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(5);
   private static final int LOGGED_BODY_CHARS = 200;
 
@@ -66,10 +74,22 @@ public class WhisperClient {
     return HttpProbe.get(http, root, timeout);
   }
 
-  /** Returns the raw "text" field of the answer, not normalized. */
-  public String transcribe(Path chunk) throws WhisperException {
+  /**
+   * Sends one chunk. {@code language} is {@value #AUTO} (detect mode: asks for {@code verbose_json}
+   * and reads the language) or a code such as {@code en} or {@code ru} (pinned mode).
+   *
+   * @throws IllegalArgumentException if {@code language} is blank or not a letters-only value
+   * @throws WhisperException when the call fails, the answer is not usable, or in detect mode the
+   *     answer has text but no usable language
+   */
+  public WhisperResult transcribe(Path chunk, String language) throws WhisperException {
+    Objects.requireNonNull(language, "language");
+    boolean detect = AUTO.equals(language);
+    if (!detect && Language.fromCode(language).isEmpty()) {
+      throw new IllegalArgumentException("unsupported language: " + language);
+    }
     String boundary = "----v2p" + UUID.randomUUID().toString().replace("-", "");
-    HttpResponse<String> response = send(chunk, boundary);
+    HttpResponse<String> response = send(chunk, boundary, language, detect);
     int status = response.statusCode();
     if (status < 200 || status > 299) {
       if (LOG.isWarnEnabled()) {
@@ -77,16 +97,17 @@ public class WhisperClient {
       }
       throw new WhisperException("Whisper answered status " + status, false, null);
     }
-    return textOf(response.body());
+    return resultOf(response.body(), detect);
   }
 
-  private HttpResponse<String> send(Path chunk, String boundary) throws WhisperException {
+  private HttpResponse<String> send(Path chunk, String boundary, String language, boolean detect)
+      throws WhisperException {
     try {
       HttpRequest request =
           HttpRequest.newBuilder(endpoint)
               .timeout(timeout)
               .header("Content-Type", "multipart/form-data; boundary=" + boundary)
-              .POST(body(chunk, boundary))
+              .POST(body(chunk, boundary, language, detect))
               .build();
       return http.send(request, BodyHandlers.ofString(StandardCharsets.UTF_8));
     } catch (HttpConnectTimeoutException | ConnectException | UnresolvedAddressException e) {
@@ -101,7 +122,8 @@ public class WhisperClient {
     }
   }
 
-  private static BodyPublisher body(Path chunk, String boundary) throws FileNotFoundException {
+  private static BodyPublisher body(Path chunk, String boundary, String language, boolean detect)
+      throws FileNotFoundException {
     String head =
         "--"
             + boundary
@@ -109,8 +131,10 @@ public class WhisperClient {
             + chunk.getFileName()
             + "\"\r\nContent-Type: audio/wav\r\n\r\n";
     String tail =
-        field(boundary, "response_format", "json")
-            + field(boundary, "language", "en")
+        field(boundary, "response_format", detect ? "verbose_json" : "json")
+            + field(boundary, "language", language)
+            + field(boundary, "translate", "false")
+            + field(boundary, "detect_language", "false")
             + field(boundary, "temperature", "0.0")
             + "--"
             + boundary
@@ -131,20 +155,28 @@ public class WhisperClient {
         + "\r\n";
   }
 
-  private static String textOf(String body) throws WhisperException {
+  private static WhisperResult resultOf(String body, boolean detect) throws WhisperException {
     if (body == null || body.isBlank()) {
       throw new WhisperException("Whisper answered with an empty body", false, null);
     }
-    JsonNode text;
+    JsonNode root;
     try {
-      text = Json.MAPPER.readTree(body).path("text");
+      root = Json.MAPPER.readTree(body);
     } catch (IOException e) {
       throw new WhisperException("Whisper answer is not JSON", false, e);
     }
+    JsonNode text = root.path("text");
     if (!text.isTextual()) {
       throw new WhisperException("Whisper answer has no text", false, null);
     }
-    return text.textValue();
+    if (!detect || TranscriptMerger.normalize(text.textValue()).isEmpty()) {
+      return new WhisperResult(text.textValue(), null);
+    }
+    JsonNode language = root.path("language");
+    if (!language.isTextual() || language.textValue().isBlank()) {
+      throw new WhisperException("Whisper answer has no language", false, null);
+    }
+    return new WhisperResult(text.textValue(), WhisperLanguages.toCode(language.textValue()));
   }
 
   private static String abbreviate(String body) {

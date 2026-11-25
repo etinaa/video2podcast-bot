@@ -6,6 +6,7 @@ import com.video2podcast.media.VideoMetadata;
 import com.video2podcast.media.YtDlpClient;
 import com.video2podcast.summary.SummaryService;
 import com.video2podcast.transcript.TranscriptionClient;
+import com.video2podcast.transcript.TranscriptionClient.Transcription;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -95,9 +96,10 @@ public class PipelineService {
     Path source = ytDlp.downloadAudio(request.url(), dir);
     Path wav = ffmpeg.toWav(source, dir);
     List<Path> chunks = ffmpeg.split(wav, dir);
-    Path transcript = transcription.transcribe(dir, chunks, progress::transcribing);
+    Transcription transcribed = transcription.transcribe(dir, chunks, progress::transcribing);
     progress.summarizing();
-    String bullets = summary.summarize(readTranscript(transcript));
+    String bullets =
+        summary.summarize(readTranscript(transcribed.transcript()), transcribed.language());
 
     JobRecord record =
         new JobRecord(

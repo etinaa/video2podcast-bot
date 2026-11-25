@@ -69,12 +69,12 @@ class TranscriptionAssembledTest {
             .willReturn(
                 aResponse()
                     .withStatus(200)
-                    .withBody("{\"text\":\"" + text + "\"}")
+                    .withBody("{\"text\":\"" + text + "\",\"language\":\"english\"}")
                     .withFixedDelay(delayMillis)));
   }
 
   private Path run(TranscriptionClient client, List<Path> chunks) {
-    return client.transcribe(jobDir, chunks, (n, t) -> progress.add(n + "/" + t));
+    return client.transcribe(jobDir, chunks, (n, t) -> progress.add(n + "/" + t)).transcript();
   }
 
   /** The chunk file names in the order the server received them. */
@@ -129,7 +129,10 @@ class TranscriptionAssembledTest {
             .whenScenarioStateIs("retry")
             .withRequestBody(containing("filename=\"chunk-000.wav\""))
             .willReturn(
-                aResponse().withStatus(200).withBody("{\"text\":\"First\"}").withFixedDelay(700)));
+                aResponse()
+                    .withStatus(200)
+                    .withBody("{\"text\":\"First\",\"language\":\"english\"}")
+                    .withFixedDelay(700)));
     answer("chunk-001.wav", "Last", 700);
     Duration timeout = Duration.ofSeconds(1);
 

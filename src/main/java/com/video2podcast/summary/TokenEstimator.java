@@ -1,19 +1,29 @@
 package com.video2podcast.summary;
 
+import com.video2podcast.job.Language;
+
 /** The one size formula, used for the budget and for the truncation check. */
 final class TokenEstimator {
 
-  static final int CHARS_PER_TOKEN = 3;
   static final int TEMPLATE_OVERHEAD = 32;
 
   private TokenEstimator() {}
 
-  /** Deliberately high for English: UTF-16 units divided by three, rounded up. */
-  static int estimate(String text) {
-    return (text.length() + CHARS_PER_TOKEN - 1) / CHARS_PER_TOKEN;
+  /** Deliberately low, so that the estimate is high: Cyrillic needs more tokens per character. */
+  static int charsPerToken(Language language) {
+    return switch (language) {
+      case EN -> 3;
+      case RU -> 2;
+    };
   }
 
-  static long requestEstimate(String system, String user) {
-    return (long) estimate(system) + estimate(user) + TEMPLATE_OVERHEAD;
+  /** UTF-16 units divided by {@link #charsPerToken}, rounded up. */
+  static int estimate(String text, Language language) {
+    int perToken = charsPerToken(language);
+    return (text.length() + perToken - 1) / perToken;
+  }
+
+  static long requestEstimate(String system, String user, Language language) {
+    return (long) estimate(system, language) + estimate(user, language) + TEMPLATE_OVERHEAD;
   }
 }

@@ -1,10 +1,13 @@
 package com.video2podcast.summary;
 
+import static com.video2podcast.job.Language.EN;
+import static com.video2podcast.job.Language.RU;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.video2podcast.config.AppProperties;
 import com.video2podcast.job.JobFailure;
+import com.video2podcast.job.Language;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -42,7 +45,11 @@ class SummaryServiceTest {
   }
 
   private static LlmReply valid(String content, String system, String user) {
-    return new LlmReply(content, TokenEstimator.requestEstimate(system, user) * 4 / 5);
+    return valid(content, system, user, EN);
+  }
+
+  private static LlmReply valid(String content, String system, String user, Language language) {
+    return new LlmReply(content, TokenEstimator.requestEstimate(system, user, language) * 4 / 5);
   }
 
   private static ScriptedLlm always(String content) {
@@ -57,12 +64,14 @@ class SummaryServiceTest {
     return new SummaryService(llm, config(NUM_CTX));
   }
 
-  private static int promptTokens() {
+  private static int promptTokens(Language language) {
     return Math.max(
-        Math.max(TokenEstimator.estimate(Prompts.SHORT), TokenEstimator.estimate(Prompts.MAP)),
         Math.max(
-            TokenEstimator.estimate(Prompts.REDUCE_FINAL),
-            TokenEstimator.estimate(Prompts.REDUCE_ROUND)));
+            TokenEstimator.estimate(Prompts.shortPrompt(language), language),
+            TokenEstimator.estimate(Prompts.mapPrompt(language), language)),
+        Math.max(
+            TokenEstimator.estimate(Prompts.reduceFinalPrompt(language), language),
+            TokenEstimator.estimate(Prompts.reduceRoundPrompt(language), language)));
   }
 
   private static String words(int chars) {
@@ -71,7 +80,7 @@ class SummaryServiceTest {
 
   private static JobFailure failureOf(SummaryService service, String transcript) {
     try {
-      service.summarize(transcript);
+      service.summarize(transcript, EN);
     } catch (JobFailure e) {
       return e;
     }
@@ -79,7 +88,13 @@ class SummaryServiceTest {
   }
 
   private static void assertFits(Call call, int numCtx) {
-    assertThat(TokenEstimator.requestEstimate(call.system(), call.user()) + call.maxOutputTokens())
+    assertFits(call, numCtx, EN);
+  }
+
+  private static void assertFits(Call call, int numCtx, Language language) {
+    assertThat(
+            TokenEstimator.requestEstimate(call.system(), call.user(), language)
+                + call.maxOutputTokens())
         .isLessThanOrEqualTo(numCtx);
   }
 
@@ -89,24 +104,99 @@ class SummaryServiceTest {
   void budgetFollowsTheFormula() {
     SummaryService service = service(always("- a"));
 
-    int budget = NUM_CTX - 1024 - promptTokens() - 32;
-    assertThat(service.maxChunkChars()).isEqualTo(budget * 3);
-    assertThat(service.partialMaxChars()).isEqualTo((budget * 3 - 6) / 4);
+    int budget = NUM_CTX - 1024 - promptTokens(EN) - 32;
+    assertThat(service.maxChunkChars(EN)).isEqualTo(budget * 3);
+    assertThat(service.partialMaxChars(EN)).isEqualTo((budget * 3 - 6) / 4);
+  }
+
+  @Test
+  void theRussianBudgetUsesTwoCharactersPerToken() {
+    SummaryService service = service(always("- a"));
+
+    int budget = NUM_CTX - 1024 - promptTokens(RU) - 32;
+    assertThat(service.maxChunkChars(RU)).isEqualTo(budget * 2);
+    assertThat(service.partialMaxChars(RU)).isEqualTo((budget * 2 - 6) / 4);
+    assertThat(service.maxChunkChars(RU)).isLessThan(service.maxChunkChars(EN));
+  }
+
+  @Test
+  void everyPromptNamesTheLanguageAndKeepsTheBulletRules() {
+    for (Language language : Language.values()) {
+      for (String prompt :
+          List.of(
+              Prompts.shortPrompt(language),
+              Prompts.mapPrompt(language),
+              Prompts.reduceFinalPrompt(language),
+              Prompts.reduceRoundPrompt(language))) {
+        assertThat(prompt)
+            .contains(language.displayName() + " bullet")
+            .contains("\"- \"")
+            .contains("bullet points only")
+            .doesNotContain("even if");
+      }
+    }
+    assertThat(Prompts.shortPrompt(RU)).doesNotContain("English");
+    assertThat(Prompts.mapPrompt(RU)).doesNotContain("English");
+    assertThat(Prompts.reduceFinalPrompt(RU)).doesNotContain("English");
+    assertThat(Prompts.reduceRoundPrompt(RU)).doesNotContain("English");
+    assertThat(Prompts.shortPrompt(EN)).doesNotContain("Russian");
+  }
+
+  @Test
+  void aShortRussianTranscriptIsSentOnceWithTheRussianPrompt() {
+    ScriptedLlm llm = new ScriptedLlm((i, s, u) -> valid("- Встреча во вторник.", s, u, RU));
+
+    String summary = service(llm).summarize("Встреча состоится во вторник.", RU);
+
+    assertThat(llm.calls).hasSize(1);
+    assertThat(llm.calls.get(0).system()).isEqualTo(Prompts.shortPrompt(RU));
+    assertThat(llm.calls.get(0).user()).isEqualTo("Встреча состоится во вторник.");
+    assertThat(summary).isEqualTo("• Встреча во вторник.");
+  }
+
+  @Test
+  void aLongRussianTranscriptUsesRussianPromptsAtEveryStage() {
+    SummaryService probe = service(always("- a"));
+    ScriptedLlm llm = bigAnswers(probe, RU);
+
+    service(llm).summarize("я".repeat(probe.maxChunkChars(RU) * 16 + 1), RU);
+
+    assertThat(llm.calls).isNotEmpty();
+    assertThat(llm.calls)
+        .extracting(Call::system)
+        .allMatch(system ->
+            system.equals(Prompts.mapPrompt(RU))
+                || system.equals(Prompts.reduceRoundPrompt(RU))
+                || system.equals(Prompts.reduceFinalPrompt(RU)));
+    assertThat(llm.calls.get(llm.calls.size() - 1).system())
+        .isEqualTo(Prompts.reduceFinalPrompt(RU));
+    assertThat(llm.calls).anyMatch(c -> c.system().equals(Prompts.reduceRoundPrompt(RU)));
+    for (Call call : llm.calls) {
+      assertFits(call, NUM_CTX, RU);
+    }
+  }
+
+  @Test
+  void aNullLanguageIsRejected() {
+    assertThatThrownBy(() -> service(always("- a")).summarize("text", null))
+        .isInstanceOf(NullPointerException.class);
   }
 
   @Test
   void theLongestOfTheFourPromptsDefinesTheBudget() {
-    assertThat(promptTokens())
+    assertThat(promptTokens(EN))
         .isEqualTo(
             Math.max(
-                TokenEstimator.estimate(Prompts.SHORT),
+                TokenEstimator.estimate(Prompts.shortPrompt(EN), EN),
                 Math.max(
-                    TokenEstimator.estimate(Prompts.MAP),
+                    TokenEstimator.estimate(Prompts.mapPrompt(EN), EN),
                     Math.max(
-                        TokenEstimator.estimate(Prompts.REDUCE_FINAL),
-                        TokenEstimator.estimate(Prompts.REDUCE_ROUND)))));
-    assertThat(Prompts.REDUCE_FINAL.length()).isGreaterThan(Prompts.REDUCE_ROUND.length());
-    assertThat(Prompts.REDUCE_FINAL.length()).isGreaterThan(Prompts.MAP.length());
+                        TokenEstimator.estimate(Prompts.reduceFinalPrompt(EN), EN),
+                        TokenEstimator.estimate(Prompts.reduceRoundPrompt(EN), EN)))));
+    assertThat(Prompts.reduceFinalPrompt(EN).length())
+        .isGreaterThan(Prompts.reduceRoundPrompt(EN).length());
+    assertThat(Prompts.reduceFinalPrompt(EN).length())
+        .isGreaterThan(Prompts.mapPrompt(EN).length());
   }
 
   @Test
@@ -114,14 +204,14 @@ class SummaryServiceTest {
     SummaryService base = new SummaryService(always("- a"), config(8192));
     SummaryService larger = new SummaryService(always("- a"), config(8192 + 100));
 
-    assertThat(larger.maxChunkChars() - base.maxChunkChars()).isEqualTo(300);
+    assertThat(larger.maxChunkChars(EN) - base.maxChunkChars(EN)).isEqualTo(300);
   }
 
   @Test
   void aContextBelowTheMinimumBudgetIsRejected() {
-    int minimum = 2 * 1024 + 1024 + promptTokens() + 32;
+    int minimum = 2 * 1024 + 1024 + Math.max(promptTokens(EN), promptTokens(RU)) + 32;
 
-    assertThat(new SummaryService(always("- a"), config(minimum)).partialMaxChars())
+    assertThat(new SummaryService(always("- a"), config(minimum)).partialMaxChars(EN))
         .isGreaterThanOrEqualTo(1500);
     assertThatThrownBy(() -> new SummaryService(always("- a"), config(minimum - 1)))
         .isInstanceOf(IllegalArgumentException.class);
@@ -139,14 +229,14 @@ class SummaryServiceTest {
   void aHugeContextDoesNotOverflow() {
     SummaryService huge = new SummaryService(always("- a"), config(Integer.MAX_VALUE / 4));
 
-    assertThat(huge.maxChunkChars()).isPositive();
+    assertThat(huge.maxChunkChars(EN)).isPositive();
   }
 
   @Test
   void aContextWhoseCharacterBudgetOverflowsAnIntIsRejected() {
-    int largest = Integer.MAX_VALUE / 3 + 1024 + promptTokens() + 32;
+    int largest = Integer.MAX_VALUE / 3 + 1024 + promptTokens(EN) + 32;
 
-    assertThat(new SummaryService(always("- a"), config(largest)).maxChunkChars()).isPositive();
+    assertThat(new SummaryService(always("- a"), config(largest)).maxChunkChars(EN)).isPositive();
     assertThatThrownBy(() -> new SummaryService(always("- a"), config(largest + 1)))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("too large");
@@ -160,11 +250,11 @@ class SummaryServiceTest {
   void aShortTranscriptIsOneRequest() {
     ScriptedLlm llm = always("- Tuesday meeting\n- Budget");
 
-    String summary = service(llm).summarize("  The budget meeting is on Tuesday.  \n");
+    String summary = service(llm).summarize("  The budget meeting is on Tuesday.  \n", EN);
 
     assertThat(llm.calls).hasSize(1);
     Call call = llm.calls.get(0);
-    assertThat(call.system()).isEqualTo(Prompts.SHORT);
+    assertThat(call.system()).isEqualTo(Prompts.shortPrompt(EN));
     assertThat(call.user()).isEqualTo("The budget meeting is on Tuesday.");
     assertThat(call.maxOutputTokens()).isEqualTo(1024);
     assertThat(summary).isEqualTo("• Tuesday meeting\n• Budget");
@@ -174,9 +264,9 @@ class SummaryServiceTest {
   void aTranscriptOfExactlyTheBudgetIsStillOneRequest() {
     ScriptedLlm llm = always("- a");
     SummaryService service = service(llm);
-    String text = "a".repeat(service.maxChunkChars());
+    String text = "a".repeat(service.maxChunkChars(EN));
 
-    service.summarize(text);
+    service.summarize(text, EN);
 
     assertThat(llm.calls).hasSize(1);
     assertThat(llm.calls.get(0).user()).isEqualTo(text);
@@ -188,7 +278,7 @@ class SummaryServiceTest {
     ScriptedLlm llm = always("- a");
     SummaryService service = service(llm);
 
-    service.summarize("a".repeat(service.maxChunkChars() - 1));
+    service.summarize("a".repeat(service.maxChunkChars(EN) - 1), EN);
 
     assertThat(llm.calls).hasSize(1);
   }
@@ -197,15 +287,15 @@ class SummaryServiceTest {
   void aTranscriptOneOverTheBudgetIsSplitAndReduced() {
     ScriptedLlm llm = always("- a");
     SummaryService service = service(llm);
-    int max = service.maxChunkChars();
+    int max = service.maxChunkChars(EN);
 
-    service.summarize("a".repeat(max + 1));
+    service.summarize("a".repeat(max + 1), EN);
 
     assertThat(llm.calls).hasSize(3);
-    assertThat(llm.calls.get(0).system()).isEqualTo(Prompts.MAP);
+    assertThat(llm.calls.get(0).system()).isEqualTo(Prompts.mapPrompt(EN));
     assertThat(llm.calls.get(0).user()).isEqualTo("a".repeat(max));
     assertThat(llm.calls.get(1).user()).isEqualTo("a");
-    assertThat(llm.calls.get(2).system()).isEqualTo(Prompts.REDUCE_FINAL);
+    assertThat(llm.calls.get(2).system()).isEqualTo(Prompts.reduceFinalPrompt(EN));
   }
 
   @Test
@@ -213,7 +303,7 @@ class SummaryServiceTest {
     ScriptedLlm llm = always("- a");
     SummaryService service = service(llm);
 
-    service.summarize("  " + "a".repeat(service.maxChunkChars()) + "\n\n");
+    service.summarize("  " + "a".repeat(service.maxChunkChars(EN)) + "\n\n", EN);
 
     assertThat(llm.calls).hasSize(1);
   }
@@ -225,18 +315,18 @@ class SummaryServiceTest {
     ScriptedLlm llm =
         new ScriptedLlm((i, s, u) -> valid(i < 3 ? "- part " + (i + 1) : "- final", s, u));
     SummaryService service = service(llm);
-    String text = words(service.maxChunkChars() * 5 / 2);
-    List<String> chunks = TextChunker.split(text, service.maxChunkChars());
+    String text = words(service.maxChunkChars(EN) * 5 / 2);
+    List<String> chunks = TextChunker.split(text, service.maxChunkChars(EN));
     assertThat(chunks).hasSize(3);
 
-    String summary = service.summarize(text);
+    String summary = service.summarize(text, EN);
 
     assertThat(llm.calls).hasSize(4);
     for (int i = 0; i < 3; i++) {
-      assertThat(llm.calls.get(i).system()).isEqualTo(Prompts.MAP);
+      assertThat(llm.calls.get(i).system()).isEqualTo(Prompts.mapPrompt(EN));
       assertThat(llm.calls.get(i).user()).isEqualTo(chunks.get(i));
     }
-    assertThat(llm.calls.get(3).system()).isEqualTo(Prompts.REDUCE_FINAL);
+    assertThat(llm.calls.get(3).system()).isEqualTo(Prompts.reduceFinalPrompt(EN));
     assertThat(llm.calls.get(3).user()).isEqualTo("- part 1\n\n- part 2\n\n- part 3");
     assertThat(summary).isEqualTo("• final");
     assertThat(llm.calls).allSatisfy(call -> assertThat(call.maxOutputTokens()).isEqualTo(1024));
@@ -248,7 +338,7 @@ class SummaryServiceTest {
     ScriptedLlm llm = new ScriptedLlm((i, s, u) -> valid(i < 2 ? "* mapped" : "* final", s, u));
     SummaryService service = service(llm);
 
-    String summary = service.summarize("a".repeat(service.maxChunkChars() + 1));
+    String summary = service.summarize("a".repeat(service.maxChunkChars(EN) + 1), EN);
 
     assertThat(llm.calls.get(2).user()).isEqualTo("* mapped\n\n* mapped");
     assertThat(summary).isEqualTo("• final");
@@ -257,32 +347,33 @@ class SummaryServiceTest {
   @Test
   void partialsThatDoNotFitAreReducedInRoundsInOrder() {
     SummaryService probe = service(always("- a"));
-    int max = probe.maxChunkChars();
-    int partialMax = probe.partialMaxChars();
+    int max = probe.maxChunkChars(EN);
+    int partialMax = probe.partialMaxChars(EN);
     int chunks = 9;
     String text = "a".repeat(max * (chunks - 1) + 1);
     ScriptedLlm llm =
         new ScriptedLlm((i, s, u) -> {
-          if (s.equals(Prompts.MAP)) {
+          if (s.equals(Prompts.mapPrompt(EN))) {
             return valid(i + "-" + "x".repeat(partialMax * 3), s, u);
           }
-          return valid(s.equals(Prompts.REDUCE_FINAL) ? "- final" : "- group " + i, s, u);
+          return valid(s.equals(Prompts.reduceFinalPrompt(EN)) ? "- final" : "- group " + i, s, u);
         });
 
-    String summary = service(llm).summarize(text);
+    String summary = service(llm).summarize(text, EN);
 
     // 9 maps, groups of 4, 4 and 1, then one final reduction of the 3 group answers
     assertThat(llm.calls).hasSize(9 + 3 + 1);
     assertThat(llm.calls.subList(0, 9))
-        .allSatisfy(c -> assertThat(c.system()).isEqualTo(Prompts.MAP));
+        .allSatisfy(c -> assertThat(c.system()).isEqualTo(Prompts.mapPrompt(EN)));
     List<Call> round = llm.calls.subList(9, 12);
-    assertThat(round).allSatisfy(c -> assertThat(c.system()).isEqualTo(Prompts.REDUCE_ROUND));
+    assertThat(round)
+        .allSatisfy(c -> assertThat(c.system()).isEqualTo(Prompts.reduceRoundPrompt(EN)));
     assertThat(round.get(0).user()).startsWith("0-x").contains("\n\n1-x", "\n\n2-x", "\n\n3-x");
     assertThat(round.get(1).user()).startsWith("4-x").contains("\n\n5-x", "\n\n6-x", "\n\n7-x");
     assertThat(round.get(2).user()).startsWith("8-x").doesNotContain("\n\n");
     assertThat(round.get(0).user().length()).isLessThanOrEqualTo(max);
     assertThat(round.get(0).user().length()).isEqualTo(4 * partialMax + 6);
-    assertThat(llm.calls.get(12).system()).isEqualTo(Prompts.REDUCE_FINAL);
+    assertThat(llm.calls.get(12).system()).isEqualTo(Prompts.reduceFinalPrompt(EN));
     assertThat(llm.calls.get(12).user()).isEqualTo("- group 9\n\n- group 10\n\n- group 11");
     assertThat(summary).isEqualTo("• final");
     assertThat(llm.calls)
@@ -293,22 +384,22 @@ class SummaryServiceTest {
   @Test
   void aGroupStartsANewOneWhenTheNextPartialWouldNotFit() {
     SummaryService probe = service(always("- a"));
-    int max = probe.maxChunkChars();
-    int partialMax = probe.partialMaxChars();
+    int max = probe.maxChunkChars(EN);
+    int partialMax = probe.partialMaxChars(EN);
     // partials of partialMax + 1 chars cannot be clipped, but 4 of them plus separators exceed max
     String text = "a".repeat(max * 4 + 1);
     ScriptedLlm llm =
         new ScriptedLlm((i, s, u) -> {
-          if (s.equals(Prompts.MAP)) {
+          if (s.equals(Prompts.mapPrompt(EN))) {
             return valid("y".repeat(partialMax), s, u);
           }
           return valid("- ok", s, u);
         });
 
-    service(llm).summarize(text);
+    service(llm).summarize(text, EN);
 
     List<Call> round =
-        llm.calls.stream().filter(c -> c.system().equals(Prompts.REDUCE_ROUND)).toList();
+        llm.calls.stream().filter(c -> c.system().equals(Prompts.reduceRoundPrompt(EN))).toList();
     assertThat(round).hasSize(2);
     assertThat(round.get(0).user()).hasSize(4 * partialMax + 6);
     assertThat(round.get(1).user()).hasSize(partialMax);
@@ -317,13 +408,16 @@ class SummaryServiceTest {
   @Test
   void anOverlongAnswerIsClippedToTheBoundBeforeItIsUsed() {
     SummaryService probe = service(always("- a"));
-    int partialMax = probe.partialMaxChars();
+    int partialMax = probe.partialMaxChars(EN);
     String line = "z".repeat(partialMax * 2 / 5);
     ScriptedLlm llm =
         new ScriptedLlm((i, s, u) ->
-            valid(s.equals(Prompts.MAP) ? line + "\n" + line + "\n" + line : "- done", s, u));
+            valid(
+                s.equals(Prompts.mapPrompt(EN)) ? line + "\n" + line + "\n" + line : "- done",
+                s,
+                u));
 
-    service(llm).summarize("a".repeat(probe.maxChunkChars() + 1));
+    service(llm).summarize("a".repeat(probe.maxChunkChars(EN) + 1), EN);
 
     // three lines of two fifths of the bound: the third is dropped
     assertThat(llm.calls.get(2).user()).isEqualTo(line + "\n" + line + "\n\n" + line + "\n" + line);
@@ -331,9 +425,13 @@ class SummaryServiceTest {
 
   /** Every map and round answer is as long as an intermediate answer may be. */
   private static ScriptedLlm bigAnswers(SummaryService probe) {
-    String big = "y".repeat(probe.partialMaxChars());
-    return new ScriptedLlm(
-        (i, s, u) -> valid(s.equals(Prompts.REDUCE_FINAL) ? "- final" : big, s, u));
+    return bigAnswers(probe, EN);
+  }
+
+  private static ScriptedLlm bigAnswers(SummaryService probe, Language language) {
+    String big = "y".repeat(probe.partialMaxChars(language));
+    return new ScriptedLlm((i, s, u) ->
+        valid(s.equals(Prompts.reduceFinalPrompt(language)) ? "- final" : big, s, u, language));
   }
 
   @Test
@@ -341,11 +439,12 @@ class SummaryServiceTest {
     SummaryService probe = service(always("- a"));
     ScriptedLlm llm = bigAnswers(probe);
 
-    String summary = service(llm).summarize("a".repeat(probe.maxChunkChars() * 16 + 1));
+    String summary = service(llm).summarize("a".repeat(probe.maxChunkChars(EN) * 16 + 1), EN);
 
     // 17 maps, round one: 5 groups, round two: 2 groups, then the final reduction
     assertThat(llm.calls).hasSize(17 + 5 + 2 + 1);
-    assertThat(llm.calls.get(llm.calls.size() - 1).system()).isEqualTo(Prompts.REDUCE_FINAL);
+    assertThat(llm.calls.get(llm.calls.size() - 1).system())
+        .isEqualTo(Prompts.reduceFinalPrompt(EN));
     assertThat(summary).isEqualTo("• final");
     assertThat(llm.calls).allSatisfy(c -> assertFits(c, NUM_CTX));
   }
@@ -358,7 +457,7 @@ class SummaryServiceTest {
     JobFailure failure =
         failureOf(
             new SummaryService(llm, config(NUM_CTX), 1),
-            "a".repeat(probe.maxChunkChars() * 16 + 1));
+            "a".repeat(probe.maxChunkChars(EN) * 16 + 1));
 
     assertThat(failure.kind()).isEqualTo(JobFailure.Kind.FAILED);
     assertThat(failure.getMessage()).isEqualTo(FAILED_MESSAGE);
@@ -374,7 +473,7 @@ class SummaryServiceTest {
 
     String summary =
         new SummaryService(llm, config(NUM_CTX), 1)
-            .summarize("a".repeat(probe.maxChunkChars() * 4 + 1));
+            .summarize("a".repeat(probe.maxChunkChars(EN) * 4 + 1), EN);
 
     // 5 maps, one round of 2 groups, then the final reduction
     assertThat(llm.calls).hasSize(5 + 2 + 1);
@@ -387,7 +486,8 @@ class SummaryServiceTest {
   void aNullTranscriptIsAProgrammingError() {
     ScriptedLlm llm = always("- a");
 
-    assertThatThrownBy(() -> service(llm).summarize(null)).isInstanceOf(NullPointerException.class);
+    assertThatThrownBy(() -> service(llm).summarize(null, EN))
+        .isInstanceOf(NullPointerException.class);
     assertThat(llm.calls).isEmpty();
   }
 
@@ -415,7 +515,7 @@ class SummaryServiceTest {
   }
 
   private static String threeChunks() {
-    return "a".repeat(service(always("- a")).maxChunkChars() * 2 + 1);
+    return "a".repeat(service(always("- a")).maxChunkChars(EN) * 2 + 1);
   }
 
   @ParameterizedTest
@@ -469,14 +569,14 @@ class SummaryServiceTest {
   // ---- truncation check ----
 
   private static long threshold(String system, String user) {
-    long expected = TokenEstimator.requestEstimate(system, user);
+    long expected = TokenEstimator.requestEstimate(system, user, EN);
     return (expected + 1) / 2;
   }
 
   @Test
   void theShortPathRejectsOneBelowTheThresholdAndAcceptsTheThreshold() {
     String text = "x".repeat(100);
-    long threshold = threshold(Prompts.SHORT, text);
+    long threshold = threshold(Prompts.shortPrompt(EN), text);
 
     ScriptedLlm below = new ScriptedLlm((i, s, u) -> new LlmReply("- a", threshold - 1));
     JobFailure failure = failureOf(service(below), text);
@@ -485,23 +585,23 @@ class SummaryServiceTest {
     assertThat(failure.getCause()).isNull();
 
     ScriptedLlm at = new ScriptedLlm((i, s, u) -> new LlmReply("- a", threshold));
-    assertThat(service(at).summarize(text)).isEqualTo("• a");
+    assertThat(service(at).summarize(text, EN)).isEqualTo("• a");
   }
 
   @Test
   void theThresholdRoundsUpForAnOddEstimate() {
     // estimate(system) + estimate(user) + 32 is odd for this text, so ceil(expected / 2) matters
     String text = "x".repeat(100);
-    long expected = TokenEstimator.requestEstimate(Prompts.SHORT, text);
+    long expected = TokenEstimator.requestEstimate(Prompts.shortPrompt(EN), text, EN);
     String odd = expected % 2 == 1 ? text : "x".repeat(103);
-    long oddExpected = TokenEstimator.requestEstimate(Prompts.SHORT, odd);
+    long oddExpected = TokenEstimator.requestEstimate(Prompts.shortPrompt(EN), odd, EN);
     assertThat(oddExpected % 2).isEqualTo(1);
     long threshold = (oddExpected + 1) / 2;
 
     ScriptedLlm at = new ScriptedLlm((i, s, u) -> new LlmReply("- a", threshold));
     ScriptedLlm below = new ScriptedLlm((i, s, u) -> new LlmReply("- a", threshold - 1));
 
-    assertThat(service(at).summarize(odd)).isEqualTo("• a");
+    assertThat(service(at).summarize(odd, EN)).isEqualTo("• a");
     assertThat(failureOf(service(below), odd).kind()).isEqualTo(JobFailure.Kind.FAILED);
   }
 
@@ -519,7 +619,7 @@ class SummaryServiceTest {
     String text = "word ".repeat(5400).strip();
     ScriptedLlm llm = new ScriptedLlm((i, s, u) -> new LlmReply("- a", 4831));
 
-    assertThat(service(llm).summarize(text)).isEqualTo("• a");
+    assertThat(service(llm).summarize(text, EN)).isEqualTo("• a");
   }
 
   @ParameterizedTest
@@ -537,8 +637,8 @@ class SummaryServiceTest {
   @Test
   void aMapStageAcceptsItsThresholdAndRejectsOneBelow() {
     String text = threeChunks();
-    List<String> chunks = TextChunker.split(text, service(always("- a")).maxChunkChars());
-    long threshold = threshold(Prompts.MAP, chunks.get(1));
+    List<String> chunks = TextChunker.split(text, service(always("- a")).maxChunkChars(EN));
+    long threshold = threshold(Prompts.mapPrompt(EN), chunks.get(1));
 
     ScriptedLlm below =
         new ScriptedLlm(
@@ -547,13 +647,13 @@ class SummaryServiceTest {
         new ScriptedLlm((i, s, u) -> i == 1 ? new LlmReply("- a", threshold) : valid("- a", s, u));
 
     assertThat(failureOf(service(below), text).kind()).isEqualTo(JobFailure.Kind.FAILED);
-    assertThat(service(at).summarize(text)).isEqualTo("• a");
+    assertThat(service(at).summarize(text, EN)).isEqualTo("• a");
   }
 
   @Test
   void aReductionStageAcceptsItsThresholdAndRejectsOneBelow() {
     String joined = "- a\n\n- a\n\n- a";
-    long threshold = threshold(Prompts.REDUCE_FINAL, joined);
+    long threshold = threshold(Prompts.reduceFinalPrompt(EN), joined);
     String text = threeChunks();
 
     ScriptedLlm below =
@@ -563,7 +663,7 @@ class SummaryServiceTest {
         new ScriptedLlm((i, s, u) -> i == 3 ? new LlmReply("- a", threshold) : valid("- a", s, u));
 
     assertThat(failureOf(service(below), text).kind()).isEqualTo(JobFailure.Kind.FAILED);
-    assertThat(service(at).summarize(text)).isEqualTo("• a");
+    assertThat(service(at).summarize(text, EN)).isEqualTo("• a");
   }
 
   // ---- output ----
@@ -579,6 +679,6 @@ class SummaryServiceTest {
   void theFinalAnswerIsCappedAt1500() {
     ScriptedLlm llm = always("x".repeat(1800));
 
-    assertThat(service(llm).summarize("hello")).hasSize(1500).endsWith("…");
+    assertThat(service(llm).summarize("hello", EN)).hasSize(1500).endsWith("…");
   }
 }

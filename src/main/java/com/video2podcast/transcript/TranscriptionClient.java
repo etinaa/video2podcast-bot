@@ -1,6 +1,7 @@
 package com.video2podcast.transcript;
 
 import com.video2podcast.job.JobFailure;
+import com.video2podcast.job.Language;
 import com.video2podcast.storage.AtomicFiles;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -30,11 +31,13 @@ public class TranscriptionClient {
    *
    * @param progress called as accept(n, total) before chunk n is first sent (n from 1), once per
    *     chunk, not again on the retry
-   * @return the path of transcript.txt
+   *     <p>Chunks are sent in detect mode until one has text; its language decides: en and ru are
+   *     selected and every later chunk is pinned to it, anything else is refused at once.
+   * @return the path of transcript.txt and the selected language
    * @throws NullPointerException if an argument is null
-   * @throws JobFailure NO_SPEECH, SERVICE_UNREACHABLE or FAILED
+   * @throws JobFailure NO_SPEECH, UNSUPPORTED_LANGUAGE, SERVICE_UNREACHABLE or FAILED
    */
-  public Path transcribe(Path jobDir, List<Path> chunks, ProgressListener progress) {
+  public Transcription transcribe(Path jobDir, List<Path> chunks, ProgressListener progress) {
     Objects.requireNonNull(jobDir, "jobDir");
     Objects.requireNonNull(chunks, "chunks");
     Objects.requireNonNull(progress, "progress");
@@ -43,9 +46,17 @@ public class TranscriptionClient {
     }
     List<String> texts = new ArrayList<>(chunks.size());
     int total = chunks.size();
+    Language language = null;
     for (int i = 0; i < total; i++) {
       progress.accept(i + 1, total);
-      texts.add(transcribeWithRetry(chunks.get(i)));
+      String mode = language == null ? WhisperClient.AUTO : language.code();
+      WhisperResult result = transcribeWithRetry(chunks.get(i), mode);
+      texts.add(result.text());
+      if (language == null && result.language() != null) {
+        language =
+            Language.fromCode(result.language())
+                .orElseThrow(() -> JobFailure.unsupportedLanguage(result.language()));
+      }
     }
     String merged = TranscriptMerger.merge(texts);
     if (merged.isEmpty()) {
@@ -58,19 +69,19 @@ public class TranscriptionClient {
       throw JobFailure.transcriptionFailed(e);
     }
     deleteTemporaryAudio(jobDir);
-    return transcript;
+    return new Transcription(transcript, language);
   }
 
-  private String transcribeWithRetry(Path chunk) {
+  private WhisperResult transcribeWithRetry(Path chunk, String language) {
     try {
-      return whisper.transcribe(chunk);
+      return whisper.transcribe(chunk, language);
     } catch (WhisperException first) {
       if (LOG.isWarnEnabled()) {
         LOG.warn("Chunk {} failed, retrying: {}", chunk.getFileName(), first.getMessage());
       }
     }
     try {
-      return whisper.transcribe(chunk);
+      return whisper.transcribe(chunk, language);
     } catch (WhisperException second) {
       if (LOG.isWarnEnabled()) {
         LOG.warn("Chunk {} failed again: {}", chunk.getFileName(), second.getMessage());
@@ -104,6 +115,9 @@ public class TranscriptionClient {
       }
     }
   }
+
+  /** The transcript file and the language that decided its chunks. */
+  public record Transcription(Path transcript, Language language) {}
 
   @FunctionalInterface
   public interface ProgressListener {

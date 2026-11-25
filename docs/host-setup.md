@@ -22,8 +22,10 @@ curl -L --fail -o ~/models/whisper/ggml-large-v3-turbo.bin \
 
 ```bash
 # Ollama listens on 127.0.0.1:11434 by default (brew services start ollama, or open the app)
-whisper-server -m ~/models/whisper/ggml-large-v3-turbo.bin --host 127.0.0.1 --port 8081 -l en -t 8 -mc 0
+whisper-server -m ~/models/whisper/ggml-large-v3-turbo.bin --host 127.0.0.1 --port 8081 -l auto -t 8 -mc 0
 ```
+
+`-l auto` is required for Russian videos: whisper.cpp's own default is English even when `-l` is missing, so the flag has to say `auto` explicitly. The bot also sends `language` with every request (see the contract below), so the flag only matters for manual `curl` calls. The model stays the multilingual `large-v3-turbo`; the bot never asks for translation.
 
 `-mc 0` is required: it stops Whisper from feeding the previous text back in as context. Without it a 2 h 36 min test video got a repetition loop ("And I thought, maybe I could do something else", 14 to 20 times, about 18 seconds of real speech replaced). With `-mc 0` the same 10-minute chunk comes out without the loop and with the missing speech back, at the same speed. The bot sends `temperature=0.0` and no `temperature_inc`, so the temperature fallback does not help here (checked: no change).
 
@@ -61,7 +63,7 @@ Stages for the 2 h 36 min video (second run, with `-mc 0`):
 
 Stages for the 2 h 58 min 20 s video: download, WAV and split: not sampled separately (the first `ffmpeg` sample is at 13:29, the download is estimated at about 1 min from the 16 s of the 152 MB talk); transcribe 18 chunks about 6 min (13:29:38 to 13:35:47, slower than the English talk, the audio was Russian); summary about 9 min (to about 13:44:47); compression about 3 min (two `ffmpeg` attempts, 13:44:47 to 13:47:34, 37 then 29 kbps); upload about 1 min (to the Telegram message time, 13:49). Stages come from the 5-second process samples, except the download estimate and the upload, which come from the Telegram message time. Peak RSS in this run: Java bot 673 MiB (186 MiB in the 2 h 36 min run), `ffmpeg` 68 MiB, `whisper-server` 325 MiB.
 
-Language: Whisper is forced to English (SPEC: other languages are out of scope). On the Russian audiobook the text came out as a garbled English translation with several repetition loops (for example the sentence "I thought it was going to be a new house" seven times in a row, and its phrase more often), even with `-mc 0`. The bot did what it should: the transcript has 30 855 words for 10 700 s, but with looped or mistranslated text a word count cannot show that the transcript is complete. Use English videos for checks of the transcript.
+Language (historical, T17, before T19): Whisper was forced to English with `-l en`. On the Russian audiobook the text came out as a garbled English translation with several repetition loops (for example the sentence "I thought it was going to be a new house" seven times in a row, and its phrase more often), even with `-mc 0`. The bot did what it should: the transcript has 30 855 words for 10 700 s, but with looped or mistranslated text a word count cannot show that the transcript is complete. This is the failure that T19 fixes: the bot now detects the language and uses it (see "Languages" below). Use English videos for checks of the transcript from before T19.
 
 Peak memory (RSS) in the 2 h 36 min run: `whisper-server` up to 2.1 GB (the model sits in GPU memory, not counted), Java bot 186 MiB, `ffmpeg` 62 MB, Ollama about 22 GB for the model (`ollama ps`). Nothing needed tuning: chunk size, `num_ctx` 8192 and `keep_alive` stay as they are, and `qwen3:32b` is fast enough that no fall back to `qwen3:14b` is needed.
 
@@ -134,6 +136,21 @@ When Whisper or Ollama is down, the bot keeps the link instead of failing it. Th
 
 The queue is the file `deferred-jobs.json` in the directory of `ACCESS_FILE` (the `data` volume). It survives `podman compose down` and is lost if the volume is removed. It contains user links, so do not share it.
 
+## Languages (T19)
+
+- **Supported:** English and Russian, detected from the audio by Whisper. The video title, the URL and the user's Telegram language play no part.
+- **Detection:** the first chunk of a job goes to Whisper with `language=auto` and `response_format=verbose_json`. The answer is both the transcript of that chunk and its language. If that chunk has no text (music, a silent intro), its language is ignored and the next chunk is sent with `auto` again; the first chunk with text decides. If no chunk has text: "No speech was found in this video."
+- **Locking:** after the decision every later chunk of the job is sent with `language=en` or `language=ru`, so one language is used for the whole video. The next job detects again; nothing is stored, and a job retried after an outage detects again too.
+- **Summary:** every Ollama request of the job (short, map, intermediate and final reduction) asks for bullet points in the same language. For Russian the budget uses 2 characters per token instead of 3, so with `OLLAMA_NUM_CTX=8192` a long Russian video needs more map steps than an English one of the same length.
+- **Other languages:** the job stops right after detection: no later chunk, no Ollama call, the working files are deleted and the user gets "Only English and Russian videos are supported. Detected language: <code>." It is not a service failure and is not parked for retry. An unrecognized value is shown as `unknown`.
+- **Unchanged:** the bot's own texts (buttons, statuses, errors, captions) stay in English. Title-derived file names keep Cyrillic letters (stem cut to 100 characters).
+
+### Manual check on a Russian video (T19)
+
+<!-- T19-MANUAL-CHECK-PLACEHOLDER: NOT DONE YET. The owner runs this check after the code is committed; replace this block with the result. -->
+
+**Status: not done yet.** To record here: video title and URL, date, `whisper-server` and Ollama versions and settings (`-l auto`, `OLLAMA_NUM_CTX`), the language code Whisper returned, an excerpt of the Russian transcript and of the Russian summary, the English bot texts seen, the two delivered file names (`.txt` and audio), the result, and a comparison of Ollama's `prompt_eval_count` with the bot's estimate (2 characters per token for Russian; lower the value if the real count is higher than the estimate).
+
 ## whisper-server contract
 
 Captured against the real server with a 7-second WAV (`say` + `ffmpeg -ar 16000 -ac 1 -c:a pcm_s16le`).
@@ -143,22 +160,37 @@ Captured against the real server with a 7-second WAV (`say` + `ffmpeg -ar 16000 
 | Field | Value | Notes |
 |---|---|---|
 | `file` | the WAV chunk | required, without it the server answers `400` |
-| `response_format` | `json` | also accepts `text`, `verbose_json`, `srt`, `vtt` |
-| `language` | `en` | the server-wide `-l en` is the default; sending it per request is explicit |
+| `response_format` | `verbose_json` (detect mode), `json` (pinned mode) | also accepts `text`, `srt`, `vtt` |
+| `language` | `auto` (detect mode), `en` or `ru` (pinned mode) | the server-wide `-l` is only the default for calls without this field; the bot always sends it |
+| `translate` | `false` | |
+| `detect_language` | `false` | never `true`: the server then stops after detection and returns no text |
 | `temperature` | `0.0` | optional |
+
+The bot sends the fields in this order: `file`, `response_format`, `language`, `translate`, `detect_language`, `temperature`.
+
+Detect mode (first chunk with text of a job; it both detects and transcribes):
 
 ```bash
 curl -s http://127.0.0.1:8081/inference \
-  -F file=@sample.wav -F response_format=json -F language=en -F temperature=0.0
+  -F file=@sample.wav -F response_format=verbose_json -F language=auto \
+  -F translate=false -F detect_language=false -F temperature=0.0
 ```
 
-**Response, 200:** `{"text":" Hello, this is ...\n o'clock, and we will ...\n"}` (fixture `whisper-inference-ok.json`).
+Pinned mode (every later chunk, with the language that detect mode selected):
+
+```bash
+curl -s http://127.0.0.1:8081/inference \
+  -F file=@sample.wav -F response_format=json -F language=ru \
+  -F translate=false -F detect_language=false -F temperature=0.0
+```
+
+**Response, 200 (pinned mode):** `{"text":" Hello, this is ...\n o'clock, and we will ...\n"}` (fixture `whisper-inference-ok.json`).
 
 **Things the client must handle:**
 - The text starts with a space and contains **newlines in the middle of sentences** (it is wrapped per segment). The merger must trim each chunk and collapse whitespace before joining chunks.
 - Errors are plain text, not JSON: `400` with the body `Invalid request` (fixture `whisper-inference-bad-request.txt`). A file that is not valid audio gives the same `400`.
 - Only WAV is sent, so `--convert` (server-side ffmpeg) is not needed.
-- `verbose_json` returns per-segment timestamps and, with words enabled, word probabilities (fixture `whisper-inference-verbose.json`, words stripped). V1 uses only `text`.
+- `verbose_json` returns per-segment timestamps and, with words enabled, word probabilities (fixture `whisper-inference-verbose.json`, words stripped). The bot reads only the top-level `text` and, in detect mode, the top-level `language`: a full lower-case name such as `russian` or `german` (not a code). Segments and probabilities are ignored.
 - Unreachable server means a connection error (nothing is listening on the port).
 
 ## Ollama contract
@@ -173,11 +205,13 @@ curl -s http://127.0.0.1:8081/inference \
   "keep_alive": "10m",
   "options": { "num_ctx": 8192, "temperature": 0.2 },
   "messages": [
-    { "role": "system", "content": "Summarize the transcript as 2-3 English bullet points starting with '- '." },
+    { "role": "system", "content": "Summarize the transcript as 2-3 Russian bullet points starting with '- '." },
     { "role": "user", "content": "<transcript chunk>" }
   ]
 }
 ```
+
+The system prompt names the language of the job (`English` or `Russian`, written in English): for example "... Write the final summary as Russian bullet points ...".
 
 **Response, 200:** `message.content` holds the text, plus `done`, `done_reason`, `prompt_eval_count`, `eval_count` and durations (fixture `ollama-chat-ok.json`).
 

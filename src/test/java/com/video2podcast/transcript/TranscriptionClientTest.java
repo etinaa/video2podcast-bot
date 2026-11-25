@@ -3,6 +3,8 @@ package com.video2podcast.transcript;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -10,6 +12,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.video2podcast.job.JobFailure;
+import com.video2podcast.job.Language;
+import com.video2podcast.transcript.TranscriptionClient.Transcription;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -44,7 +48,14 @@ class TranscriptionClientTest {
   }
 
   private Path run(Path... chunks) {
-    return client.transcribe(jobDir, List.of(chunks), (n, t) -> events.add(n + "/" + t));
+    return client
+        .transcribe(jobDir, List.of(chunks), (n, t) -> events.add(n + "/" + t))
+        .transcript();
+  }
+
+  /** An answer of Whisper as the client delivers it: detected English when there is text. */
+  private static WhisperResult r(String text) {
+    return new WhisperResult(text, TranscriptMerger.normalize(text).isEmpty() ? null : "en");
   }
 
   private static WhisperException connection() {
@@ -57,9 +68,9 @@ class TranscriptionClientTest {
 
   @Test
   void writesMergedTranscriptAndRemovesTemporaryAudio() throws Exception {
-    when(whisper.transcribe(c0)).thenReturn(" First\n");
-    when(whisper.transcribe(c1)).thenReturn("   ");
-    when(whisper.transcribe(c2)).thenReturn("Last ");
+    when(whisper.transcribe(eq(c0), anyString())).thenReturn(r(" First\n"));
+    when(whisper.transcribe(eq(c1), anyString())).thenReturn(r("   "));
+    when(whisper.transcribe(eq(c2), anyString())).thenReturn(r("Last "));
 
     Path transcript = run(c0, c1, c2);
 
@@ -69,45 +80,45 @@ class TranscriptionClientTest {
     assertThat(jobDir.resolve("audio.wav")).doesNotExist();
     assertThat(jobDir.resolve("chunks")).doesNotExist();
     assertThat(jobDir.resolve("source.m4a")).exists();
-    verify(whisper, times(1)).transcribe(c1);
+    verify(whisper, times(1)).transcribe(eq(c1), anyString());
   }
 
   @Test
   void retriesOnceAndKeepsGoing() throws Exception {
-    when(whisper.transcribe(c0)).thenThrow(other()).thenReturn("A");
-    when(whisper.transcribe(c1)).thenReturn("B");
+    when(whisper.transcribe(eq(c0), anyString())).thenThrow(other()).thenReturn(r("A"));
+    when(whisper.transcribe(eq(c1), anyString())).thenReturn(r("B"));
 
     run(c0, c1);
 
     assertThat(Files.readString(jobDir.resolve("transcript.txt"))).isEqualTo("A B\n");
     assertThat(events).containsExactly("1/2", "2/2");
     InOrder order = Mockito.inOrder(whisper);
-    order.verify(whisper, times(2)).transcribe(c0);
-    order.verify(whisper).transcribe(c1);
+    order.verify(whisper, times(2)).transcribe(eq(c0), anyString());
+    order.verify(whisper).transcribe(eq(c1), anyString());
   }
 
   @Test
   void aConnectionErrorThenSuccessKeepsEarlierChunksAndOrderWithOneProgressEventPerChunk()
       throws Exception {
-    when(whisper.transcribe(c0)).thenReturn("A");
-    when(whisper.transcribe(c1)).thenThrow(connection()).thenReturn("B");
-    when(whisper.transcribe(c2)).thenReturn("C");
+    when(whisper.transcribe(eq(c0), anyString())).thenReturn(r("A"));
+    when(whisper.transcribe(eq(c1), anyString())).thenThrow(connection()).thenReturn(r("B"));
+    when(whisper.transcribe(eq(c2), anyString())).thenReturn(r("C"));
 
     run(c0, c1, c2);
 
     assertThat(Files.readString(jobDir.resolve("transcript.txt"))).isEqualTo("A B C\n");
     assertThat(events).containsExactly("1/3", "2/3", "3/3");
     InOrder order = Mockito.inOrder(whisper);
-    order.verify(whisper).transcribe(c0);
-    order.verify(whisper, times(2)).transcribe(c1);
-    order.verify(whisper).transcribe(c2);
+    order.verify(whisper).transcribe(eq(c0), anyString());
+    order.verify(whisper, times(2)).transcribe(eq(c1), anyString());
+    order.verify(whisper).transcribe(eq(c2), anyString());
     Mockito.verifyNoMoreInteractions(whisper);
   }
 
   @Test
   void emptyAnswerOnRetryIsValid() throws Exception {
-    when(whisper.transcribe(c0)).thenThrow(other()).thenReturn(" ");
-    when(whisper.transcribe(c1)).thenReturn("Speech");
+    when(whisper.transcribe(eq(c0), anyString())).thenThrow(other()).thenReturn(r(" "));
+    when(whisper.transcribe(eq(c1), anyString())).thenReturn(r("Speech"));
 
     run(c0, c1);
 
@@ -116,8 +127,8 @@ class TranscriptionClientTest {
 
   @Test
   void secondFailureDecidesTheKind() throws Exception {
-    when(whisper.transcribe(c0)).thenReturn("ok");
-    when(whisper.transcribe(c1)).thenThrow(connection(), other());
+    when(whisper.transcribe(eq(c0), anyString())).thenReturn(r("ok"));
+    when(whisper.transcribe(eq(c1), anyString())).thenThrow(connection(), other());
 
     assertThatThrownBy(() -> run(c0, c1, c2))
         .isInstanceOfSatisfying(
@@ -126,14 +137,14 @@ class TranscriptionClientTest {
               assertThat(f.kind()).isEqualTo(JobFailure.Kind.FAILED);
               assertThat(f).hasMessage("Transcription failed. Please try again later.");
             });
-    verify(whisper, never()).transcribe(c2);
+    verify(whisper, never()).transcribe(eq(c2), anyString());
     assertThat(events).containsExactly("1/3", "2/3");
     assertNothingChanged();
   }
 
   @Test
   void connectionFailureOnRetryIsServiceUnreachable() throws Exception {
-    when(whisper.transcribe(c0)).thenThrow(other(), connection());
+    when(whisper.transcribe(eq(c0), anyString())).thenThrow(other(), connection());
 
     assertThatThrownBy(() -> run(c0, c1))
         .isInstanceOfSatisfying(
@@ -142,13 +153,13 @@ class TranscriptionClientTest {
               assertThat(f.kind()).isEqualTo(JobFailure.Kind.SERVICE_UNREACHABLE);
               assertThat(f).hasMessage("The transcription server is unreachable.");
             });
-    verify(whisper, times(2)).transcribe(any());
+    verify(whisper, times(2)).transcribe(any(), anyString());
     assertNothingChanged();
   }
 
   @Test
   void entirelyEmptySpeechIsNoSpeech() throws Exception {
-    when(whisper.transcribe(any())).thenReturn("", " \n");
+    when(whisper.transcribe(any(), anyString())).thenReturn(r(""), r(" \n"));
 
     assertThatThrownBy(() -> run(c0, c1))
         .isInstanceOfSatisfying(
@@ -193,19 +204,19 @@ class TranscriptionClientTest {
 
   @Test
   void progressComesBeforeEachFirstSendButNotBeforeTheRetry() throws Exception {
-    when(whisper.transcribe(c0))
+    when(whisper.transcribe(eq(c0), anyString()))
         .thenAnswer(inv -> {
           events.add("send 0");
           throw other();
         })
         .thenAnswer(inv -> {
           events.add("retry 0");
-          return "A";
+          return r("A");
         });
-    when(whisper.transcribe(c1))
+    when(whisper.transcribe(eq(c1), anyString()))
         .thenAnswer(inv -> {
           events.add("send 1");
-          return "B";
+          return r("B");
         });
 
     run(c0, c1);
@@ -216,19 +227,19 @@ class TranscriptionClientTest {
   @Test
   void successReplacesAnExistingTranscript() throws Exception {
     Files.writeString(jobDir.resolve("transcript.txt"), "Old text\n");
-    when(whisper.transcribe(c0)).thenReturn("New text");
+    when(whisper.transcribe(eq(c0), anyString())).thenReturn(r("New text"));
 
     run(c0);
 
     assertThat(Files.readString(jobDir.resolve("transcript.txt"))).isEqualTo("New text\n");
-    verify(whisper, times(1)).transcribe(c0);
+    verify(whisper, times(1)).transcribe(eq(c0), anyString());
   }
 
   @Test
   void aChunkFailureLeavesAnExistingTranscriptUntouched() throws Exception {
     byte[] old = "Old text\n".getBytes(StandardCharsets.UTF_8);
     Files.write(jobDir.resolve("transcript.txt"), old);
-    when(whisper.transcribe(c0)).thenThrow(other(), other());
+    when(whisper.transcribe(eq(c0), anyString())).thenThrow(other(), other());
 
     assertThatThrownBy(() -> run(c0)).isInstanceOf(JobFailure.class);
 
@@ -240,7 +251,7 @@ class TranscriptionClientTest {
   void noSpeechLeavesAnExistingTranscriptUntouched() throws Exception {
     byte[] old = "Old text\n".getBytes(StandardCharsets.UTF_8);
     Files.write(jobDir.resolve("transcript.txt"), old);
-    when(whisper.transcribe(c0)).thenReturn(" ");
+    when(whisper.transcribe(eq(c0), anyString())).thenReturn(r(" "));
 
     assertThatThrownBy(() -> run(c0))
         .isInstanceOfSatisfying(
@@ -252,7 +263,7 @@ class TranscriptionClientTest {
 
   @Test
   void failedWriteIsFailedAndDeletesNothing() throws Exception {
-    when(whisper.transcribe(any())).thenReturn("text");
+    when(whisper.transcribe(any(), anyString())).thenReturn(r("text"));
     Files.createDirectory(jobDir.resolve("transcript.txt"));
     Files.writeString(jobDir.resolve("transcript.txt").resolve("x"), "x");
 
@@ -265,7 +276,7 @@ class TranscriptionClientTest {
 
   @Test
   void deletionProblemsDoNotFailTheTranscription() throws Exception {
-    when(whisper.transcribe(any())).thenReturn("text");
+    when(whisper.transcribe(any(), anyString())).thenReturn(r("text"));
     Files.delete(c1);
     Files.delete(c2);
     Files.delete(c0);
@@ -284,8 +295,8 @@ class TranscriptionClientTest {
   @Test
   void nothingIsPublishedOrChangedWhileALaterAnswerIsPending() throws Exception {
     byte[] source = Files.readAllBytes(jobDir.resolve("source.m4a"));
-    when(whisper.transcribe(c0)).thenReturn("First");
-    when(whisper.transcribe(c1))
+    when(whisper.transcribe(eq(c0), anyString())).thenReturn(r("First"));
+    when(whisper.transcribe(eq(c1), anyString()))
         .thenAnswer(inv -> {
           assertThat(jobDir.resolve("transcript.txt")).doesNotExist();
           assertThat(jobDir.resolve("audio.wav")).hasContent("wav");
@@ -293,7 +304,7 @@ class TranscriptionClientTest {
           assertThat(c1).hasContent("1");
           assertThat(Files.readAllBytes(jobDir.resolve("source.m4a"))).isEqualTo(source);
           events.add("held");
-          return "Second";
+          return r("Second");
         });
 
     run(c0, c1);
@@ -308,7 +319,7 @@ class TranscriptionClientTest {
     Files.write(jobDir.resolve("transcript.txt"), old);
     Path tmp = Files.createDirectory(jobDir.resolve("transcript.txt.tmp"));
     Files.writeString(tmp.resolve("blocker"), "x");
-    when(whisper.transcribe(c0)).thenReturn("New text");
+    when(whisper.transcribe(eq(c0), anyString())).thenReturn(r("New text"));
 
     assertThatThrownBy(() -> run(c0))
         .isInstanceOfSatisfying(
@@ -334,7 +345,7 @@ class TranscriptionClientTest {
     Files.delete(jobDir.resolve("audio.wav"));
     Path audio = Files.createDirectory(jobDir.resolve("audio.wav"));
     Files.writeString(audio.resolve("blocker"), "x");
-    when(whisper.transcribe(any())).thenReturn("secret speech");
+    when(whisper.transcribe(any(), anyString())).thenReturn(r("secret speech"));
     ch.qos.logback.classic.Logger logger =
         (ch.qos.logback.classic.Logger)
             org.slf4j.LoggerFactory.getLogger(TranscriptionClient.class);
@@ -373,7 +384,7 @@ class TranscriptionClientTest {
 
   @Test
   void missingChunksDirectoryIsOnlyLogged() throws Exception {
-    when(whisper.transcribe(any())).thenReturn("text");
+    when(whisper.transcribe(any(), anyString())).thenReturn(r("text"));
     Path loose = Files.writeString(jobDir.resolve("loose.wav"), "x");
     Files.delete(c0);
     Files.delete(c1);
@@ -393,5 +404,114 @@ class TranscriptionClientTest {
     assertThat(c1).exists();
     assertThat(c2).exists();
     assertThat(jobDir.resolve("source.m4a")).exists();
+  }
+
+  // ---- language ----
+
+  private static WhisperResult ru(String text) {
+    return new WhisperResult(text, TranscriptMerger.normalize(text).isEmpty() ? null : "ru");
+  }
+
+  private Transcription runFull(Path... chunks) {
+    return client.transcribe(jobDir, List.of(chunks), (n, t) -> events.add(n + "/" + t));
+  }
+
+  @Test
+  void theFirstChunkIsDetectedAndTheRestArePinned() throws Exception {
+    when(whisper.transcribe(eq(c0), anyString())).thenReturn(ru("Первая"));
+    when(whisper.transcribe(eq(c1), anyString())).thenReturn(new WhisperResult("Вторая", null));
+    when(whisper.transcribe(eq(c2), anyString())).thenReturn(new WhisperResult("Третья", null));
+
+    Transcription result = runFull(c0, c1, c2);
+
+    assertThat(result.language()).isEqualTo(Language.RU);
+    assertThat(result.transcript()).isEqualTo(jobDir.resolve("transcript.txt"));
+    assertThat(jobDir.resolve("transcript.txt")).hasContent("Первая Вторая Третья\n");
+    verify(whisper).transcribe(c0, "auto");
+    verify(whisper).transcribe(c1, "ru");
+    verify(whisper).transcribe(c2, "ru");
+  }
+
+  @Test
+  void englishIsSelectedAndPinned() throws Exception {
+    when(whisper.transcribe(eq(c0), anyString())).thenReturn(r("One"));
+    when(whisper.transcribe(eq(c1), anyString())).thenReturn(new WhisperResult("Two", null));
+
+    Transcription result = runFull(c0, c1);
+
+    assertThat(result.language()).isEqualTo(Language.EN);
+    verify(whisper).transcribe(c1, "en");
+  }
+
+  @Test
+  void aLaterAnswerCannotChangeTheSelectedLanguage() throws Exception {
+    when(whisper.transcribe(eq(c0), anyString())).thenReturn(ru("Первая"));
+    when(whisper.transcribe(eq(c1), anyString())).thenReturn(new WhisperResult("Two", "de"));
+    when(whisper.transcribe(eq(c2), anyString())).thenReturn(new WhisperResult("Три", "en"));
+
+    Transcription result = runFull(c0, c1, c2);
+
+    assertThat(result.language()).isEqualTo(Language.RU);
+    verify(whisper).transcribe(c2, "ru");
+  }
+
+  @Test
+  void aSilentStartStaysInDetectMode() throws Exception {
+    when(whisper.transcribe(eq(c0), anyString())).thenReturn(new WhisperResult("  ", null));
+    when(whisper.transcribe(eq(c1), anyString())).thenReturn(ru("Речь"));
+    when(whisper.transcribe(eq(c2), anyString())).thenReturn(new WhisperResult("Конец", null));
+
+    Transcription result = runFull(c0, c1, c2);
+
+    assertThat(result.language()).isEqualTo(Language.RU);
+    verify(whisper).transcribe(c0, "auto");
+    verify(whisper).transcribe(c1, "auto");
+    verify(whisper).transcribe(c2, "ru");
+    assertThat(jobDir.resolve("transcript.txt")).hasContent("Речь Конец\n");
+  }
+
+  @Test
+  void aLanguageOtherThanEnglishAndRussianIsRefusedAtOnce() throws Exception {
+    when(whisper.transcribe(eq(c0), anyString())).thenReturn(new WhisperResult("Rede", "de"));
+
+    assertThatThrownBy(() -> runFull(c0, c1, c2))
+        .isInstanceOfSatisfying(
+            JobFailure.class,
+            f -> {
+              assertThat(f.kind()).isEqualTo(JobFailure.Kind.UNSUPPORTED_LANGUAGE);
+              assertThat(f.getMessage())
+                  .isEqualTo(
+                      "Only English and Russian videos are supported. Detected language: de.");
+            });
+
+    verify(whisper, never()).transcribe(eq(c1), anyString());
+    verify(whisper, never()).transcribe(eq(c2), anyString());
+    verify(whisper, times(1)).transcribe(any(), anyString());
+    assertThat(jobDir.resolve("transcript.txt")).doesNotExist();
+    assertThat(events).containsExactly("1/3");
+  }
+
+  @Test
+  void aRefusalAfterASilentStartComesFromTheFirstChunkWithText() throws Exception {
+    when(whisper.transcribe(eq(c0), anyString())).thenReturn(new WhisperResult("", null));
+    when(whisper.transcribe(eq(c1), anyString())).thenReturn(new WhisperResult("Rede", "es"));
+
+    assertThatThrownBy(() -> runFull(c0, c1, c2))
+        .isInstanceOfSatisfying(
+            JobFailure.class, f -> assertThat(f.getMessage()).endsWith("Detected language: es."));
+    verify(whisper, never()).transcribe(eq(c2), anyString());
+  }
+
+  @Test
+  void aFailedDetectionChunkIsRetriedInDetectMode() throws Exception {
+    when(whisper.transcribe(eq(c0), anyString())).thenThrow(other()).thenReturn(ru("Речь"));
+    when(whisper.transcribe(eq(c1), anyString()))
+        .thenThrow(other())
+        .thenReturn(new WhisperResult("Две", null));
+
+    runFull(c0, c1);
+
+    verify(whisper, times(2)).transcribe(c0, "auto");
+    verify(whisper, times(2)).transcribe(c1, "ru");
   }
 }

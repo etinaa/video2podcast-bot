@@ -18,6 +18,7 @@ import com.video2podcast.media.YtDlpClient;
 import com.video2podcast.summary.SummaryService;
 import com.video2podcast.support.MutableClock;
 import com.video2podcast.transcript.TranscriptionClient;
+import com.video2podcast.transcript.TranscriptionClient.Transcription;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -133,9 +134,9 @@ class PipelineServiceTest {
           listener.accept(2, 2);
           Path transcript = dir.resolve("transcript.txt");
           Files.writeString(transcript, "héllo transcript", StandardCharsets.UTF_8);
-          return transcript;
+          return new Transcription(transcript, Language.RU);
         });
-    when(summary.summarize("héllo transcript")).thenReturn("• point");
+    when(summary.summarize("héllo transcript", Language.RU)).thenReturn("• point");
   }
 
   @Test
@@ -186,7 +187,7 @@ class PipelineServiceTest {
 
   @Test
   void aSlowSummaryDoesNotUseUpTheRetention() {
-    when(summary.summarize(any()))
+    when(summary.summarize(any(), any()))
         .thenAnswer(call -> {
           clock.advance(Duration.ofHours(2));
           return "• late";
@@ -239,7 +240,7 @@ class PipelineServiceTest {
   @Test
   void aFailureAfterTheTranscriptDeletesTheWholeDirectory() {
     JobFailure failure = JobFailure.of(JobFailure.Kind.SUMMARY_UNREACHABLE);
-    when(summary.summarize(any())).thenThrow(failure);
+    when(summary.summarize(any(), any())).thenThrow(failure);
 
     assertThatThrownBy(() -> pipeline.run(REQUEST, progress)).isSameAs(failure);
 
@@ -266,7 +267,8 @@ class PipelineServiceTest {
 
   @Test
   void anUnreadableTranscriptIsATranscriptionFailure() {
-    when(transcription.transcribe(any(), any(), any())).thenReturn(dir.resolve("missing.txt"));
+    when(transcription.transcribe(any(), any(), any()))
+        .thenReturn(new Transcription(dir.resolve("missing.txt"), Language.EN));
 
     assertThatThrownBy(() -> pipeline.run(REQUEST, progress))
         .isInstanceOfSatisfying(
@@ -312,7 +314,7 @@ class PipelineServiceTest {
 
   @Test
   void aFailedJobJsonWriteFailsTheJobBeforeAnythingIsSent() throws IOException {
-    when(summary.summarize(any()))
+    when(summary.summarize(any(), any()))
         .thenAnswer(call -> {
           Files.createDirectory(dir.resolve("job.json"));
           return "• point";

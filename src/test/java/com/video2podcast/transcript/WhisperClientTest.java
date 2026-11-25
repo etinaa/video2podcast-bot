@@ -67,7 +67,7 @@ class WhisperClientTest {
   }
 
   private WhisperException failure() {
-    return catchWhisper(() -> client().transcribe(chunk));
+    return catchWhisper(() -> client().transcribe(chunk, "en"));
   }
 
   private static WhisperException catchWhisper(ThrowingRun run) {
@@ -103,7 +103,7 @@ class WhisperClientTest {
         new WhisperClient(
             new AppProperties.Whisper("http://localhost:1", Duration.ofSeconds(5)), http);
 
-    WhisperException e = catchWhisper(() -> whisper.transcribe(chunk));
+    WhisperException e = catchWhisper(() -> whisper.transcribe(chunk, "en"));
 
     assertThat(e.isConnection()).isTrue();
   }
@@ -128,7 +128,7 @@ class WhisperClientTest {
   void sendsTheFourPartsAndReturnsRawText() throws Exception {
     stub(200, fixture("whisper-inference-ok.json"));
 
-    String text = client().transcribe(chunk);
+    String text = client().transcribe(chunk, "en").text();
 
     assertThat(text)
         .isEqualTo(
@@ -156,13 +156,123 @@ class WhisperClientTest {
         .contains("\r\n\r\njson\r\n")
         .contains("\r\n\r\nen\r\n")
         .contains("\r\n\r\n0.0\r\n");
+    assertThat(field(body, "response_format")).isEqualTo("json");
+    assertThat(field(body, "language")).isEqualTo("en");
+    assertThat(field(body, "translate")).isEqualTo("false");
+    assertThat(field(body, "detect_language")).isEqualTo("false");
+    assertThat(field(body, "temperature")).isEqualTo("0.0");
+  }
+
+  private String sentBody() {
+    LoggedRequest request = server.getAllServeEvents().get(0).getRequest();
+    return new String(request.getBody(), StandardCharsets.ISO_8859_1);
+  }
+
+  private static String field(String body, String name) {
+    String head = "name=\"" + name + "\"\r\n\r\n";
+    int start = body.indexOf(head) + head.length();
+    return body.substring(start, body.indexOf("\r\n", start));
+  }
+
+  @Test
+  void detectModeAsksForVerboseJsonAndReadsTheLanguage() throws Exception {
+    stub(200, "{\"text\":\" Привет \",\"language\":\"russian\",\"segments\":[]}");
+
+    WhisperResult result = client().transcribe(chunk, "auto");
+
+    assertThat(result.text()).isEqualTo(" Привет ");
+    assertThat(result.language()).isEqualTo("ru");
+    String body = sentBody();
+    assertThat(field(body, "response_format")).isEqualTo("verbose_json");
+    assertThat(field(body, "language")).isEqualTo("auto");
+    assertThat(field(body, "translate")).isEqualTo("false");
+    assertThat(field(body, "detect_language")).isEqualTo("false");
+    assertThat(field(body, "temperature")).isEqualTo("0.0");
+  }
+
+  @Test
+  void pinnedModeIgnoresTheLanguageOfTheAnswer() throws Exception {
+    stub(200, "{\"text\":\"Привет\",\"language\":\"german\"}");
+
+    WhisperResult result = client().transcribe(chunk, "ru");
+
+    assertThat(result).isEqualTo(new WhisperResult("Привет", null));
+    assertThat(field(sentBody(), "language")).isEqualTo("ru");
+    assertThat(field(sentBody(), "response_format")).isEqualTo("json");
+  }
+
+  @Test
+  void detectModeNormalizesNamesAndCodes() throws Exception {
+    stub(200, "{\"text\":\"x\",\"language\":\" \\tRuSsIaN\\n \"}");
+    assertThat(client().transcribe(chunk, "auto").language()).isEqualTo("ru");
+    server.resetAll();
+    stub(200, "{\"text\":\"x\",\"language\":\"de\"}");
+    assertThat(client().transcribe(chunk, "auto").language()).isEqualTo("de");
+    server.resetAll();
+    stub(200, "{\"text\":\"x\",\"language\":\"klingon\"}");
+    assertThat(client().transcribe(chunk, "auto").language()).isEqualTo("unknown");
+  }
+
+  @Test
+  void detectModeWithoutTextDoesNotNeedALanguage() throws Exception {
+    for (String body :
+        List.of(
+            "{\"text\":\"\"}",
+            "{\"text\":\" \\t \",\"language\":null}",
+            "{\"text\":\"\\u00a0\",\"language\":42}")) {
+      server.resetAll();
+      stub(200, body);
+
+      WhisperResult result = client().transcribe(chunk, "auto");
+
+      assertThat(result.language()).isNull();
+    }
+  }
+
+  @Test
+  void detectModeWithTextButUnusableLanguageIsABrokenAnswer() {
+    for (String language : List.of("", "null", "42", "true", "[]", "{}", "\"\"", "\" \\t\"")) {
+      server.resetAll();
+      String json =
+          language.isEmpty()
+              ? "{\"text\":\"Речь.\"}"
+              : "{\"text\":\"Речь.\",\"language\":" + language + "}";
+      stub(200, json);
+
+      assertThatThrownBy(() -> client().transcribe(chunk, "auto"))
+          .isInstanceOfSatisfying(
+              WhisperException.class,
+              e -> {
+                assertThat(e.isConnection()).isFalse();
+                assertThat(e.getMessage()).isEqualTo("Whisper answer has no language");
+              });
+    }
+  }
+
+  @Test
+  void aNonBreakingSpaceLanguageIsAnUnknownLanguageNotABrokenAnswer() throws Exception {
+    stub(200, "{\"text\":\"Речь.\",\"language\":\"\\u00a0\"}");
+
+    assertThat(client().transcribe(chunk, "auto").language()).isEqualTo("unknown");
+  }
+
+  @Test
+  void onlyAutoAndSupportedCodesAreAccepted() {
+    assertThatThrownBy(() -> client().transcribe(chunk, "de"))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> client().transcribe(chunk, ""))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> client().transcribe(chunk, null))
+        .isInstanceOf(NullPointerException.class);
+    assertThat(server.getAllServeEvents()).isEmpty();
   }
 
   @Test
   void trailingSlashInBaseUrlIsDropped() throws Exception {
     stub(200, "{\"text\":\"\"}");
 
-    assertThat(client(server.baseUrl() + "/", Duration.ofSeconds(5)).transcribe(chunk)).isEmpty();
+    assertThat(client(server.baseUrl() + "/", Duration.ofSeconds(5)).transcribe(chunk, "en").text())
+        .isEmpty();
     server.verify(1, postRequestedFor(urlEqualTo("/inference")));
   }
 
@@ -214,7 +324,8 @@ class WhisperClientTest {
             .willReturn(aResponse().withStatus(200).withBody(OK).withFixedDelay(2000)));
 
     WhisperException e =
-        catchWhisper(() -> client(server.baseUrl(), Duration.ofMillis(200)).transcribe(chunk));
+        catchWhisper(
+            () -> client(server.baseUrl(), Duration.ofMillis(200)).transcribe(chunk, "en"));
 
     assertThat(e.isConnection()).isFalse();
   }
@@ -236,8 +347,8 @@ class WhisperClientTest {
     }
 
     WhisperException e =
-        catchWhisper(
-            () -> client("http://localhost:" + port, Duration.ofSeconds(5)).transcribe(chunk));
+        catchWhisper(() ->
+            client("http://localhost:" + port, Duration.ofSeconds(5)).transcribe(chunk, "en"));
 
     assertThat(e.isConnection()).isTrue();
   }
@@ -245,8 +356,8 @@ class WhisperClientTest {
   @Test
   void unresolvedHostIsAConnectionError() {
     WhisperException e =
-        catchWhisper(
-            () -> client("http://no-such-host.invalid", Duration.ofSeconds(5)).transcribe(chunk));
+        catchWhisper(() ->
+            client("http://no-such-host.invalid", Duration.ofSeconds(5)).transcribe(chunk, "en"));
 
     assertThat(e.isConnection()).isTrue();
   }
@@ -255,7 +366,7 @@ class WhisperClientTest {
   void missingChunkIsAFailureWithoutARequest() {
     stub(200, OK);
 
-    WhisperException e = catchWhisper(() -> client().transcribe(dir.resolve("missing.wav")));
+    WhisperException e = catchWhisper(() -> client().transcribe(dir.resolve("missing.wav"), "en"));
 
     assertThat(e.isConnection()).isFalse();
     assertThat(server.getAllServeEvents()).isEmpty();
@@ -268,7 +379,8 @@ class WhisperClientTest {
             .willReturn(aResponse().withStatus(200).withBody(OK).withFixedDelay(2000)));
     Thread.currentThread().interrupt();
     try {
-      assertThatThrownBy(() -> client().transcribe(chunk)).isInstanceOf(WhisperException.class);
+      assertThatThrownBy(() -> client().transcribe(chunk, "en"))
+          .isInstanceOf(WhisperException.class);
       assertThat(Thread.currentThread().isInterrupted()).isTrue();
     } finally {
       Thread.interrupted();
