@@ -1,0 +1,21 @@
+VERDICT: APPROVED
+
+## Findings
+- [Suggestion] src/it/java/com/video2podcast/functional/LanguageSteps.java:700 - `finalBullets(String language)` ignores `language`; it only compares the body with the last mock content. The language is carried by the fixture text, so the step passes without checking it. Assert that the body contains Cyrillic for Russian and no Cyrillic for English, or drop the parameter from the step.
+- [Suggestion] src/it/java/com/video2podcast/functional/InferenceOutageProxy.java:182 - `relay` rethrows I/O errors as `UncheckedIOException`, and `close()` calls `request.get()` on every relay. A stray or half-open connection (the 15 s socket timeout, or an early client close) would fail scenario teardown instead of the scenario. Log and ignore errors from connections that never reached `/inference`.
+- [Suggestion] src/it/java/com/video2podcast/functional/SummaryAssertionSteps.java:59 - the prompt step now compares the Ollama input with `transcript.txt` read from disk, not with the fixture text. If production wrote a wrong transcript, input and file would agree. Every T19 scenario that uses it first asserts the exact `transcript.txt` content, so this is covered. A one-line comment saying so would help.
+- [Suggestion] src/it/java/com/video2podcast/functional/PipelineSetupSteps.java:605 - the long-transcript fixture changed from an exact input-budget computation to a fixed 21000-character budget with a half-chunk margin. It still gives n chunks at 8192 (n-0.5 budgets), and the 11-request assertions in T19 would fail if it drifted. It is less exact than T10's old computation, but acceptable.
+- [Suggestion] The T9 timeout in 'Each attempt receives a fresh answer wait' appeared once when two Maven runs overlapped (30 s await) and did not reproduce alone. The patch has no cause for it: `drained()` waits on `JobQueue.size()` and adds no sleeps. Treat it as CPU contention between parallel runs and watch it in later gates.
+
+## Requirements
+- R1: met - the first request is checked as `auto`, `verbose_json`, `translate=false`, `detect_language=false`, `temperature=0.0`, with the chunk bytes. Names, codes, case and whitespace are covered. First-response recovery has 10 outline rows.
+- R2: met - pinned later chunks, the 18-chunk boundary, a new job after a Russian job, a pinned retry, silent intro then ru, silent intro then de, and all-empty are all covered. The 'in order' step uses `containsExactly`.
+- R3: met - `transcript.txt` is checked byte for byte as UTF-8 with one LF. Uploaded bytes equal the retained bytes, with no caption. `noModels()` shows no new Whisper or Ollama call. Real multipart uploads are captured by `TelegramUploadRecorder`, so WireMock's header limit does not apply.
+- R4: met - short Russian and English prompts, 8 map + 2 intermediate + 1 final requests in both languages, stage prompts, chunk order and no duplication, context fit with the Russian token estimate, the 1500-character cap, HTML validity and the 4096 limit are all covered.
+- R5: met - de, german, es, klingon, zz and `<b>de</b>` give the exact text. Later chunks are never sent, there is no chat call, no directory is left, the queue has no entry and there is no promise message. Recovery of a parked job notifies once and does nothing on the next pass. The next job proceeds.
+- R6: met - 10 malformed-metadata rows retry on `auto`. Exhaustion gives 'Transcription failed' without chunk-001. An outage after detection parks the job, using a real closed listener (`InferenceOutageProxy`).
+- R7: met - interface texts, callback data and the no-upload check before a tap are covered. The Russian summary HTML and keyboard are covered.
+- R8: met - the Russian title, the sanitized title, and 101 copies of `Я` (100 + extension, 204 bytes) are checked in actual multipart filenames for both uploads.
+- R9: not covered by this zone - document and manual evidence, as the requirements say.
+
+No scenario of `T19-language.feature` is missing a step. Assertions run after the drain, not after sleeps. The tests use only loopback services and local media. The edits to the T9/T10/T11/T16/T18 fixtures only add `"language":"english"` metadata and the language-aware token estimate. No assertion was removed or weakened, and no production code or feature file is touched.

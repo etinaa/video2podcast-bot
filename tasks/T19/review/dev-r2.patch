@@ -1,0 +1,28 @@
+diff --git a/docs/host-setup.md b/docs/host-setup.md
+index 7328099..6202788 100644
+--- a/docs/host-setup.md
++++ b/docs/host-setup.md
+@@ -147,9 +147,21 @@ The queue is the file `deferred-jobs.json` in the directory of `ACCESS_FILE` (th
+ 
+ ### Manual check on a Russian video (T19)
+ 
+-<!-- T19-MANUAL-CHECK-PLACEHOLDER: NOT DONE YET. The owner runs this check after the code is committed; replace this block with the result. -->
++Checked on 2026-11-26 with the bot image built from `main` (`podman compose up -d --build`), result: **passed**.
+ 
+-**Status: not done yet.** To record here: video title and URL, date, `whisper-server` and Ollama versions and settings (`-l auto`, `OLLAMA_NUM_CTX`), the language code Whisper returned, an excerpt of the Russian transcript and of the Russian summary, the English bot texts seen, the two delivered file names (`.txt` and audio), the result, and a comparison of Ollama's `prompt_eval_count` with the bot's estimate (2 characters per token for Russian; lower the value if the real count is higher than the estimate).
++| Item | Result |
++|---|---|
++| Video | "Нет работы в IT? Как пережить этот период и не сдаться", 10 min 5 s (YouTube, sent from Telegram by the owner) |
++| Services | `whisper-server` 1.9.6 (Homebrew, ggml 1.0.0, Metal) with `-m ggml-large-v3-turbo.bin -l auto -t 8 -mc 0`; Ollama 0.40.16, `qwen3:32b`, `OLLAMA_NUM_CTX` 8192 (default) |
++| Contract check before the run | a Russian phrase spoken by the macOS voice Milena, sent with `language=auto`, `response_format=verbose_json`, `translate=false`, `detect_language=false`, came back with `"language": "russian"` and the Russian text |
++| Detected language | Russian (the bot does not log the detected code). Transcript and summary are in Russian |
++| Transcript | 10,633 characters, all letters Cyrillic. Start: "Представьте, что вы 10-15 лет работаете в IT, развиваетесь, строите карьеру, а потом в один прекрасный день вас сокращают. Первый раз. Вы начинаете искать работу." |
++| Summary | 8 bullets, under 1,500 characters. First two: "После травмы и личных проблем автор потерял мотивацию и энергетику." / "Он заметил, как одна сфера жизни влияет на другие, создавая замкнутый круг." |
++| Bot texts | still English: "Duration: 10m 5s", buttons "Download audio" and "Download transcript" |
++| File names sent | "Нет работы в IT_ Как пережить этот период и не сдаться.txt" and the same with `.m4a` (Cyrillic kept, `?` replaced by `_`; also checked by `LanguageIT`). Audio arrived as M4A, 9.8 MB; transcript 19 KB |
++| File names saved | Telegram Desktop for macOS saves them as "Нет_работы_в_IT_Как_пережить_этот_период_и_не_сдаться.txt" / ".m4a": the client replaces spaces with underscores on save, as it already did for English files before T19 |
++
++**Token estimate.** The full transcript sent to Ollama gave `prompt_eval_count` 3185 for 10,633 characters, which is 3.34 characters per token. The bot's estimate (2 characters per token for Russian) gives 5317 tokens, so it is above the real count and safe. It is not changed. The cost is chunks about 1.7 times smaller than necessary, so long Russian videos need more map steps. Raise the value only after more measurements, and never above the lowest real count seen.
+ 
+ ## whisper-server contract
+ 

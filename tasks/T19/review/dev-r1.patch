@@ -1,0 +1,2304 @@
+diff --git a/docs/host-setup.md b/docs/host-setup.md
+index 02ece56..7328099 100644
+--- a/docs/host-setup.md
++++ b/docs/host-setup.md
+@@ -22,9 +22,11 @@ curl -L --fail -o ~/models/whisper/ggml-large-v3-turbo.bin \
+ 
+ ```bash
+ # Ollama listens on 127.0.0.1:11434 by default (brew services start ollama, or open the app)
+-whisper-server -m ~/models/whisper/ggml-large-v3-turbo.bin --host 127.0.0.1 --port 8081 -l en -t 8 -mc 0
++whisper-server -m ~/models/whisper/ggml-large-v3-turbo.bin --host 127.0.0.1 --port 8081 -l auto -t 8 -mc 0
+ ```
+ 
++`-l auto` is required for Russian videos: whisper.cpp's own default is English even when `-l` is missing, so the flag has to say `auto` explicitly. The bot also sends `language` with every request (see the contract below), so the flag only matters for manual `curl` calls. The model stays the multilingual `large-v3-turbo`; the bot never asks for translation.
++
+ `-mc 0` is required: it stops Whisper from feeding the previous text back in as context. Without it a 2 h 36 min test video got a repetition loop ("And I thought, maybe I could do something else", 14 to 20 times, about 18 seconds of real speech replaced). With `-mc 0` the same 10-minute chunk comes out without the loop and with the missing speech back, at the same speed. The bot sends `temperature=0.0` and no `temperature_inc`, so the temperature fallback does not help here (checked: no change).
+ 
+ Reachability from the container: checked on this machine (Podman 6.2.0, `podman machine` with applehv, 8 CPUs, 6 GiB). With `whisper-server` bound to `127.0.0.1:8081` and Ollama bound to `127.0.0.1:11434` on the host, a container request to `http://host.containers.internal:8081/` and to `http://host.containers.internal:11434/api/tags` both answer HTTP 200. No `0.0.0.0` binding and no `OLLAMA_HOST` change is needed here. If a different Podman setup cannot reach them, bind `whisper-server` with `--host 0.0.0.0` and start Ollama with `OLLAMA_HOST=0.0.0.0`, and restrict the ports with the macOS firewall.
+@@ -61,7 +63,7 @@ Stages for the 2 h 36 min video (second run, with `-mc 0`):
+ 
+ Stages for the 2 h 58 min 20 s video: download, WAV and split: not sampled separately (the first `ffmpeg` sample is at 13:29, the download is estimated at about 1 min from the 16 s of the 152 MB talk); transcribe 18 chunks about 6 min (13:29:38 to 13:35:47, slower than the English talk, the audio was Russian); summary about 9 min (to about 13:44:47); compression about 3 min (two `ffmpeg` attempts, 13:44:47 to 13:47:34, 37 then 29 kbps); upload about 1 min (to the Telegram message time, 13:49). Stages come from the 5-second process samples, except the download estimate and the upload, which come from the Telegram message time. Peak RSS in this run: Java bot 673 MiB (186 MiB in the 2 h 36 min run), `ffmpeg` 68 MiB, `whisper-server` 325 MiB.
+ 
+-Language: Whisper is forced to English (SPEC: other languages are out of scope). On the Russian audiobook the text came out as a garbled English translation with several repetition loops (for example the sentence "I thought it was going to be a new house" seven times in a row, and its phrase more often), even with `-mc 0`. The bot did what it should: the transcript has 30 855 words for 10 700 s, but with looped or mistranslated text a word count cannot show that the transcript is complete. Use English videos for checks of the transcript.
++Language (historical, T17, before T19): Whisper was forced to English with `-l en`. On the Russian audiobook the text came out as a garbled English translation with several repetition loops (for example the sentence "I thought it was going to be a new house" seven times in a row, and its phrase more often), even with `-mc 0`. The bot did what it should: the transcript has 30 855 words for 10 700 s, but with looped or mistranslated text a word count cannot show that the transcript is complete. This is the failure that T19 fixes: the bot now detects the language and uses it (see "Languages" below). Use English videos for checks of the transcript from before T19.
+ 
+ Peak memory (RSS) in the 2 h 36 min run: `whisper-server` up to 2.1 GB (the model sits in GPU memory, not counted), Java bot 186 MiB, `ffmpeg` 62 MB, Ollama about 22 GB for the model (`ollama ps`). Nothing needed tuning: chunk size, `num_ctx` 8192 and `keep_alive` stay as they are, and `qwen3:32b` is fast enough that no fall back to `qwen3:14b` is needed.
+ 
+@@ -134,6 +136,21 @@ When Whisper or Ollama is down, the bot keeps the link instead of failing it. Th
+ 
+ The queue is the file `deferred-jobs.json` in the directory of `ACCESS_FILE` (the `data` volume). It survives `podman compose down` and is lost if the volume is removed. It contains user links, so do not share it.
+ 
++## Languages (T19)
++
++- **Supported:** English and Russian, detected from the audio by Whisper. The video title, the URL and the user's Telegram language play no part.
++- **Detection:** the first chunk of a job goes to Whisper with `language=auto` and `response_format=verbose_json`. The answer is both the transcript of that chunk and its language. If that chunk has no text (music, a silent intro), its language is ignored and the next chunk is sent with `auto` again; the first chunk with text decides. If no chunk has text: "No speech was found in this video."
++- **Locking:** after the decision every later chunk of the job is sent with `language=en` or `language=ru`, so one language is used for the whole video. The next job detects again; nothing is stored, and a job retried after an outage detects again too.
++- **Summary:** every Ollama request of the job (short, map, intermediate and final reduction) asks for bullet points in the same language. For Russian the budget uses 2 characters per token instead of 3, so with `OLLAMA_NUM_CTX=8192` a long Russian video needs more map steps than an English one of the same length.
++- **Other languages:** the job stops right after detection: no later chunk, no Ollama call, the working files are deleted and the user gets "Only English and Russian videos are supported. Detected language: <code>." It is not a service failure and is not parked for retry. An unrecognized value is shown as `unknown`.
++- **Unchanged:** the bot's own texts (buttons, statuses, errors, captions) stay in English. Title-derived file names keep Cyrillic letters (stem cut to 100 characters).
++
++### Manual check on a Russian video (T19)
++
++<!-- T19-MANUAL-CHECK-PLACEHOLDER: NOT DONE YET. The owner runs this check after the code is committed; replace this block with the result. -->
++
++**Status: not done yet.** To record here: video title and URL, date, `whisper-server` and Ollama versions and settings (`-l auto`, `OLLAMA_NUM_CTX`), the language code Whisper returned, an excerpt of the Russian transcript and of the Russian summary, the English bot texts seen, the two delivered file names (`.txt` and audio), the result, and a comparison of Ollama's `prompt_eval_count` with the bot's estimate (2 characters per token for Russian; lower the value if the real count is higher than the estimate).
++
+ ## whisper-server contract
+ 
+ Captured against the real server with a 7-second WAV (`say` + `ffmpeg -ar 16000 -ac 1 -c:a pcm_s16le`).
+@@ -143,22 +160,37 @@ Captured against the real server with a 7-second WAV (`say` + `ffmpeg -ar 16000
+ | Field | Value | Notes |
+ |---|---|---|
+ | `file` | the WAV chunk | required, without it the server answers `400` |
+-| `response_format` | `json` | also accepts `text`, `verbose_json`, `srt`, `vtt` |
+-| `language` | `en` | the server-wide `-l en` is the default; sending it per request is explicit |
++| `response_format` | `verbose_json` (detect mode), `json` (pinned mode) | also accepts `text`, `srt`, `vtt` |
++| `language` | `auto` (detect mode), `en` or `ru` (pinned mode) | the server-wide `-l` is only the default for calls without this field; the bot always sends it |
++| `translate` | `false` | |
++| `detect_language` | `false` | never `true`: the server then stops after detection and returns no text |
+ | `temperature` | `0.0` | optional |
+ 
++The bot sends the fields in this order: `file`, `response_format`, `language`, `translate`, `detect_language`, `temperature`.
++
++Detect mode (first chunk with text of a job; it both detects and transcribes):
++
+ ```bash
+ curl -s http://127.0.0.1:8081/inference \
+-  -F file=@sample.wav -F response_format=json -F language=en -F temperature=0.0
++  -F file=@sample.wav -F response_format=verbose_json -F language=auto \
++  -F translate=false -F detect_language=false -F temperature=0.0
+ ```
+ 
+-**Response, 200:** `{"text":" Hello, this is ...\n o'clock, and we will ...\n"}` (fixture `whisper-inference-ok.json`).
++Pinned mode (every later chunk, with the language that detect mode selected):
++
++```bash
++curl -s http://127.0.0.1:8081/inference \
++  -F file=@sample.wav -F response_format=json -F language=ru \
++  -F translate=false -F detect_language=false -F temperature=0.0
++```
++
++**Response, 200 (pinned mode):** `{"text":" Hello, this is ...\n o'clock, and we will ...\n"}` (fixture `whisper-inference-ok.json`).
+ 
+ **Things the client must handle:**
+ - The text starts with a space and contains **newlines in the middle of sentences** (it is wrapped per segment). The merger must trim each chunk and collapse whitespace before joining chunks.
+ - Errors are plain text, not JSON: `400` with the body `Invalid request` (fixture `whisper-inference-bad-request.txt`). A file that is not valid audio gives the same `400`.
+ - Only WAV is sent, so `--convert` (server-side ffmpeg) is not needed.
+-- `verbose_json` returns per-segment timestamps and, with words enabled, word probabilities (fixture `whisper-inference-verbose.json`, words stripped). V1 uses only `text`.
++- `verbose_json` returns per-segment timestamps and, with words enabled, word probabilities (fixture `whisper-inference-verbose.json`, words stripped). The bot reads only the top-level `text` and, in detect mode, the top-level `language`: a full lower-case name such as `russian` or `german` (not a code). Segments and probabilities are ignored.
+ - Unreachable server means a connection error (nothing is listening on the port).
+ 
+ ## Ollama contract
+@@ -173,12 +205,14 @@ curl -s http://127.0.0.1:8081/inference \
+   "keep_alive": "10m",
+   "options": { "num_ctx": 8192, "temperature": 0.2 },
+   "messages": [
+-    { "role": "system", "content": "Summarize the transcript as 2-3 English bullet points starting with '- '." },
++    { "role": "system", "content": "Summarize the transcript as 2-3 Russian bullet points starting with '- '." },
+     { "role": "user", "content": "<transcript chunk>" }
+   ]
+ }
+ ```
+ 
++The system prompt names the language of the job (`English` or `Russian`, written in English): for example "... Write the final summary as Russian bullet points ...".
++
+ **Response, 200:** `message.content` holds the text, plus `done`, `done_reason`, `prompt_eval_count`, `eval_count` and durations (fixture `ollama-chat-ok.json`).
+ 
+ **Errors:** a missing model gives `404` with `{"error":"model 'nope:1b' not found"}` (fixture `ollama-model-not-found.json`). Unreachable Ollama means a connection error.
+diff --git a/src/main/java/com/video2podcast/job/JobFailure.java b/src/main/java/com/video2podcast/job/JobFailure.java
+index 4b91ac8..8f6d46b 100644
+--- a/src/main/java/com/video2podcast/job/JobFailure.java
++++ b/src/main/java/com/video2podcast/job/JobFailure.java
+@@ -19,7 +19,8 @@ public class JobFailure extends RuntimeException {
+     TIMEOUT,
+     NO_SPEECH,
+     SERVICE_UNREACHABLE,
+-    SUMMARY_UNREACHABLE
++    SUMMARY_UNREACHABLE,
++    UNSUPPORTED_LANGUAGE
+   }
+ 
+   private final Kind kind;
+@@ -81,6 +82,16 @@ public class JobFailure extends RuntimeException {
+     return new JobFailure(Kind.TOO_LONG, "The video is longer than " + formatLimit(limit) + ".");
+   }
+ 
++  /**
++   * The refusal of a video in another language. {@code code} comes from Whisper's language list
++   * (letters only, or "unknown").
++   */
++  public static JobFailure unsupportedLanguage(String code) {
++    return new JobFailure(
++        Kind.UNSUPPORTED_LANGUAGE,
++        messageOf(Kind.UNSUPPORTED_LANGUAGE) + " Detected language: " + code + ".");
++  }
++
+   /** A {@code FAILED} with the transcription message; {@code cause} may be null. */
+   public static JobFailure transcriptionFailed(Throwable cause) {
+     return new JobFailure(Kind.FAILED, "Transcription failed. Please try again later.", cause);
+@@ -101,6 +112,7 @@ public class JobFailure extends RuntimeException {
+       case NO_SPEECH -> "No speech was found in this video.";
+       case SERVICE_UNREACHABLE -> "The transcription server is unreachable.";
+       case SUMMARY_UNREACHABLE -> "The summary server is unreachable.";
++      case UNSUPPORTED_LANGUAGE -> "Only English and Russian videos are supported.";
+     };
+   }
+ 
+diff --git a/src/main/java/com/video2podcast/job/Language.java b/src/main/java/com/video2podcast/job/Language.java
+new file mode 100644
+index 0000000..719368d
+--- /dev/null
++++ b/src/main/java/com/video2podcast/job/Language.java
+@@ -0,0 +1,37 @@
++package com.video2podcast.job;
++
++import java.util.Optional;
++
++/** The languages of a video that the bot transcribes and summarizes. */
++public enum Language {
++  EN("en", "English"),
++  RU("ru", "Russian");
++
++  private final String code;
++  private final String displayName;
++
++  Language(String code, String displayName) {
++    this.code = code;
++    this.displayName = displayName;
++  }
++
++  /** The ISO 639-1 code sent to Whisper, such as {@code en}. */
++  public String code() {
++    return code;
++  }
++
++  /** The English name, used in the summary prompts. */
++  public String displayName() {
++    return displayName;
++  }
++
++  /** Exact, case-sensitive match on {@link #code()}; empty for anything else, also for null. */
++  public static Optional<Language> fromCode(String code) {
++    for (Language language : values()) {
++      if (language.code.equals(code)) {
++        return Optional.of(language);
++      }
++    }
++    return Optional.empty();
++  }
++}
+diff --git a/src/main/java/com/video2podcast/job/PipelineService.java b/src/main/java/com/video2podcast/job/PipelineService.java
+index b48cf41..1c9b800 100644
+--- a/src/main/java/com/video2podcast/job/PipelineService.java
++++ b/src/main/java/com/video2podcast/job/PipelineService.java
+@@ -6,6 +6,7 @@ import com.video2podcast.media.VideoMetadata;
+ import com.video2podcast.media.YtDlpClient;
+ import com.video2podcast.summary.SummaryService;
+ import com.video2podcast.transcript.TranscriptionClient;
++import com.video2podcast.transcript.TranscriptionClient.Transcription;
+ import java.io.IOException;
+ import java.nio.charset.StandardCharsets;
+ import java.nio.file.Files;
+@@ -95,9 +96,10 @@ public class PipelineService {
+     Path source = ytDlp.downloadAudio(request.url(), dir);
+     Path wav = ffmpeg.toWav(source, dir);
+     List<Path> chunks = ffmpeg.split(wav, dir);
+-    Path transcript = transcription.transcribe(dir, chunks, progress::transcribing);
++    Transcription transcribed = transcription.transcribe(dir, chunks, progress::transcribing);
+     progress.summarizing();
+-    String bullets = summary.summarize(readTranscript(transcript));
++    String bullets =
++        summary.summarize(readTranscript(transcribed.transcript()), transcribed.language());
+ 
+     JobRecord record =
+         new JobRecord(
+diff --git a/src/main/java/com/video2podcast/summary/Prompts.java b/src/main/java/com/video2podcast/summary/Prompts.java
+index fb40f4c..3e1ccde 100644
+--- a/src/main/java/com/video2podcast/summary/Prompts.java
++++ b/src/main/java/com/video2podcast/summary/Prompts.java
+@@ -1,31 +1,40 @@
+ package com.video2podcast.summary;
+ 
+-/** The system prompts. Every one asks for English, whatever the language of the input. */
++import com.video2podcast.job.Language;
++
++/** The system prompts, written in English. Every one asks for the answer in the given language. */
+ final class Prompts {
+ 
+-  static final String SHORT =
+-      "You summarize a video transcript. Write the final summary as English bullet points, even if"
+-          + " the transcript is not in English. Start every line with \"- \". Use at most 8"
+-          + " bullets and keep each bullet short. Answer with the bullet points only, without a"
+-          + " preamble.";
++  private Prompts() {}
+ 
+-  static final String MAP =
+-      "You summarize one part of a longer video transcript. List the key points of this part as"
+-          + " English bullet points, even if the text is not in English. Start every line with"
+-          + " \"- \". Use 3 to 8 bullets. Answer with the bullet points only, without a"
+-          + " preamble.";
++  static String shortPrompt(Language language) {
++    return "You summarize a video transcript. Write the final summary as "
++        + language.displayName()
++        + " bullet points. Start every line with \"- \". Use at most 8 bullets and keep each"
++        + " bullet short. Answer with the bullet points only, without a preamble.";
++  }
+ 
+-  static final String REDUCE_FINAL =
+-      "You are given bullet-point summaries of consecutive parts of one video transcript. Write"
+-          + " the final summary of the whole video as English bullet points, even if the input is"
+-          + " not in English. Start every line with \"- \". Use at most 8 bullets and keep each"
+-          + " bullet short. Answer with the bullet points only, without a preamble.";
++  static String mapPrompt(Language language) {
++    return "You summarize one part of a longer video transcript. List the key points of this part"
++        + " as "
++        + language.displayName()
++        + " bullet points. Start every line with \"- \". Use 3 to 8 bullets. Answer with the"
++        + " bullet points only, without a preamble.";
++  }
+ 
+-  static final String REDUCE_ROUND =
+-      "You are given bullet-point summaries of consecutive parts of one video transcript. Merge"
+-          + " them into one shorter English bullet list that keeps the important points, even if"
+-          + " the input is not in English. Start every line with \"- \". Answer with the bullet"
+-          + " points only, without a preamble.";
++  static String reduceFinalPrompt(Language language) {
++    return "You are given bullet-point summaries of consecutive parts of one video transcript."
++        + " Write the final summary of the whole video as "
++        + language.displayName()
++        + " bullet points. Start every line with \"- \". Use at most 8 bullets and keep each"
++        + " bullet short. Answer with the bullet points only, without a preamble.";
++  }
+ 
+-  private Prompts() {}
++  static String reduceRoundPrompt(Language language) {
++    return "You are given bullet-point summaries of consecutive parts of one video transcript."
++        + " Merge them into one shorter "
++        + language.displayName()
++        + " bullet list that keeps the important points. Start every line with \"- \". Answer"
++        + " with the bullet points only, without a preamble.";
++  }
+ }
+diff --git a/src/main/java/com/video2podcast/summary/SummaryService.java b/src/main/java/com/video2podcast/summary/SummaryService.java
+index ae5b586..5ce929a 100644
+--- a/src/main/java/com/video2podcast/summary/SummaryService.java
++++ b/src/main/java/com/video2podcast/summary/SummaryService.java
+@@ -2,8 +2,11 @@ package com.video2podcast.summary;
+ 
+ import com.video2podcast.config.AppProperties;
+ import com.video2podcast.job.JobFailure;
++import com.video2podcast.job.Language;
+ import java.util.ArrayList;
++import java.util.EnumMap;
+ import java.util.List;
++import java.util.Map;
+ import java.util.Objects;
+ import org.slf4j.Logger;
+ import org.slf4j.LoggerFactory;
+@@ -20,8 +23,8 @@ public final class SummaryService {
+   private static final String SEPARATOR = "\n\n";
+ 
+   private final LlmClient llm;
+-  private final int maxChunkChars;
+-  private final int partialMaxChars;
++  private final Map<Language, Integer> maxChunkChars = new EnumMap<>(Language.class);
++  private final Map<Language, Integer> partialMaxChars = new EnumMap<>(Language.class);
+   private final int maxRounds;
+ 
+   public SummaryService(LlmClient llm, AppProperties.Ollama config) {
+@@ -33,79 +36,88 @@ public final class SummaryService {
+     if (config.numCtx() <= 0) {
+       throw new IllegalArgumentException("app.ollama.num-ctx must be positive");
+     }
+-    int promptTokens =
+-        Math.max(
+-            Math.max(TokenEstimator.estimate(Prompts.SHORT), TokenEstimator.estimate(Prompts.MAP)),
+-            Math.max(
+-                TokenEstimator.estimate(Prompts.REDUCE_FINAL),
+-                TokenEstimator.estimate(Prompts.REDUCE_ROUND)));
+-    long textBudget =
+-        (long) config.numCtx() - OUTPUT_RESERVE - promptTokens - TokenEstimator.TEMPLATE_OVERHEAD;
+-    if (textBudget < 2L * OUTPUT_RESERVE) {
+-      throw new IllegalArgumentException("app.ollama.num-ctx is too small: " + config.numCtx());
+-    }
+-    if (textBudget > Integer.MAX_VALUE / TokenEstimator.CHARS_PER_TOKEN) {
+-      throw new IllegalArgumentException("app.ollama.num-ctx is too large: " + config.numCtx());
+-    }
+     this.llm = llm;
+     this.maxRounds = maxRounds;
+-    this.maxChunkChars = (int) (textBudget * TokenEstimator.CHARS_PER_TOKEN);
+-    this.partialMaxChars = (maxChunkChars - 3 * SEPARATOR.length()) / 4;
++    for (Language language : Language.values()) {
++      int perToken = TokenEstimator.charsPerToken(language);
++      int promptTokens =
++          Math.max(
++              Math.max(
++                  TokenEstimator.estimate(Prompts.shortPrompt(language), language),
++                  TokenEstimator.estimate(Prompts.mapPrompt(language), language)),
++              Math.max(
++                  TokenEstimator.estimate(Prompts.reduceFinalPrompt(language), language),
++                  TokenEstimator.estimate(Prompts.reduceRoundPrompt(language), language)));
++      long textBudget =
++          (long) config.numCtx() - OUTPUT_RESERVE - promptTokens - TokenEstimator.TEMPLATE_OVERHEAD;
++      if (textBudget < 2L * OUTPUT_RESERVE) {
++        throw new IllegalArgumentException("app.ollama.num-ctx is too small: " + config.numCtx());
++      }
++      if (textBudget > Integer.MAX_VALUE / perToken) {
++        throw new IllegalArgumentException("app.ollama.num-ctx is too large: " + config.numCtx());
++      }
++      int chunk = (int) (textBudget * perToken);
++      maxChunkChars.put(language, chunk);
++      partialMaxChars.put(language, (chunk - 3 * SEPARATOR.length()) / 4);
++    }
+   }
+ 
+   /** Characters of user text that fit one request. */
+-  int maxChunkChars() {
+-    return maxChunkChars;
++  int maxChunkChars(Language language) {
++    return maxChunkChars.get(language);
+   }
+ 
+   /** The bound for every intermediate answer. */
+-  int partialMaxChars() {
+-    return partialMaxChars;
++  int partialMaxChars(Language language) {
++    return partialMaxChars.get(language);
+   }
+ 
+   /**
+-   * Returns English bullet text, {@code "• "} per line, at most 1,500 UTF-16 chars, never blank.
++   * Returns bullet text in {@code language}, {@code "• "} per line, at most 1,500 UTF-16 chars,
++   * never blank.
+    *
+-   * @throws NullPointerException if {@code transcript} is null
++   * @throws NullPointerException if an argument is null
+    * @throws JobFailure when the summary server is unreachable, too slow, or its answer is unusable
+    */
+-  public String summarize(String transcript) {
++  public String summarize(String transcript, Language language) {
++    Objects.requireNonNull(language, "language");
++    int maxChunk = maxChunkChars(language);
+     String text = Objects.requireNonNull(transcript, "transcript").strip();
+     if (text.isEmpty()) {
+       throw JobFailure.summaryFailed(null);
+     }
+-    if (text.length() <= maxChunkChars) {
+-      return SummaryFormatter.format(call(Prompts.SHORT, text));
++    if (text.length() <= maxChunk) {
++      return SummaryFormatter.format(call(Prompts.shortPrompt(language), text, language));
+     }
+     List<String> partials = new ArrayList<>();
+-    for (String chunk : TextChunker.split(text, maxChunkChars)) {
+-      partials.add(clipped(call(Prompts.MAP, chunk)));
++    for (String chunk : TextChunker.split(text, maxChunk)) {
++      partials.add(clipped(call(Prompts.mapPrompt(language), chunk, language), language));
+     }
+     int round = 0;
+     while (true) {
+       String joined = String.join(SEPARATOR, partials);
+-      if (joined.length() <= maxChunkChars) {
+-        return SummaryFormatter.format(call(Prompts.REDUCE_FINAL, joined));
++      if (joined.length() <= maxChunk) {
++        return SummaryFormatter.format(call(Prompts.reduceFinalPrompt(language), joined, language));
+       }
+       round++;
+       if (round > maxRounds) {
+         throw JobFailure.summaryFailed(null);
+       }
+       List<String> next = new ArrayList<>();
+-      for (String group : groups(partials)) {
+-        next.add(clipped(call(Prompts.REDUCE_ROUND, group)));
++      for (String group : groups(partials, maxChunk)) {
++        next.add(clipped(call(Prompts.reduceRoundPrompt(language), group, language), language));
+       }
+       partials = next;
+     }
+   }
+ 
+   /** Greedy, in order; each group is the partials joined by blank lines, within one request. */
+-  private List<String> groups(List<String> partials) {
++  private static List<String> groups(List<String> partials, int maxChunk) {
+     List<String> groups = new ArrayList<>();
+     StringBuilder current = new StringBuilder();
+     for (String partial : partials) {
+       if (!current.isEmpty()
+-          && current.length() + SEPARATOR.length() + partial.length() > maxChunkChars) {
++          && current.length() + SEPARATOR.length() + partial.length() > maxChunk) {
+         groups.add(current.toString());
+         current.setLength(0);
+       }
+@@ -118,8 +130,8 @@ public final class SummaryService {
+     return groups;
+   }
+ 
+-  private String clipped(String content) {
+-    String clipped = SummaryFormatter.clip(content, partialMaxChars);
++  private String clipped(String content, Language language) {
++    String clipped = SummaryFormatter.clip(content, partialMaxChars(language));
+     if (clipped.length() < content.length() && LOG.isWarnEnabled()) {
+       LOG.warn(
+           "Clipped an intermediate answer from {} to {} chars", content.length(), clipped.length());
+@@ -135,14 +147,14 @@ public final class SummaryService {
+     };
+   }
+ 
+-  private String call(String system, String user) {
++  private String call(String system, String user, Language language) {
+     LlmReply reply;
+     try {
+       reply = llm.complete(system, user, OUTPUT_RESERVE);
+     } catch (LlmException e) {
+       throw failureOf(e);
+     }
+-    long expected = TokenEstimator.requestEstimate(system, user);
++    long expected = TokenEstimator.requestEstimate(system, user, language);
+     long threshold = (long) Math.ceil(expected * MIN_RATIO);
+     if (reply.promptTokens() < threshold) {
+       if (LOG.isWarnEnabled()) {
+diff --git a/src/main/java/com/video2podcast/summary/TokenEstimator.java b/src/main/java/com/video2podcast/summary/TokenEstimator.java
+index 1bdd9cb..43b9018 100644
+--- a/src/main/java/com/video2podcast/summary/TokenEstimator.java
++++ b/src/main/java/com/video2podcast/summary/TokenEstimator.java
+@@ -1,19 +1,29 @@
+ package com.video2podcast.summary;
+ 
++import com.video2podcast.job.Language;
++
+ /** The one size formula, used for the budget and for the truncation check. */
+ final class TokenEstimator {
+ 
+-  static final int CHARS_PER_TOKEN = 3;
+   static final int TEMPLATE_OVERHEAD = 32;
+ 
+   private TokenEstimator() {}
+ 
+-  /** Deliberately high for English: UTF-16 units divided by three, rounded up. */
+-  static int estimate(String text) {
+-    return (text.length() + CHARS_PER_TOKEN - 1) / CHARS_PER_TOKEN;
++  /** Deliberately low, so that the estimate is high: Cyrillic needs more tokens per character. */
++  static int charsPerToken(Language language) {
++    return switch (language) {
++      case EN -> 3;
++      case RU -> 2;
++    };
++  }
++
++  /** UTF-16 units divided by {@link #charsPerToken}, rounded up. */
++  static int estimate(String text, Language language) {
++    int perToken = charsPerToken(language);
++    return (text.length() + perToken - 1) / perToken;
+   }
+ 
+-  static long requestEstimate(String system, String user) {
+-    return (long) estimate(system) + estimate(user) + TEMPLATE_OVERHEAD;
++  static long requestEstimate(String system, String user, Language language) {
++    return (long) estimate(system, language) + estimate(user, language) + TEMPLATE_OVERHEAD;
+   }
+ }
+diff --git a/src/main/java/com/video2podcast/transcript/TranscriptionClient.java b/src/main/java/com/video2podcast/transcript/TranscriptionClient.java
+index aa97eab..f00bdfb 100644
+--- a/src/main/java/com/video2podcast/transcript/TranscriptionClient.java
++++ b/src/main/java/com/video2podcast/transcript/TranscriptionClient.java
+@@ -1,6 +1,7 @@
+ package com.video2podcast.transcript;
+ 
+ import com.video2podcast.job.JobFailure;
++import com.video2podcast.job.Language;
+ import com.video2podcast.storage.AtomicFiles;
+ import java.io.IOException;
+ import java.nio.charset.StandardCharsets;
+@@ -30,11 +31,13 @@ public class TranscriptionClient {
+    *
+    * @param progress called as accept(n, total) before chunk n is first sent (n from 1), once per
+    *     chunk, not again on the retry
+-   * @return the path of transcript.txt
++   *     <p>Chunks are sent in detect mode until one has text; its language decides: en and ru are
++   *     selected and every later chunk is pinned to it, anything else is refused at once.
++   * @return the path of transcript.txt and the selected language
+    * @throws NullPointerException if an argument is null
+-   * @throws JobFailure NO_SPEECH, SERVICE_UNREACHABLE or FAILED
++   * @throws JobFailure NO_SPEECH, UNSUPPORTED_LANGUAGE, SERVICE_UNREACHABLE or FAILED
+    */
+-  public Path transcribe(Path jobDir, List<Path> chunks, ProgressListener progress) {
++  public Transcription transcribe(Path jobDir, List<Path> chunks, ProgressListener progress) {
+     Objects.requireNonNull(jobDir, "jobDir");
+     Objects.requireNonNull(chunks, "chunks");
+     Objects.requireNonNull(progress, "progress");
+@@ -43,9 +46,17 @@ public class TranscriptionClient {
+     }
+     List<String> texts = new ArrayList<>(chunks.size());
+     int total = chunks.size();
++    Language language = null;
+     for (int i = 0; i < total; i++) {
+       progress.accept(i + 1, total);
+-      texts.add(transcribeWithRetry(chunks.get(i)));
++      String mode = language == null ? WhisperClient.AUTO : language.code();
++      WhisperResult result = transcribeWithRetry(chunks.get(i), mode);
++      texts.add(result.text());
++      if (language == null && result.language() != null) {
++        language =
++            Language.fromCode(result.language())
++                .orElseThrow(() -> JobFailure.unsupportedLanguage(result.language()));
++      }
+     }
+     String merged = TranscriptMerger.merge(texts);
+     if (merged.isEmpty()) {
+@@ -58,19 +69,19 @@ public class TranscriptionClient {
+       throw JobFailure.transcriptionFailed(e);
+     }
+     deleteTemporaryAudio(jobDir);
+-    return transcript;
++    return new Transcription(transcript, language);
+   }
+ 
+-  private String transcribeWithRetry(Path chunk) {
++  private WhisperResult transcribeWithRetry(Path chunk, String language) {
+     try {
+-      return whisper.transcribe(chunk);
++      return whisper.transcribe(chunk, language);
+     } catch (WhisperException first) {
+       if (LOG.isWarnEnabled()) {
+         LOG.warn("Chunk {} failed, retrying: {}", chunk.getFileName(), first.getMessage());
+       }
+     }
+     try {
+-      return whisper.transcribe(chunk);
++      return whisper.transcribe(chunk, language);
+     } catch (WhisperException second) {
+       if (LOG.isWarnEnabled()) {
+         LOG.warn("Chunk {} failed again: {}", chunk.getFileName(), second.getMessage());
+@@ -105,6 +116,9 @@ public class TranscriptionClient {
+     }
+   }
+ 
++  /** The transcript file and the language that decided its chunks. */
++  public record Transcription(Path transcript, Language language) {}
++
+   @FunctionalInterface
+   public interface ProgressListener {
+     void accept(int n, int total);
+diff --git a/src/main/java/com/video2podcast/transcript/WhisperClient.java b/src/main/java/com/video2podcast/transcript/WhisperClient.java
+index e83897a..56ae92d 100644
+--- a/src/main/java/com/video2podcast/transcript/WhisperClient.java
++++ b/src/main/java/com/video2podcast/transcript/WhisperClient.java
+@@ -3,6 +3,7 @@ package com.video2podcast.transcript;
+ import com.fasterxml.jackson.databind.JsonNode;
+ import com.video2podcast.config.AppProperties;
+ import com.video2podcast.job.HttpProbe;
++import com.video2podcast.job.Language;
+ import com.video2podcast.job.ProbeResult;
+ import com.video2podcast.storage.Json;
+ import java.io.FileNotFoundException;
+@@ -21,14 +22,21 @@ import java.nio.channels.UnresolvedAddressException;
+ import java.nio.charset.StandardCharsets;
+ import java.nio.file.Path;
+ import java.time.Duration;
++import java.util.Objects;
+ import java.util.UUID;
+ import org.slf4j.Logger;
+ import org.slf4j.LoggerFactory;
+ 
+-/** One call to the whisper.cpp server: sends a WAV chunk and returns the recognized text. */
++/**
++ * One call to the whisper.cpp server: sends a WAV chunk, returns the text and maybe the language.
++ */
+ public class WhisperClient {
+ 
+   private static final Logger LOG = LoggerFactory.getLogger(WhisperClient.class);
++
++  /** The value of the {@code language} field that asks Whisper to detect the language. */
++  public static final String AUTO = "auto";
++
+   private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(5);
+   private static final int LOGGED_BODY_CHARS = 200;
+ 
+@@ -66,10 +74,22 @@ public class WhisperClient {
+     return HttpProbe.get(http, root, timeout);
+   }
+ 
+-  /** Returns the raw "text" field of the answer, not normalized. */
+-  public String transcribe(Path chunk) throws WhisperException {
++  /**
++   * Sends one chunk. {@code language} is {@value #AUTO} (detect mode: asks for {@code verbose_json}
++   * and reads the language) or a code such as {@code en} or {@code ru} (pinned mode).
++   *
++   * @throws IllegalArgumentException if {@code language} is blank or not a letters-only value
++   * @throws WhisperException when the call fails, the answer is not usable, or in detect mode the
++   *     answer has text but no usable language
++   */
++  public WhisperResult transcribe(Path chunk, String language) throws WhisperException {
++    Objects.requireNonNull(language, "language");
++    boolean detect = AUTO.equals(language);
++    if (!detect && Language.fromCode(language).isEmpty()) {
++      throw new IllegalArgumentException("unsupported language: " + language);
++    }
+     String boundary = "----v2p" + UUID.randomUUID().toString().replace("-", "");
+-    HttpResponse<String> response = send(chunk, boundary);
++    HttpResponse<String> response = send(chunk, boundary, language, detect);
+     int status = response.statusCode();
+     if (status < 200 || status > 299) {
+       if (LOG.isWarnEnabled()) {
+@@ -77,16 +97,17 @@ public class WhisperClient {
+       }
+       throw new WhisperException("Whisper answered status " + status, false, null);
+     }
+-    return textOf(response.body());
++    return resultOf(response.body(), detect);
+   }
+ 
+-  private HttpResponse<String> send(Path chunk, String boundary) throws WhisperException {
++  private HttpResponse<String> send(Path chunk, String boundary, String language, boolean detect)
++      throws WhisperException {
+     try {
+       HttpRequest request =
+           HttpRequest.newBuilder(endpoint)
+               .timeout(timeout)
+               .header("Content-Type", "multipart/form-data; boundary=" + boundary)
+-              .POST(body(chunk, boundary))
++              .POST(body(chunk, boundary, language, detect))
+               .build();
+       return http.send(request, BodyHandlers.ofString(StandardCharsets.UTF_8));
+     } catch (HttpConnectTimeoutException | ConnectException | UnresolvedAddressException e) {
+@@ -101,7 +122,8 @@ public class WhisperClient {
+     }
+   }
+ 
+-  private static BodyPublisher body(Path chunk, String boundary) throws FileNotFoundException {
++  private static BodyPublisher body(Path chunk, String boundary, String language, boolean detect)
++      throws FileNotFoundException {
+     String head =
+         "--"
+             + boundary
+@@ -109,8 +131,10 @@ public class WhisperClient {
+             + chunk.getFileName()
+             + "\"\r\nContent-Type: audio/wav\r\n\r\n";
+     String tail =
+-        field(boundary, "response_format", "json")
+-            + field(boundary, "language", "en")
++        field(boundary, "response_format", detect ? "verbose_json" : "json")
++            + field(boundary, "language", language)
++            + field(boundary, "translate", "false")
++            + field(boundary, "detect_language", "false")
+             + field(boundary, "temperature", "0.0")
+             + "--"
+             + boundary
+@@ -131,20 +155,28 @@ public class WhisperClient {
+         + "\r\n";
+   }
+ 
+-  private static String textOf(String body) throws WhisperException {
++  private static WhisperResult resultOf(String body, boolean detect) throws WhisperException {
+     if (body == null || body.isBlank()) {
+       throw new WhisperException("Whisper answered with an empty body", false, null);
+     }
+-    JsonNode text;
++    JsonNode root;
+     try {
+-      text = Json.MAPPER.readTree(body).path("text");
++      root = Json.MAPPER.readTree(body);
+     } catch (IOException e) {
+       throw new WhisperException("Whisper answer is not JSON", false, e);
+     }
++    JsonNode text = root.path("text");
+     if (!text.isTextual()) {
+       throw new WhisperException("Whisper answer has no text", false, null);
+     }
+-    return text.textValue();
++    if (!detect || TranscriptMerger.normalize(text.textValue()).isEmpty()) {
++      return new WhisperResult(text.textValue(), null);
++    }
++    JsonNode language = root.path("language");
++    if (!language.isTextual() || language.textValue().isBlank()) {
++      throw new WhisperException("Whisper answer has no language", false, null);
++    }
++    return new WhisperResult(text.textValue(), WhisperLanguages.toCode(language.textValue()));
+   }
+ 
+   private static String abbreviate(String body) {
+diff --git a/src/main/java/com/video2podcast/transcript/WhisperLanguages.java b/src/main/java/com/video2podcast/transcript/WhisperLanguages.java
+new file mode 100644
+index 0000000..3e510ec
+--- /dev/null
++++ b/src/main/java/com/video2podcast/transcript/WhisperLanguages.java
+@@ -0,0 +1,145 @@
++package com.video2podcast.transcript;
++
++import java.util.HashMap;
++import java.util.Locale;
++import java.util.Map;
++import java.util.regex.Pattern;
++
++/**
++ * Whisper's own language list: full names such as "russian" to ISO codes. whisper-server answers
++ * {@code verbose_json} with the full name.
++ */
++final class WhisperLanguages {
++
++  private static final String UNKNOWN = "unknown";
++  private static final Pattern CODE = Pattern.compile("[a-z]{2,3}");
++
++  private static final Map<String, String> NAME_TO_CODE = new HashMap<>();
++
++  static {
++    String[] pairs = {
++      "english", "en",
++      "chinese", "zh",
++      "german", "de",
++      "spanish", "es",
++      "russian", "ru",
++      "korean", "ko",
++      "french", "fr",
++      "japanese", "ja",
++      "portuguese", "pt",
++      "turkish", "tr",
++      "polish", "pl",
++      "catalan", "ca",
++      "dutch", "nl",
++      "arabic", "ar",
++      "swedish", "sv",
++      "italian", "it",
++      "indonesian", "id",
++      "hindi", "hi",
++      "finnish", "fi",
++      "vietnamese", "vi",
++      "hebrew", "he",
++      "ukrainian", "uk",
++      "greek", "el",
++      "malay", "ms",
++      "czech", "cs",
++      "romanian", "ro",
++      "danish", "da",
++      "hungarian", "hu",
++      "tamil", "ta",
++      "norwegian", "no",
++      "thai", "th",
++      "urdu", "ur",
++      "croatian", "hr",
++      "bulgarian", "bg",
++      "lithuanian", "lt",
++      "latin", "la",
++      "maori", "mi",
++      "malayalam", "ml",
++      "welsh", "cy",
++      "slovak", "sk",
++      "telugu", "te",
++      "persian", "fa",
++      "latvian", "lv",
++      "bengali", "bn",
++      "serbian", "sr",
++      "azerbaijani", "az",
++      "slovenian", "sl",
++      "kannada", "kn",
++      "estonian", "et",
++      "macedonian", "mk",
++      "breton", "br",
++      "basque", "eu",
++      "icelandic", "is",
++      "armenian", "hy",
++      "nepali", "ne",
++      "mongolian", "mn",
++      "bosnian", "bs",
++      "kazakh", "kk",
++      "albanian", "sq",
++      "swahili", "sw",
++      "galician", "gl",
++      "marathi", "mr",
++      "punjabi", "pa",
++      "sinhala", "si",
++      "khmer", "km",
++      "shona", "sn",
++      "yoruba", "yo",
++      "somali", "so",
++      "afrikaans", "af",
++      "occitan", "oc",
++      "georgian", "ka",
++      "belarusian", "be",
++      "tajik", "tg",
++      "sindhi", "sd",
++      "gujarati", "gu",
++      "amharic", "am",
++      "yiddish", "yi",
++      "lao", "lo",
++      "uzbek", "uz",
++      "faroese", "fo",
++      "haitian creole", "ht",
++      "pashto", "ps",
++      "turkmen", "tk",
++      "nynorsk", "nn",
++      "maltese", "mt",
++      "sanskrit", "sa",
++      "luxembourgish", "lb",
++      "myanmar", "my",
++      "tibetan", "bo",
++      "tagalog", "tl",
++      "malagasy", "mg",
++      "assamese", "as",
++      "tatar", "tt",
++      "hawaiian", "haw",
++      "lingala", "ln",
++      "hausa", "ha",
++      "bashkir", "ba",
++      "javanese", "jw",
++      "sundanese", "su",
++      "cantonese", "yue"
++    };
++    for (int i = 0; i < pairs.length; i += 2) {
++      NAME_TO_CODE.put(pairs[i], pairs[i + 1]);
++    }
++  }
++
++  private WhisperLanguages() {}
++
++  /**
++   * Trims and lower-cases. A known full name gives its code, anything that looks like a code is
++   * returned as is (2-3 letters), everything else gives "unknown". The result holds only a-z, so it
++   * is safe in a message. A null or blank argument gives "unknown".
++   */
++  static String toCode(String whisperLanguage) {
++    if (whisperLanguage == null) {
++      return UNKNOWN;
++    }
++    String value = whisperLanguage.strip().toLowerCase(Locale.ROOT);
++    String code = NAME_TO_CODE.get(value);
++    if (code != null) {
++      return code;
++    }
++    return CODE.matcher(value).matches() ? value : UNKNOWN;
++  }
++}
+diff --git a/src/main/java/com/video2podcast/transcript/WhisperResult.java b/src/main/java/com/video2podcast/transcript/WhisperResult.java
+new file mode 100644
+index 0000000..c9c2156
+--- /dev/null
++++ b/src/main/java/com/video2podcast/transcript/WhisperResult.java
+@@ -0,0 +1,9 @@
++package com.video2podcast.transcript;
++
++/**
++ * The answer of whisper-server to one chunk.
++ *
++ * @param text the raw "text" field, not normalized
++ * @param language the ISO code in detect mode when the text is not empty; otherwise null
++ */
++public record WhisperResult(String text, String language) {}
+diff --git a/src/test/java/com/video2podcast/job/JobFailureTest.java b/src/test/java/com/video2podcast/job/JobFailureTest.java
+index d9fab7d..8974f3b 100644
+--- a/src/test/java/com/video2podcast/job/JobFailureTest.java
++++ b/src/test/java/com/video2podcast/job/JobFailureTest.java
+@@ -116,4 +116,16 @@ class JobFailureTest {
+     org.assertj.core.api.Assertions.assertThat(JobFailure.unreachable(true, true).isServiceOutage())
+         .isTrue();
+   }
++
++  @Test
++  void anUnsupportedLanguageNamesTheDetectedCode() {
++    JobFailure failure = JobFailure.unsupportedLanguage("de");
++
++    assertThat(failure.kind()).isEqualTo(JobFailure.Kind.UNSUPPORTED_LANGUAGE);
++    assertThat(failure.getMessage())
++        .isEqualTo("Only English and Russian videos are supported. Detected language: de.");
++    assertThat(failure.isServiceOutage()).isFalse();
++    assertThat(JobFailure.of(JobFailure.Kind.UNSUPPORTED_LANGUAGE).getMessage())
++        .isEqualTo("Only English and Russian videos are supported.");
++  }
+ }
+diff --git a/src/test/java/com/video2podcast/job/LanguageTest.java b/src/test/java/com/video2podcast/job/LanguageTest.java
+new file mode 100644
+index 0000000..b51c516
+--- /dev/null
++++ b/src/test/java/com/video2podcast/job/LanguageTest.java
+@@ -0,0 +1,27 @@
++package com.video2podcast.job;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++import org.junit.jupiter.api.Test;
++
++class LanguageTest {
++
++  @Test
++  void codesAndNames() {
++    assertThat(Language.EN.code()).isEqualTo("en");
++    assertThat(Language.EN.displayName()).isEqualTo("English");
++    assertThat(Language.RU.code()).isEqualTo("ru");
++    assertThat(Language.RU.displayName()).isEqualTo("Russian");
++  }
++
++  @Test
++  void fromCodeIsExact() {
++    assertThat(Language.fromCode("en")).contains(Language.EN);
++    assertThat(Language.fromCode("ru")).contains(Language.RU);
++    assertThat(Language.fromCode("RU")).isEmpty();
++    assertThat(Language.fromCode(" ru")).isEmpty();
++    assertThat(Language.fromCode("de")).isEmpty();
++    assertThat(Language.fromCode("")).isEmpty();
++    assertThat(Language.fromCode(null)).isEmpty();
++  }
++}
+diff --git a/src/test/java/com/video2podcast/job/PipelineServiceTest.java b/src/test/java/com/video2podcast/job/PipelineServiceTest.java
+index 2f68c4f..29a5693 100644
+--- a/src/test/java/com/video2podcast/job/PipelineServiceTest.java
++++ b/src/test/java/com/video2podcast/job/PipelineServiceTest.java
+@@ -18,6 +18,7 @@ import com.video2podcast.media.YtDlpClient;
+ import com.video2podcast.summary.SummaryService;
+ import com.video2podcast.support.MutableClock;
+ import com.video2podcast.transcript.TranscriptionClient;
++import com.video2podcast.transcript.TranscriptionClient.Transcription;
+ import java.io.IOException;
+ import java.nio.charset.StandardCharsets;
+ import java.nio.file.Files;
+@@ -133,9 +134,9 @@ class PipelineServiceTest {
+           listener.accept(2, 2);
+           Path transcript = dir.resolve("transcript.txt");
+           Files.writeString(transcript, "héllo transcript", StandardCharsets.UTF_8);
+-          return transcript;
++          return new Transcription(transcript, Language.RU);
+         });
+-    when(summary.summarize("héllo transcript")).thenReturn("• point");
++    when(summary.summarize("héllo transcript", Language.RU)).thenReturn("• point");
+   }
+ 
+   @Test
+@@ -186,7 +187,7 @@ class PipelineServiceTest {
+ 
+   @Test
+   void aSlowSummaryDoesNotUseUpTheRetention() {
+-    when(summary.summarize(any()))
++    when(summary.summarize(any(), any()))
+         .thenAnswer(call -> {
+           clock.advance(Duration.ofHours(2));
+           return "• late";
+@@ -239,7 +240,7 @@ class PipelineServiceTest {
+   @Test
+   void aFailureAfterTheTranscriptDeletesTheWholeDirectory() {
+     JobFailure failure = JobFailure.of(JobFailure.Kind.SUMMARY_UNREACHABLE);
+-    when(summary.summarize(any())).thenThrow(failure);
++    when(summary.summarize(any(), any())).thenThrow(failure);
+ 
+     assertThatThrownBy(() -> pipeline.run(REQUEST, progress)).isSameAs(failure);
+ 
+@@ -266,7 +267,8 @@ class PipelineServiceTest {
+ 
+   @Test
+   void anUnreadableTranscriptIsATranscriptionFailure() {
+-    when(transcription.transcribe(any(), any(), any())).thenReturn(dir.resolve("missing.txt"));
++    when(transcription.transcribe(any(), any(), any()))
++        .thenReturn(new Transcription(dir.resolve("missing.txt"), Language.EN));
+ 
+     assertThatThrownBy(() -> pipeline.run(REQUEST, progress))
+         .isInstanceOfSatisfying(
+@@ -312,7 +314,7 @@ class PipelineServiceTest {
+ 
+   @Test
+   void aFailedJobJsonWriteFailsTheJobBeforeAnythingIsSent() throws IOException {
+-    when(summary.summarize(any()))
++    when(summary.summarize(any(), any()))
+         .thenAnswer(call -> {
+           Files.createDirectory(dir.resolve("job.json"));
+           return "• point";
+diff --git a/src/test/java/com/video2podcast/summary/SummaryServiceTest.java b/src/test/java/com/video2podcast/summary/SummaryServiceTest.java
+index 9999eb5..52f8c63 100644
+--- a/src/test/java/com/video2podcast/summary/SummaryServiceTest.java
++++ b/src/test/java/com/video2podcast/summary/SummaryServiceTest.java
+@@ -1,10 +1,13 @@
+ package com.video2podcast.summary;
+ 
++import static com.video2podcast.job.Language.EN;
++import static com.video2podcast.job.Language.RU;
+ import static org.assertj.core.api.Assertions.assertThat;
+ import static org.assertj.core.api.Assertions.assertThatThrownBy;
+ 
+ import com.video2podcast.config.AppProperties;
+ import com.video2podcast.job.JobFailure;
++import com.video2podcast.job.Language;
+ import java.io.IOException;
+ import java.time.Duration;
+ import java.util.ArrayList;
+@@ -42,7 +45,11 @@ class SummaryServiceTest {
+   }
+ 
+   private static LlmReply valid(String content, String system, String user) {
+-    return new LlmReply(content, TokenEstimator.requestEstimate(system, user) * 4 / 5);
++    return valid(content, system, user, EN);
++  }
++
++  private static LlmReply valid(String content, String system, String user, Language language) {
++    return new LlmReply(content, TokenEstimator.requestEstimate(system, user, language) * 4 / 5);
+   }
+ 
+   private static ScriptedLlm always(String content) {
+@@ -57,12 +64,14 @@ class SummaryServiceTest {
+     return new SummaryService(llm, config(NUM_CTX));
+   }
+ 
+-  private static int promptTokens() {
++  private static int promptTokens(Language language) {
+     return Math.max(
+-        Math.max(TokenEstimator.estimate(Prompts.SHORT), TokenEstimator.estimate(Prompts.MAP)),
+         Math.max(
+-            TokenEstimator.estimate(Prompts.REDUCE_FINAL),
+-            TokenEstimator.estimate(Prompts.REDUCE_ROUND)));
++            TokenEstimator.estimate(Prompts.shortPrompt(language), language),
++            TokenEstimator.estimate(Prompts.mapPrompt(language), language)),
++        Math.max(
++            TokenEstimator.estimate(Prompts.reduceFinalPrompt(language), language),
++            TokenEstimator.estimate(Prompts.reduceRoundPrompt(language), language)));
+   }
+ 
+   private static String words(int chars) {
+@@ -71,7 +80,7 @@ class SummaryServiceTest {
+ 
+   private static JobFailure failureOf(SummaryService service, String transcript) {
+     try {
+-      service.summarize(transcript);
++      service.summarize(transcript, EN);
+     } catch (JobFailure e) {
+       return e;
+     }
+@@ -79,7 +88,13 @@ class SummaryServiceTest {
+   }
+ 
+   private static void assertFits(Call call, int numCtx) {
+-    assertThat(TokenEstimator.requestEstimate(call.system(), call.user()) + call.maxOutputTokens())
++    assertFits(call, numCtx, EN);
++  }
++
++  private static void assertFits(Call call, int numCtx, Language language) {
++    assertThat(
++            TokenEstimator.requestEstimate(call.system(), call.user(), language)
++                + call.maxOutputTokens())
+         .isLessThanOrEqualTo(numCtx);
+   }
+ 
+@@ -89,24 +104,99 @@ class SummaryServiceTest {
+   void budgetFollowsTheFormula() {
+     SummaryService service = service(always("- a"));
+ 
+-    int budget = NUM_CTX - 1024 - promptTokens() - 32;
+-    assertThat(service.maxChunkChars()).isEqualTo(budget * 3);
+-    assertThat(service.partialMaxChars()).isEqualTo((budget * 3 - 6) / 4);
++    int budget = NUM_CTX - 1024 - promptTokens(EN) - 32;
++    assertThat(service.maxChunkChars(EN)).isEqualTo(budget * 3);
++    assertThat(service.partialMaxChars(EN)).isEqualTo((budget * 3 - 6) / 4);
++  }
++
++  @Test
++  void theRussianBudgetUsesTwoCharactersPerToken() {
++    SummaryService service = service(always("- a"));
++
++    int budget = NUM_CTX - 1024 - promptTokens(RU) - 32;
++    assertThat(service.maxChunkChars(RU)).isEqualTo(budget * 2);
++    assertThat(service.partialMaxChars(RU)).isEqualTo((budget * 2 - 6) / 4);
++    assertThat(service.maxChunkChars(RU)).isLessThan(service.maxChunkChars(EN));
++  }
++
++  @Test
++  void everyPromptNamesTheLanguageAndKeepsTheBulletRules() {
++    for (Language language : Language.values()) {
++      for (String prompt :
++          List.of(
++              Prompts.shortPrompt(language),
++              Prompts.mapPrompt(language),
++              Prompts.reduceFinalPrompt(language),
++              Prompts.reduceRoundPrompt(language))) {
++        assertThat(prompt)
++            .contains(language.displayName() + " bullet")
++            .contains("\"- \"")
++            .contains("bullet points only")
++            .doesNotContain("even if");
++      }
++    }
++    assertThat(Prompts.shortPrompt(RU)).doesNotContain("English");
++    assertThat(Prompts.mapPrompt(RU)).doesNotContain("English");
++    assertThat(Prompts.reduceFinalPrompt(RU)).doesNotContain("English");
++    assertThat(Prompts.reduceRoundPrompt(RU)).doesNotContain("English");
++    assertThat(Prompts.shortPrompt(EN)).doesNotContain("Russian");
++  }
++
++  @Test
++  void aShortRussianTranscriptIsSentOnceWithTheRussianPrompt() {
++    ScriptedLlm llm = new ScriptedLlm((i, s, u) -> valid("- Встреча во вторник.", s, u, RU));
++
++    String summary = service(llm).summarize("Встреча состоится во вторник.", RU);
++
++    assertThat(llm.calls).hasSize(1);
++    assertThat(llm.calls.get(0).system()).isEqualTo(Prompts.shortPrompt(RU));
++    assertThat(llm.calls.get(0).user()).isEqualTo("Встреча состоится во вторник.");
++    assertThat(summary).isEqualTo("• Встреча во вторник.");
++  }
++
++  @Test
++  void aLongRussianTranscriptUsesRussianPromptsAtEveryStage() {
++    SummaryService probe = service(always("- a"));
++    ScriptedLlm llm = bigAnswers(probe, RU);
++
++    service(llm).summarize("я".repeat(probe.maxChunkChars(RU) * 16 + 1), RU);
++
++    assertThat(llm.calls).isNotEmpty();
++    assertThat(llm.calls)
++        .extracting(Call::system)
++        .allMatch(system ->
++            system.equals(Prompts.mapPrompt(RU))
++                || system.equals(Prompts.reduceRoundPrompt(RU))
++                || system.equals(Prompts.reduceFinalPrompt(RU)));
++    assertThat(llm.calls.get(llm.calls.size() - 1).system())
++        .isEqualTo(Prompts.reduceFinalPrompt(RU));
++    assertThat(llm.calls).anyMatch(c -> c.system().equals(Prompts.reduceRoundPrompt(RU)));
++    for (Call call : llm.calls) {
++      assertFits(call, NUM_CTX, RU);
++    }
++  }
++
++  @Test
++  void aNullLanguageIsRejected() {
++    assertThatThrownBy(() -> service(always("- a")).summarize("text", null))
++        .isInstanceOf(NullPointerException.class);
+   }
+ 
+   @Test
+   void theLongestOfTheFourPromptsDefinesTheBudget() {
+-    assertThat(promptTokens())
++    assertThat(promptTokens(EN))
+         .isEqualTo(
+             Math.max(
+-                TokenEstimator.estimate(Prompts.SHORT),
++                TokenEstimator.estimate(Prompts.shortPrompt(EN), EN),
+                 Math.max(
+-                    TokenEstimator.estimate(Prompts.MAP),
++                    TokenEstimator.estimate(Prompts.mapPrompt(EN), EN),
+                     Math.max(
+-                        TokenEstimator.estimate(Prompts.REDUCE_FINAL),
+-                        TokenEstimator.estimate(Prompts.REDUCE_ROUND)))));
+-    assertThat(Prompts.REDUCE_FINAL.length()).isGreaterThan(Prompts.REDUCE_ROUND.length());
+-    assertThat(Prompts.REDUCE_FINAL.length()).isGreaterThan(Prompts.MAP.length());
++                        TokenEstimator.estimate(Prompts.reduceFinalPrompt(EN), EN),
++                        TokenEstimator.estimate(Prompts.reduceRoundPrompt(EN), EN)))));
++    assertThat(Prompts.reduceFinalPrompt(EN).length())
++        .isGreaterThan(Prompts.reduceRoundPrompt(EN).length());
++    assertThat(Prompts.reduceFinalPrompt(EN).length())
++        .isGreaterThan(Prompts.mapPrompt(EN).length());
+   }
+ 
+   @Test
+@@ -114,14 +204,14 @@ class SummaryServiceTest {
+     SummaryService base = new SummaryService(always("- a"), config(8192));
+     SummaryService larger = new SummaryService(always("- a"), config(8192 + 100));
+ 
+-    assertThat(larger.maxChunkChars() - base.maxChunkChars()).isEqualTo(300);
++    assertThat(larger.maxChunkChars(EN) - base.maxChunkChars(EN)).isEqualTo(300);
+   }
+ 
+   @Test
+   void aContextBelowTheMinimumBudgetIsRejected() {
+-    int minimum = 2 * 1024 + 1024 + promptTokens() + 32;
++    int minimum = 2 * 1024 + 1024 + Math.max(promptTokens(EN), promptTokens(RU)) + 32;
+ 
+-    assertThat(new SummaryService(always("- a"), config(minimum)).partialMaxChars())
++    assertThat(new SummaryService(always("- a"), config(minimum)).partialMaxChars(EN))
+         .isGreaterThanOrEqualTo(1500);
+     assertThatThrownBy(() -> new SummaryService(always("- a"), config(minimum - 1)))
+         .isInstanceOf(IllegalArgumentException.class);
+@@ -139,14 +229,14 @@ class SummaryServiceTest {
+   void aHugeContextDoesNotOverflow() {
+     SummaryService huge = new SummaryService(always("- a"), config(Integer.MAX_VALUE / 4));
+ 
+-    assertThat(huge.maxChunkChars()).isPositive();
++    assertThat(huge.maxChunkChars(EN)).isPositive();
+   }
+ 
+   @Test
+   void aContextWhoseCharacterBudgetOverflowsAnIntIsRejected() {
+-    int largest = Integer.MAX_VALUE / 3 + 1024 + promptTokens() + 32;
++    int largest = Integer.MAX_VALUE / 3 + 1024 + promptTokens(EN) + 32;
+ 
+-    assertThat(new SummaryService(always("- a"), config(largest)).maxChunkChars()).isPositive();
++    assertThat(new SummaryService(always("- a"), config(largest)).maxChunkChars(EN)).isPositive();
+     assertThatThrownBy(() -> new SummaryService(always("- a"), config(largest + 1)))
+         .isInstanceOf(IllegalArgumentException.class)
+         .hasMessageContaining("too large");
+@@ -160,11 +250,11 @@ class SummaryServiceTest {
+   void aShortTranscriptIsOneRequest() {
+     ScriptedLlm llm = always("- Tuesday meeting\n- Budget");
+ 
+-    String summary = service(llm).summarize("  The budget meeting is on Tuesday.  \n");
++    String summary = service(llm).summarize("  The budget meeting is on Tuesday.  \n", EN);
+ 
+     assertThat(llm.calls).hasSize(1);
+     Call call = llm.calls.get(0);
+-    assertThat(call.system()).isEqualTo(Prompts.SHORT);
++    assertThat(call.system()).isEqualTo(Prompts.shortPrompt(EN));
+     assertThat(call.user()).isEqualTo("The budget meeting is on Tuesday.");
+     assertThat(call.maxOutputTokens()).isEqualTo(1024);
+     assertThat(summary).isEqualTo("• Tuesday meeting\n• Budget");
+@@ -174,9 +264,9 @@ class SummaryServiceTest {
+   void aTranscriptOfExactlyTheBudgetIsStillOneRequest() {
+     ScriptedLlm llm = always("- a");
+     SummaryService service = service(llm);
+-    String text = "a".repeat(service.maxChunkChars());
++    String text = "a".repeat(service.maxChunkChars(EN));
+ 
+-    service.summarize(text);
++    service.summarize(text, EN);
+ 
+     assertThat(llm.calls).hasSize(1);
+     assertThat(llm.calls.get(0).user()).isEqualTo(text);
+@@ -188,7 +278,7 @@ class SummaryServiceTest {
+     ScriptedLlm llm = always("- a");
+     SummaryService service = service(llm);
+ 
+-    service.summarize("a".repeat(service.maxChunkChars() - 1));
++    service.summarize("a".repeat(service.maxChunkChars(EN) - 1), EN);
+ 
+     assertThat(llm.calls).hasSize(1);
+   }
+@@ -197,15 +287,15 @@ class SummaryServiceTest {
+   void aTranscriptOneOverTheBudgetIsSplitAndReduced() {
+     ScriptedLlm llm = always("- a");
+     SummaryService service = service(llm);
+-    int max = service.maxChunkChars();
++    int max = service.maxChunkChars(EN);
+ 
+-    service.summarize("a".repeat(max + 1));
++    service.summarize("a".repeat(max + 1), EN);
+ 
+     assertThat(llm.calls).hasSize(3);
+-    assertThat(llm.calls.get(0).system()).isEqualTo(Prompts.MAP);
++    assertThat(llm.calls.get(0).system()).isEqualTo(Prompts.mapPrompt(EN));
+     assertThat(llm.calls.get(0).user()).isEqualTo("a".repeat(max));
+     assertThat(llm.calls.get(1).user()).isEqualTo("a");
+-    assertThat(llm.calls.get(2).system()).isEqualTo(Prompts.REDUCE_FINAL);
++    assertThat(llm.calls.get(2).system()).isEqualTo(Prompts.reduceFinalPrompt(EN));
+   }
+ 
+   @Test
+@@ -213,7 +303,7 @@ class SummaryServiceTest {
+     ScriptedLlm llm = always("- a");
+     SummaryService service = service(llm);
+ 
+-    service.summarize("  " + "a".repeat(service.maxChunkChars()) + "\n\n");
++    service.summarize("  " + "a".repeat(service.maxChunkChars(EN)) + "\n\n", EN);
+ 
+     assertThat(llm.calls).hasSize(1);
+   }
+@@ -225,18 +315,18 @@ class SummaryServiceTest {
+     ScriptedLlm llm =
+         new ScriptedLlm((i, s, u) -> valid(i < 3 ? "- part " + (i + 1) : "- final", s, u));
+     SummaryService service = service(llm);
+-    String text = words(service.maxChunkChars() * 5 / 2);
+-    List<String> chunks = TextChunker.split(text, service.maxChunkChars());
++    String text = words(service.maxChunkChars(EN) * 5 / 2);
++    List<String> chunks = TextChunker.split(text, service.maxChunkChars(EN));
+     assertThat(chunks).hasSize(3);
+ 
+-    String summary = service.summarize(text);
++    String summary = service.summarize(text, EN);
+ 
+     assertThat(llm.calls).hasSize(4);
+     for (int i = 0; i < 3; i++) {
+-      assertThat(llm.calls.get(i).system()).isEqualTo(Prompts.MAP);
++      assertThat(llm.calls.get(i).system()).isEqualTo(Prompts.mapPrompt(EN));
+       assertThat(llm.calls.get(i).user()).isEqualTo(chunks.get(i));
+     }
+-    assertThat(llm.calls.get(3).system()).isEqualTo(Prompts.REDUCE_FINAL);
++    assertThat(llm.calls.get(3).system()).isEqualTo(Prompts.reduceFinalPrompt(EN));
+     assertThat(llm.calls.get(3).user()).isEqualTo("- part 1\n\n- part 2\n\n- part 3");
+     assertThat(summary).isEqualTo("• final");
+     assertThat(llm.calls).allSatisfy(call -> assertThat(call.maxOutputTokens()).isEqualTo(1024));
+@@ -248,7 +338,7 @@ class SummaryServiceTest {
+     ScriptedLlm llm = new ScriptedLlm((i, s, u) -> valid(i < 2 ? "* mapped" : "* final", s, u));
+     SummaryService service = service(llm);
+ 
+-    String summary = service.summarize("a".repeat(service.maxChunkChars() + 1));
++    String summary = service.summarize("a".repeat(service.maxChunkChars(EN) + 1), EN);
+ 
+     assertThat(llm.calls.get(2).user()).isEqualTo("* mapped\n\n* mapped");
+     assertThat(summary).isEqualTo("• final");
+@@ -257,32 +347,33 @@ class SummaryServiceTest {
+   @Test
+   void partialsThatDoNotFitAreReducedInRoundsInOrder() {
+     SummaryService probe = service(always("- a"));
+-    int max = probe.maxChunkChars();
+-    int partialMax = probe.partialMaxChars();
++    int max = probe.maxChunkChars(EN);
++    int partialMax = probe.partialMaxChars(EN);
+     int chunks = 9;
+     String text = "a".repeat(max * (chunks - 1) + 1);
+     ScriptedLlm llm =
+         new ScriptedLlm((i, s, u) -> {
+-          if (s.equals(Prompts.MAP)) {
++          if (s.equals(Prompts.mapPrompt(EN))) {
+             return valid(i + "-" + "x".repeat(partialMax * 3), s, u);
+           }
+-          return valid(s.equals(Prompts.REDUCE_FINAL) ? "- final" : "- group " + i, s, u);
++          return valid(s.equals(Prompts.reduceFinalPrompt(EN)) ? "- final" : "- group " + i, s, u);
+         });
+ 
+-    String summary = service(llm).summarize(text);
++    String summary = service(llm).summarize(text, EN);
+ 
+     // 9 maps, groups of 4, 4 and 1, then one final reduction of the 3 group answers
+     assertThat(llm.calls).hasSize(9 + 3 + 1);
+     assertThat(llm.calls.subList(0, 9))
+-        .allSatisfy(c -> assertThat(c.system()).isEqualTo(Prompts.MAP));
++        .allSatisfy(c -> assertThat(c.system()).isEqualTo(Prompts.mapPrompt(EN)));
+     List<Call> round = llm.calls.subList(9, 12);
+-    assertThat(round).allSatisfy(c -> assertThat(c.system()).isEqualTo(Prompts.REDUCE_ROUND));
++    assertThat(round)
++        .allSatisfy(c -> assertThat(c.system()).isEqualTo(Prompts.reduceRoundPrompt(EN)));
+     assertThat(round.get(0).user()).startsWith("0-x").contains("\n\n1-x", "\n\n2-x", "\n\n3-x");
+     assertThat(round.get(1).user()).startsWith("4-x").contains("\n\n5-x", "\n\n6-x", "\n\n7-x");
+     assertThat(round.get(2).user()).startsWith("8-x").doesNotContain("\n\n");
+     assertThat(round.get(0).user().length()).isLessThanOrEqualTo(max);
+     assertThat(round.get(0).user().length()).isEqualTo(4 * partialMax + 6);
+-    assertThat(llm.calls.get(12).system()).isEqualTo(Prompts.REDUCE_FINAL);
++    assertThat(llm.calls.get(12).system()).isEqualTo(Prompts.reduceFinalPrompt(EN));
+     assertThat(llm.calls.get(12).user()).isEqualTo("- group 9\n\n- group 10\n\n- group 11");
+     assertThat(summary).isEqualTo("• final");
+     assertThat(llm.calls)
+@@ -293,22 +384,22 @@ class SummaryServiceTest {
+   @Test
+   void aGroupStartsANewOneWhenTheNextPartialWouldNotFit() {
+     SummaryService probe = service(always("- a"));
+-    int max = probe.maxChunkChars();
+-    int partialMax = probe.partialMaxChars();
++    int max = probe.maxChunkChars(EN);
++    int partialMax = probe.partialMaxChars(EN);
+     // partials of partialMax + 1 chars cannot be clipped, but 4 of them plus separators exceed max
+     String text = "a".repeat(max * 4 + 1);
+     ScriptedLlm llm =
+         new ScriptedLlm((i, s, u) -> {
+-          if (s.equals(Prompts.MAP)) {
++          if (s.equals(Prompts.mapPrompt(EN))) {
+             return valid("y".repeat(partialMax), s, u);
+           }
+           return valid("- ok", s, u);
+         });
+ 
+-    service(llm).summarize(text);
++    service(llm).summarize(text, EN);
+ 
+     List<Call> round =
+-        llm.calls.stream().filter(c -> c.system().equals(Prompts.REDUCE_ROUND)).toList();
++        llm.calls.stream().filter(c -> c.system().equals(Prompts.reduceRoundPrompt(EN))).toList();
+     assertThat(round).hasSize(2);
+     assertThat(round.get(0).user()).hasSize(4 * partialMax + 6);
+     assertThat(round.get(1).user()).hasSize(partialMax);
+@@ -317,13 +408,16 @@ class SummaryServiceTest {
+   @Test
+   void anOverlongAnswerIsClippedToTheBoundBeforeItIsUsed() {
+     SummaryService probe = service(always("- a"));
+-    int partialMax = probe.partialMaxChars();
++    int partialMax = probe.partialMaxChars(EN);
+     String line = "z".repeat(partialMax * 2 / 5);
+     ScriptedLlm llm =
+         new ScriptedLlm((i, s, u) ->
+-            valid(s.equals(Prompts.MAP) ? line + "\n" + line + "\n" + line : "- done", s, u));
++            valid(
++                s.equals(Prompts.mapPrompt(EN)) ? line + "\n" + line + "\n" + line : "- done",
++                s,
++                u));
+ 
+-    service(llm).summarize("a".repeat(probe.maxChunkChars() + 1));
++    service(llm).summarize("a".repeat(probe.maxChunkChars(EN) + 1), EN);
+ 
+     // three lines of two fifths of the bound: the third is dropped
+     assertThat(llm.calls.get(2).user()).isEqualTo(line + "\n" + line + "\n\n" + line + "\n" + line);
+@@ -331,9 +425,13 @@ class SummaryServiceTest {
+ 
+   /** Every map and round answer is as long as an intermediate answer may be. */
+   private static ScriptedLlm bigAnswers(SummaryService probe) {
+-    String big = "y".repeat(probe.partialMaxChars());
+-    return new ScriptedLlm(
+-        (i, s, u) -> valid(s.equals(Prompts.REDUCE_FINAL) ? "- final" : big, s, u));
++    return bigAnswers(probe, EN);
++  }
++
++  private static ScriptedLlm bigAnswers(SummaryService probe, Language language) {
++    String big = "y".repeat(probe.partialMaxChars(language));
++    return new ScriptedLlm((i, s, u) ->
++        valid(s.equals(Prompts.reduceFinalPrompt(language)) ? "- final" : big, s, u, language));
+   }
+ 
+   @Test
+@@ -341,11 +439,12 @@ class SummaryServiceTest {
+     SummaryService probe = service(always("- a"));
+     ScriptedLlm llm = bigAnswers(probe);
+ 
+-    String summary = service(llm).summarize("a".repeat(probe.maxChunkChars() * 16 + 1));
++    String summary = service(llm).summarize("a".repeat(probe.maxChunkChars(EN) * 16 + 1), EN);
+ 
+     // 17 maps, round one: 5 groups, round two: 2 groups, then the final reduction
+     assertThat(llm.calls).hasSize(17 + 5 + 2 + 1);
+-    assertThat(llm.calls.get(llm.calls.size() - 1).system()).isEqualTo(Prompts.REDUCE_FINAL);
++    assertThat(llm.calls.get(llm.calls.size() - 1).system())
++        .isEqualTo(Prompts.reduceFinalPrompt(EN));
+     assertThat(summary).isEqualTo("• final");
+     assertThat(llm.calls).allSatisfy(c -> assertFits(c, NUM_CTX));
+   }
+@@ -358,7 +457,7 @@ class SummaryServiceTest {
+     JobFailure failure =
+         failureOf(
+             new SummaryService(llm, config(NUM_CTX), 1),
+-            "a".repeat(probe.maxChunkChars() * 16 + 1));
++            "a".repeat(probe.maxChunkChars(EN) * 16 + 1));
+ 
+     assertThat(failure.kind()).isEqualTo(JobFailure.Kind.FAILED);
+     assertThat(failure.getMessage()).isEqualTo(FAILED_MESSAGE);
+@@ -374,7 +473,7 @@ class SummaryServiceTest {
+ 
+     String summary =
+         new SummaryService(llm, config(NUM_CTX), 1)
+-            .summarize("a".repeat(probe.maxChunkChars() * 4 + 1));
++            .summarize("a".repeat(probe.maxChunkChars(EN) * 4 + 1), EN);
+ 
+     // 5 maps, one round of 2 groups, then the final reduction
+     assertThat(llm.calls).hasSize(5 + 2 + 1);
+@@ -387,7 +486,8 @@ class SummaryServiceTest {
+   void aNullTranscriptIsAProgrammingError() {
+     ScriptedLlm llm = always("- a");
+ 
+-    assertThatThrownBy(() -> service(llm).summarize(null)).isInstanceOf(NullPointerException.class);
++    assertThatThrownBy(() -> service(llm).summarize(null, EN))
++        .isInstanceOf(NullPointerException.class);
+     assertThat(llm.calls).isEmpty();
+   }
+ 
+@@ -415,7 +515,7 @@ class SummaryServiceTest {
+   }
+ 
+   private static String threeChunks() {
+-    return "a".repeat(service(always("- a")).maxChunkChars() * 2 + 1);
++    return "a".repeat(service(always("- a")).maxChunkChars(EN) * 2 + 1);
+   }
+ 
+   @ParameterizedTest
+@@ -469,14 +569,14 @@ class SummaryServiceTest {
+   // ---- truncation check ----
+ 
+   private static long threshold(String system, String user) {
+-    long expected = TokenEstimator.requestEstimate(system, user);
++    long expected = TokenEstimator.requestEstimate(system, user, EN);
+     return (expected + 1) / 2;
+   }
+ 
+   @Test
+   void theShortPathRejectsOneBelowTheThresholdAndAcceptsTheThreshold() {
+     String text = "x".repeat(100);
+-    long threshold = threshold(Prompts.SHORT, text);
++    long threshold = threshold(Prompts.shortPrompt(EN), text);
+ 
+     ScriptedLlm below = new ScriptedLlm((i, s, u) -> new LlmReply("- a", threshold - 1));
+     JobFailure failure = failureOf(service(below), text);
+@@ -485,23 +585,23 @@ class SummaryServiceTest {
+     assertThat(failure.getCause()).isNull();
+ 
+     ScriptedLlm at = new ScriptedLlm((i, s, u) -> new LlmReply("- a", threshold));
+-    assertThat(service(at).summarize(text)).isEqualTo("• a");
++    assertThat(service(at).summarize(text, EN)).isEqualTo("• a");
+   }
+ 
+   @Test
+   void theThresholdRoundsUpForAnOddEstimate() {
+     // estimate(system) + estimate(user) + 32 is odd for this text, so ceil(expected / 2) matters
+     String text = "x".repeat(100);
+-    long expected = TokenEstimator.requestEstimate(Prompts.SHORT, text);
++    long expected = TokenEstimator.requestEstimate(Prompts.shortPrompt(EN), text, EN);
+     String odd = expected % 2 == 1 ? text : "x".repeat(103);
+-    long oddExpected = TokenEstimator.requestEstimate(Prompts.SHORT, odd);
++    long oddExpected = TokenEstimator.requestEstimate(Prompts.shortPrompt(EN), odd, EN);
+     assertThat(oddExpected % 2).isEqualTo(1);
+     long threshold = (oddExpected + 1) / 2;
+ 
+     ScriptedLlm at = new ScriptedLlm((i, s, u) -> new LlmReply("- a", threshold));
+     ScriptedLlm below = new ScriptedLlm((i, s, u) -> new LlmReply("- a", threshold - 1));
+ 
+-    assertThat(service(at).summarize(odd)).isEqualTo("• a");
++    assertThat(service(at).summarize(odd, EN)).isEqualTo("• a");
+     assertThat(failureOf(service(below), odd).kind()).isEqualTo(JobFailure.Kind.FAILED);
+   }
+ 
+@@ -519,7 +619,7 @@ class SummaryServiceTest {
+     String text = "word ".repeat(5400).strip();
+     ScriptedLlm llm = new ScriptedLlm((i, s, u) -> new LlmReply("- a", 4831));
+ 
+-    assertThat(service(llm).summarize(text)).isEqualTo("• a");
++    assertThat(service(llm).summarize(text, EN)).isEqualTo("• a");
+   }
+ 
+   @ParameterizedTest
+@@ -537,8 +637,8 @@ class SummaryServiceTest {
+   @Test
+   void aMapStageAcceptsItsThresholdAndRejectsOneBelow() {
+     String text = threeChunks();
+-    List<String> chunks = TextChunker.split(text, service(always("- a")).maxChunkChars());
+-    long threshold = threshold(Prompts.MAP, chunks.get(1));
++    List<String> chunks = TextChunker.split(text, service(always("- a")).maxChunkChars(EN));
++    long threshold = threshold(Prompts.mapPrompt(EN), chunks.get(1));
+ 
+     ScriptedLlm below =
+         new ScriptedLlm(
+@@ -547,13 +647,13 @@ class SummaryServiceTest {
+         new ScriptedLlm((i, s, u) -> i == 1 ? new LlmReply("- a", threshold) : valid("- a", s, u));
+ 
+     assertThat(failureOf(service(below), text).kind()).isEqualTo(JobFailure.Kind.FAILED);
+-    assertThat(service(at).summarize(text)).isEqualTo("• a");
++    assertThat(service(at).summarize(text, EN)).isEqualTo("• a");
+   }
+ 
+   @Test
+   void aReductionStageAcceptsItsThresholdAndRejectsOneBelow() {
+     String joined = "- a\n\n- a\n\n- a";
+-    long threshold = threshold(Prompts.REDUCE_FINAL, joined);
++    long threshold = threshold(Prompts.reduceFinalPrompt(EN), joined);
+     String text = threeChunks();
+ 
+     ScriptedLlm below =
+@@ -563,7 +663,7 @@ class SummaryServiceTest {
+         new ScriptedLlm((i, s, u) -> i == 3 ? new LlmReply("- a", threshold) : valid("- a", s, u));
+ 
+     assertThat(failureOf(service(below), text).kind()).isEqualTo(JobFailure.Kind.FAILED);
+-    assertThat(service(at).summarize(text)).isEqualTo("• a");
++    assertThat(service(at).summarize(text, EN)).isEqualTo("• a");
+   }
+ 
+   // ---- output ----
+@@ -579,6 +679,6 @@ class SummaryServiceTest {
+   void theFinalAnswerIsCappedAt1500() {
+     ScriptedLlm llm = always("x".repeat(1800));
+ 
+-    assertThat(service(llm).summarize("hello")).hasSize(1500).endsWith("…");
++    assertThat(service(llm).summarize("hello", EN)).hasSize(1500).endsWith("…");
+   }
+ }
+diff --git a/src/test/java/com/video2podcast/summary/TokenEstimatorTest.java b/src/test/java/com/video2podcast/summary/TokenEstimatorTest.java
+index 0ad6a23..60b87ff 100644
+--- a/src/test/java/com/video2podcast/summary/TokenEstimatorTest.java
++++ b/src/test/java/com/video2podcast/summary/TokenEstimatorTest.java
+@@ -1,5 +1,7 @@
+ package com.video2podcast.summary;
+ 
++import static com.video2podcast.job.Language.EN;
++import static com.video2podcast.job.Language.RU;
+ import static org.assertj.core.api.Assertions.assertThat;
+ 
+ import org.junit.jupiter.api.Test;
+@@ -8,21 +10,33 @@ class TokenEstimatorTest {
+ 
+   @Test
+   void estimateIsLengthOverThreeRoundedUp() {
+-    assertThat(TokenEstimator.estimate("")).isZero();
+-    assertThat(TokenEstimator.estimate("a")).isEqualTo(1);
+-    assertThat(TokenEstimator.estimate("abc")).isEqualTo(1);
+-    assertThat(TokenEstimator.estimate("abcd")).isEqualTo(2);
+-    assertThat(TokenEstimator.estimate("a".repeat(300))).isEqualTo(100);
++    assertThat(TokenEstimator.estimate("", EN)).isZero();
++    assertThat(TokenEstimator.estimate("a", EN)).isEqualTo(1);
++    assertThat(TokenEstimator.estimate("abc", EN)).isEqualTo(1);
++    assertThat(TokenEstimator.estimate("abcd", EN)).isEqualTo(2);
++    assertThat(TokenEstimator.estimate("a".repeat(300), EN)).isEqualTo(100);
++  }
++
++  @Test
++  void russianCountsTwoCharactersPerToken() {
++    assertThat(TokenEstimator.charsPerToken(RU)).isEqualTo(2);
++    assertThat(TokenEstimator.charsPerToken(EN)).isEqualTo(3);
++    assertThat(TokenEstimator.estimate("", RU)).isZero();
++    assertThat(TokenEstimator.estimate("я", RU)).isEqualTo(1);
++    assertThat(TokenEstimator.estimate("яя", RU)).isEqualTo(1);
++    assertThat(TokenEstimator.estimate("яяя", RU)).isEqualTo(2);
++    assertThat(TokenEstimator.requestEstimate("я".repeat(30), "я".repeat(31), RU))
++        .isEqualTo(15 + 16 + 32);
+   }
+ 
+   @Test
+   void aSupplementaryCharacterCountsAsTwoUtf16Units() {
+-    assertThat(TokenEstimator.estimate("😀😀")).isEqualTo(2);
++    assertThat(TokenEstimator.estimate("😀😀", EN)).isEqualTo(2);
+   }
+ 
+   @Test
+   void requestEstimateAddsBothTextsAndTheTemplateOverhead() {
+-    assertThat(TokenEstimator.requestEstimate("a".repeat(30), "b".repeat(31)))
++    assertThat(TokenEstimator.requestEstimate("a".repeat(30), "b".repeat(31), EN))
+         .isEqualTo(10 + 11 + 32);
+   }
+ }
+diff --git a/src/test/java/com/video2podcast/transcript/TranscriptionAssembledTest.java b/src/test/java/com/video2podcast/transcript/TranscriptionAssembledTest.java
+index e610d92..04fd528 100644
+--- a/src/test/java/com/video2podcast/transcript/TranscriptionAssembledTest.java
++++ b/src/test/java/com/video2podcast/transcript/TranscriptionAssembledTest.java
+@@ -69,12 +69,12 @@ class TranscriptionAssembledTest {
+             .willReturn(
+                 aResponse()
+                     .withStatus(200)
+-                    .withBody("{\"text\":\"" + text + "\"}")
++                    .withBody("{\"text\":\"" + text + "\",\"language\":\"english\"}")
+                     .withFixedDelay(delayMillis)));
+   }
+ 
+   private Path run(TranscriptionClient client, List<Path> chunks) {
+-    return client.transcribe(jobDir, chunks, (n, t) -> progress.add(n + "/" + t));
++    return client.transcribe(jobDir, chunks, (n, t) -> progress.add(n + "/" + t)).transcript();
+   }
+ 
+   /** The chunk file names in the order the server received them. */
+@@ -129,7 +129,10 @@ class TranscriptionAssembledTest {
+             .whenScenarioStateIs("retry")
+             .withRequestBody(containing("filename=\"chunk-000.wav\""))
+             .willReturn(
+-                aResponse().withStatus(200).withBody("{\"text\":\"First\"}").withFixedDelay(700)));
++                aResponse()
++                    .withStatus(200)
++                    .withBody("{\"text\":\"First\",\"language\":\"english\"}")
++                    .withFixedDelay(700)));
+     answer("chunk-001.wav", "Last", 700);
+     Duration timeout = Duration.ofSeconds(1);
+ 
+diff --git a/src/test/java/com/video2podcast/transcript/TranscriptionClientTest.java b/src/test/java/com/video2podcast/transcript/TranscriptionClientTest.java
+index aad4bf6..701c622 100644
+--- a/src/test/java/com/video2podcast/transcript/TranscriptionClientTest.java
++++ b/src/test/java/com/video2podcast/transcript/TranscriptionClientTest.java
+@@ -3,6 +3,8 @@ package com.video2podcast.transcript;
+ import static org.assertj.core.api.Assertions.assertThat;
+ import static org.assertj.core.api.Assertions.assertThatThrownBy;
+ import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.ArgumentMatchers.anyString;
++import static org.mockito.ArgumentMatchers.eq;
+ import static org.mockito.Mockito.mock;
+ import static org.mockito.Mockito.never;
+ import static org.mockito.Mockito.times;
+@@ -10,6 +12,8 @@ import static org.mockito.Mockito.verify;
+ import static org.mockito.Mockito.when;
+ 
+ import com.video2podcast.job.JobFailure;
++import com.video2podcast.job.Language;
++import com.video2podcast.transcript.TranscriptionClient.Transcription;
+ import java.io.IOException;
+ import java.nio.charset.StandardCharsets;
+ import java.nio.file.Files;
+@@ -44,7 +48,14 @@ class TranscriptionClientTest {
+   }
+ 
+   private Path run(Path... chunks) {
+-    return client.transcribe(jobDir, List.of(chunks), (n, t) -> events.add(n + "/" + t));
++    return client
++        .transcribe(jobDir, List.of(chunks), (n, t) -> events.add(n + "/" + t))
++        .transcript();
++  }
++
++  /** An answer of Whisper as the client delivers it: detected English when there is text. */
++  private static WhisperResult r(String text) {
++    return new WhisperResult(text, TranscriptMerger.normalize(text).isEmpty() ? null : "en");
+   }
+ 
+   private static WhisperException connection() {
+@@ -57,9 +68,9 @@ class TranscriptionClientTest {
+ 
+   @Test
+   void writesMergedTranscriptAndRemovesTemporaryAudio() throws Exception {
+-    when(whisper.transcribe(c0)).thenReturn(" First\n");
+-    when(whisper.transcribe(c1)).thenReturn("   ");
+-    when(whisper.transcribe(c2)).thenReturn("Last ");
++    when(whisper.transcribe(eq(c0), anyString())).thenReturn(r(" First\n"));
++    when(whisper.transcribe(eq(c1), anyString())).thenReturn(r("   "));
++    when(whisper.transcribe(eq(c2), anyString())).thenReturn(r("Last "));
+ 
+     Path transcript = run(c0, c1, c2);
+ 
+@@ -69,45 +80,45 @@ class TranscriptionClientTest {
+     assertThat(jobDir.resolve("audio.wav")).doesNotExist();
+     assertThat(jobDir.resolve("chunks")).doesNotExist();
+     assertThat(jobDir.resolve("source.m4a")).exists();
+-    verify(whisper, times(1)).transcribe(c1);
++    verify(whisper, times(1)).transcribe(eq(c1), anyString());
+   }
+ 
+   @Test
+   void retriesOnceAndKeepsGoing() throws Exception {
+-    when(whisper.transcribe(c0)).thenThrow(other()).thenReturn("A");
+-    when(whisper.transcribe(c1)).thenReturn("B");
++    when(whisper.transcribe(eq(c0), anyString())).thenThrow(other()).thenReturn(r("A"));
++    when(whisper.transcribe(eq(c1), anyString())).thenReturn(r("B"));
+ 
+     run(c0, c1);
+ 
+     assertThat(Files.readString(jobDir.resolve("transcript.txt"))).isEqualTo("A B\n");
+     assertThat(events).containsExactly("1/2", "2/2");
+     InOrder order = Mockito.inOrder(whisper);
+-    order.verify(whisper, times(2)).transcribe(c0);
+-    order.verify(whisper).transcribe(c1);
++    order.verify(whisper, times(2)).transcribe(eq(c0), anyString());
++    order.verify(whisper).transcribe(eq(c1), anyString());
+   }
+ 
+   @Test
+   void aConnectionErrorThenSuccessKeepsEarlierChunksAndOrderWithOneProgressEventPerChunk()
+       throws Exception {
+-    when(whisper.transcribe(c0)).thenReturn("A");
+-    when(whisper.transcribe(c1)).thenThrow(connection()).thenReturn("B");
+-    when(whisper.transcribe(c2)).thenReturn("C");
++    when(whisper.transcribe(eq(c0), anyString())).thenReturn(r("A"));
++    when(whisper.transcribe(eq(c1), anyString())).thenThrow(connection()).thenReturn(r("B"));
++    when(whisper.transcribe(eq(c2), anyString())).thenReturn(r("C"));
+ 
+     run(c0, c1, c2);
+ 
+     assertThat(Files.readString(jobDir.resolve("transcript.txt"))).isEqualTo("A B C\n");
+     assertThat(events).containsExactly("1/3", "2/3", "3/3");
+     InOrder order = Mockito.inOrder(whisper);
+-    order.verify(whisper).transcribe(c0);
+-    order.verify(whisper, times(2)).transcribe(c1);
+-    order.verify(whisper).transcribe(c2);
++    order.verify(whisper).transcribe(eq(c0), anyString());
++    order.verify(whisper, times(2)).transcribe(eq(c1), anyString());
++    order.verify(whisper).transcribe(eq(c2), anyString());
+     Mockito.verifyNoMoreInteractions(whisper);
+   }
+ 
+   @Test
+   void emptyAnswerOnRetryIsValid() throws Exception {
+-    when(whisper.transcribe(c0)).thenThrow(other()).thenReturn(" ");
+-    when(whisper.transcribe(c1)).thenReturn("Speech");
++    when(whisper.transcribe(eq(c0), anyString())).thenThrow(other()).thenReturn(r(" "));
++    when(whisper.transcribe(eq(c1), anyString())).thenReturn(r("Speech"));
+ 
+     run(c0, c1);
+ 
+@@ -116,8 +127,8 @@ class TranscriptionClientTest {
+ 
+   @Test
+   void secondFailureDecidesTheKind() throws Exception {
+-    when(whisper.transcribe(c0)).thenReturn("ok");
+-    when(whisper.transcribe(c1)).thenThrow(connection(), other());
++    when(whisper.transcribe(eq(c0), anyString())).thenReturn(r("ok"));
++    when(whisper.transcribe(eq(c1), anyString())).thenThrow(connection(), other());
+ 
+     assertThatThrownBy(() -> run(c0, c1, c2))
+         .isInstanceOfSatisfying(
+@@ -126,14 +137,14 @@ class TranscriptionClientTest {
+               assertThat(f.kind()).isEqualTo(JobFailure.Kind.FAILED);
+               assertThat(f).hasMessage("Transcription failed. Please try again later.");
+             });
+-    verify(whisper, never()).transcribe(c2);
++    verify(whisper, never()).transcribe(eq(c2), anyString());
+     assertThat(events).containsExactly("1/3", "2/3");
+     assertNothingChanged();
+   }
+ 
+   @Test
+   void connectionFailureOnRetryIsServiceUnreachable() throws Exception {
+-    when(whisper.transcribe(c0)).thenThrow(other(), connection());
++    when(whisper.transcribe(eq(c0), anyString())).thenThrow(other(), connection());
+ 
+     assertThatThrownBy(() -> run(c0, c1))
+         .isInstanceOfSatisfying(
+@@ -142,13 +153,13 @@ class TranscriptionClientTest {
+               assertThat(f.kind()).isEqualTo(JobFailure.Kind.SERVICE_UNREACHABLE);
+               assertThat(f).hasMessage("The transcription server is unreachable.");
+             });
+-    verify(whisper, times(2)).transcribe(any());
++    verify(whisper, times(2)).transcribe(any(), anyString());
+     assertNothingChanged();
+   }
+ 
+   @Test
+   void entirelyEmptySpeechIsNoSpeech() throws Exception {
+-    when(whisper.transcribe(any())).thenReturn("", " \n");
++    when(whisper.transcribe(any(), anyString())).thenReturn(r(""), r(" \n"));
+ 
+     assertThatThrownBy(() -> run(c0, c1))
+         .isInstanceOfSatisfying(
+@@ -193,19 +204,19 @@ class TranscriptionClientTest {
+ 
+   @Test
+   void progressComesBeforeEachFirstSendButNotBeforeTheRetry() throws Exception {
+-    when(whisper.transcribe(c0))
++    when(whisper.transcribe(eq(c0), anyString()))
+         .thenAnswer(inv -> {
+           events.add("send 0");
+           throw other();
+         })
+         .thenAnswer(inv -> {
+           events.add("retry 0");
+-          return "A";
++          return r("A");
+         });
+-    when(whisper.transcribe(c1))
++    when(whisper.transcribe(eq(c1), anyString()))
+         .thenAnswer(inv -> {
+           events.add("send 1");
+-          return "B";
++          return r("B");
+         });
+ 
+     run(c0, c1);
+@@ -216,19 +227,19 @@ class TranscriptionClientTest {
+   @Test
+   void successReplacesAnExistingTranscript() throws Exception {
+     Files.writeString(jobDir.resolve("transcript.txt"), "Old text\n");
+-    when(whisper.transcribe(c0)).thenReturn("New text");
++    when(whisper.transcribe(eq(c0), anyString())).thenReturn(r("New text"));
+ 
+     run(c0);
+ 
+     assertThat(Files.readString(jobDir.resolve("transcript.txt"))).isEqualTo("New text\n");
+-    verify(whisper, times(1)).transcribe(c0);
++    verify(whisper, times(1)).transcribe(eq(c0), anyString());
+   }
+ 
+   @Test
+   void aChunkFailureLeavesAnExistingTranscriptUntouched() throws Exception {
+     byte[] old = "Old text\n".getBytes(StandardCharsets.UTF_8);
+     Files.write(jobDir.resolve("transcript.txt"), old);
+-    when(whisper.transcribe(c0)).thenThrow(other(), other());
++    when(whisper.transcribe(eq(c0), anyString())).thenThrow(other(), other());
+ 
+     assertThatThrownBy(() -> run(c0)).isInstanceOf(JobFailure.class);
+ 
+@@ -240,7 +251,7 @@ class TranscriptionClientTest {
+   void noSpeechLeavesAnExistingTranscriptUntouched() throws Exception {
+     byte[] old = "Old text\n".getBytes(StandardCharsets.UTF_8);
+     Files.write(jobDir.resolve("transcript.txt"), old);
+-    when(whisper.transcribe(c0)).thenReturn(" ");
++    when(whisper.transcribe(eq(c0), anyString())).thenReturn(r(" "));
+ 
+     assertThatThrownBy(() -> run(c0))
+         .isInstanceOfSatisfying(
+@@ -252,7 +263,7 @@ class TranscriptionClientTest {
+ 
+   @Test
+   void failedWriteIsFailedAndDeletesNothing() throws Exception {
+-    when(whisper.transcribe(any())).thenReturn("text");
++    when(whisper.transcribe(any(), anyString())).thenReturn(r("text"));
+     Files.createDirectory(jobDir.resolve("transcript.txt"));
+     Files.writeString(jobDir.resolve("transcript.txt").resolve("x"), "x");
+ 
+@@ -265,7 +276,7 @@ class TranscriptionClientTest {
+ 
+   @Test
+   void deletionProblemsDoNotFailTheTranscription() throws Exception {
+-    when(whisper.transcribe(any())).thenReturn("text");
++    when(whisper.transcribe(any(), anyString())).thenReturn(r("text"));
+     Files.delete(c1);
+     Files.delete(c2);
+     Files.delete(c0);
+@@ -284,8 +295,8 @@ class TranscriptionClientTest {
+   @Test
+   void nothingIsPublishedOrChangedWhileALaterAnswerIsPending() throws Exception {
+     byte[] source = Files.readAllBytes(jobDir.resolve("source.m4a"));
+-    when(whisper.transcribe(c0)).thenReturn("First");
+-    when(whisper.transcribe(c1))
++    when(whisper.transcribe(eq(c0), anyString())).thenReturn(r("First"));
++    when(whisper.transcribe(eq(c1), anyString()))
+         .thenAnswer(inv -> {
+           assertThat(jobDir.resolve("transcript.txt")).doesNotExist();
+           assertThat(jobDir.resolve("audio.wav")).hasContent("wav");
+@@ -293,7 +304,7 @@ class TranscriptionClientTest {
+           assertThat(c1).hasContent("1");
+           assertThat(Files.readAllBytes(jobDir.resolve("source.m4a"))).isEqualTo(source);
+           events.add("held");
+-          return "Second";
++          return r("Second");
+         });
+ 
+     run(c0, c1);
+@@ -308,7 +319,7 @@ class TranscriptionClientTest {
+     Files.write(jobDir.resolve("transcript.txt"), old);
+     Path tmp = Files.createDirectory(jobDir.resolve("transcript.txt.tmp"));
+     Files.writeString(tmp.resolve("blocker"), "x");
+-    when(whisper.transcribe(c0)).thenReturn("New text");
++    when(whisper.transcribe(eq(c0), anyString())).thenReturn(r("New text"));
+ 
+     assertThatThrownBy(() -> run(c0))
+         .isInstanceOfSatisfying(
+@@ -334,7 +345,7 @@ class TranscriptionClientTest {
+     Files.delete(jobDir.resolve("audio.wav"));
+     Path audio = Files.createDirectory(jobDir.resolve("audio.wav"));
+     Files.writeString(audio.resolve("blocker"), "x");
+-    when(whisper.transcribe(any())).thenReturn("secret speech");
++    when(whisper.transcribe(any(), anyString())).thenReturn(r("secret speech"));
+     ch.qos.logback.classic.Logger logger =
+         (ch.qos.logback.classic.Logger)
+             org.slf4j.LoggerFactory.getLogger(TranscriptionClient.class);
+@@ -373,7 +384,7 @@ class TranscriptionClientTest {
+ 
+   @Test
+   void missingChunksDirectoryIsOnlyLogged() throws Exception {
+-    when(whisper.transcribe(any())).thenReturn("text");
++    when(whisper.transcribe(any(), anyString())).thenReturn(r("text"));
+     Path loose = Files.writeString(jobDir.resolve("loose.wav"), "x");
+     Files.delete(c0);
+     Files.delete(c1);
+@@ -394,4 +405,113 @@ class TranscriptionClientTest {
+     assertThat(c2).exists();
+     assertThat(jobDir.resolve("source.m4a")).exists();
+   }
++
++  // ---- language ----
++
++  private static WhisperResult ru(String text) {
++    return new WhisperResult(text, TranscriptMerger.normalize(text).isEmpty() ? null : "ru");
++  }
++
++  private Transcription runFull(Path... chunks) {
++    return client.transcribe(jobDir, List.of(chunks), (n, t) -> events.add(n + "/" + t));
++  }
++
++  @Test
++  void theFirstChunkIsDetectedAndTheRestArePinned() throws Exception {
++    when(whisper.transcribe(eq(c0), anyString())).thenReturn(ru("Первая"));
++    when(whisper.transcribe(eq(c1), anyString())).thenReturn(new WhisperResult("Вторая", null));
++    when(whisper.transcribe(eq(c2), anyString())).thenReturn(new WhisperResult("Третья", null));
++
++    Transcription result = runFull(c0, c1, c2);
++
++    assertThat(result.language()).isEqualTo(Language.RU);
++    assertThat(result.transcript()).isEqualTo(jobDir.resolve("transcript.txt"));
++    assertThat(jobDir.resolve("transcript.txt")).hasContent("Первая Вторая Третья\n");
++    verify(whisper).transcribe(c0, "auto");
++    verify(whisper).transcribe(c1, "ru");
++    verify(whisper).transcribe(c2, "ru");
++  }
++
++  @Test
++  void englishIsSelectedAndPinned() throws Exception {
++    when(whisper.transcribe(eq(c0), anyString())).thenReturn(r("One"));
++    when(whisper.transcribe(eq(c1), anyString())).thenReturn(new WhisperResult("Two", null));
++
++    Transcription result = runFull(c0, c1);
++
++    assertThat(result.language()).isEqualTo(Language.EN);
++    verify(whisper).transcribe(c1, "en");
++  }
++
++  @Test
++  void aLaterAnswerCannotChangeTheSelectedLanguage() throws Exception {
++    when(whisper.transcribe(eq(c0), anyString())).thenReturn(ru("Первая"));
++    when(whisper.transcribe(eq(c1), anyString())).thenReturn(new WhisperResult("Two", "de"));
++    when(whisper.transcribe(eq(c2), anyString())).thenReturn(new WhisperResult("Три", "en"));
++
++    Transcription result = runFull(c0, c1, c2);
++
++    assertThat(result.language()).isEqualTo(Language.RU);
++    verify(whisper).transcribe(c2, "ru");
++  }
++
++  @Test
++  void aSilentStartStaysInDetectMode() throws Exception {
++    when(whisper.transcribe(eq(c0), anyString())).thenReturn(new WhisperResult("  ", null));
++    when(whisper.transcribe(eq(c1), anyString())).thenReturn(ru("Речь"));
++    when(whisper.transcribe(eq(c2), anyString())).thenReturn(new WhisperResult("Конец", null));
++
++    Transcription result = runFull(c0, c1, c2);
++
++    assertThat(result.language()).isEqualTo(Language.RU);
++    verify(whisper).transcribe(c0, "auto");
++    verify(whisper).transcribe(c1, "auto");
++    verify(whisper).transcribe(c2, "ru");
++    assertThat(jobDir.resolve("transcript.txt")).hasContent("Речь Конец\n");
++  }
++
++  @Test
++  void aLanguageOtherThanEnglishAndRussianIsRefusedAtOnce() throws Exception {
++    when(whisper.transcribe(eq(c0), anyString())).thenReturn(new WhisperResult("Rede", "de"));
++
++    assertThatThrownBy(() -> runFull(c0, c1, c2))
++        .isInstanceOfSatisfying(
++            JobFailure.class,
++            f -> {
++              assertThat(f.kind()).isEqualTo(JobFailure.Kind.UNSUPPORTED_LANGUAGE);
++              assertThat(f.getMessage())
++                  .isEqualTo(
++                      "Only English and Russian videos are supported. Detected language: de.");
++            });
++
++    verify(whisper, never()).transcribe(eq(c1), anyString());
++    verify(whisper, never()).transcribe(eq(c2), anyString());
++    verify(whisper, times(1)).transcribe(any(), anyString());
++    assertThat(jobDir.resolve("transcript.txt")).doesNotExist();
++    assertThat(events).containsExactly("1/3");
++  }
++
++  @Test
++  void aRefusalAfterASilentStartComesFromTheFirstChunkWithText() throws Exception {
++    when(whisper.transcribe(eq(c0), anyString())).thenReturn(new WhisperResult("", null));
++    when(whisper.transcribe(eq(c1), anyString())).thenReturn(new WhisperResult("Rede", "es"));
++
++    assertThatThrownBy(() -> runFull(c0, c1, c2))
++        .isInstanceOfSatisfying(
++            JobFailure.class, f -> assertThat(f.getMessage()).endsWith("Detected language: es."));
++    verify(whisper, never()).transcribe(eq(c2), anyString());
++  }
++
++  @Test
++  void aFailedDetectionChunkIsRetriedInDetectMode() throws Exception {
++    when(whisper.transcribe(eq(c0), anyString())).thenThrow(other()).thenReturn(ru("Речь"));
++    when(whisper.transcribe(eq(c1), anyString()))
++        .thenThrow(other())
++        .thenReturn(new WhisperResult("Две", null));
++
++    runFull(c0, c1);
++
++    verify(whisper, times(2)).transcribe(c0, "auto");
++    verify(whisper, times(2)).transcribe(c1, "ru");
++  }
+ }
+diff --git a/src/test/java/com/video2podcast/transcript/WhisperClientTest.java b/src/test/java/com/video2podcast/transcript/WhisperClientTest.java
+index 22a234b..a558904 100644
+--- a/src/test/java/com/video2podcast/transcript/WhisperClientTest.java
++++ b/src/test/java/com/video2podcast/transcript/WhisperClientTest.java
+@@ -67,7 +67,7 @@ class WhisperClientTest {
+   }
+ 
+   private WhisperException failure() {
+-    return catchWhisper(() -> client().transcribe(chunk));
++    return catchWhisper(() -> client().transcribe(chunk, "en"));
+   }
+ 
+   private static WhisperException catchWhisper(ThrowingRun run) {
+@@ -103,7 +103,7 @@ class WhisperClientTest {
+         new WhisperClient(
+             new AppProperties.Whisper("http://localhost:1", Duration.ofSeconds(5)), http);
+ 
+-    WhisperException e = catchWhisper(() -> whisper.transcribe(chunk));
++    WhisperException e = catchWhisper(() -> whisper.transcribe(chunk, "en"));
+ 
+     assertThat(e.isConnection()).isTrue();
+   }
+@@ -128,7 +128,7 @@ class WhisperClientTest {
+   void sendsTheFourPartsAndReturnsRawText() throws Exception {
+     stub(200, fixture("whisper-inference-ok.json"));
+ 
+-    String text = client().transcribe(chunk);
++    String text = client().transcribe(chunk, "en").text();
+ 
+     assertThat(text)
+         .isEqualTo(
+@@ -156,13 +156,123 @@ class WhisperClientTest {
+         .contains("\r\n\r\njson\r\n")
+         .contains("\r\n\r\nen\r\n")
+         .contains("\r\n\r\n0.0\r\n");
++    assertThat(field(body, "response_format")).isEqualTo("json");
++    assertThat(field(body, "language")).isEqualTo("en");
++    assertThat(field(body, "translate")).isEqualTo("false");
++    assertThat(field(body, "detect_language")).isEqualTo("false");
++    assertThat(field(body, "temperature")).isEqualTo("0.0");
++  }
++
++  private String sentBody() {
++    LoggedRequest request = server.getAllServeEvents().get(0).getRequest();
++    return new String(request.getBody(), StandardCharsets.ISO_8859_1);
++  }
++
++  private static String field(String body, String name) {
++    String head = "name=\"" + name + "\"\r\n\r\n";
++    int start = body.indexOf(head) + head.length();
++    return body.substring(start, body.indexOf("\r\n", start));
++  }
++
++  @Test
++  void detectModeAsksForVerboseJsonAndReadsTheLanguage() throws Exception {
++    stub(200, "{\"text\":\" Привет \",\"language\":\"russian\",\"segments\":[]}");
++
++    WhisperResult result = client().transcribe(chunk, "auto");
++
++    assertThat(result.text()).isEqualTo(" Привет ");
++    assertThat(result.language()).isEqualTo("ru");
++    String body = sentBody();
++    assertThat(field(body, "response_format")).isEqualTo("verbose_json");
++    assertThat(field(body, "language")).isEqualTo("auto");
++    assertThat(field(body, "translate")).isEqualTo("false");
++    assertThat(field(body, "detect_language")).isEqualTo("false");
++    assertThat(field(body, "temperature")).isEqualTo("0.0");
++  }
++
++  @Test
++  void pinnedModeIgnoresTheLanguageOfTheAnswer() throws Exception {
++    stub(200, "{\"text\":\"Привет\",\"language\":\"german\"}");
++
++    WhisperResult result = client().transcribe(chunk, "ru");
++
++    assertThat(result).isEqualTo(new WhisperResult("Привет", null));
++    assertThat(field(sentBody(), "language")).isEqualTo("ru");
++    assertThat(field(sentBody(), "response_format")).isEqualTo("json");
++  }
++
++  @Test
++  void detectModeNormalizesNamesAndCodes() throws Exception {
++    stub(200, "{\"text\":\"x\",\"language\":\" \\tRuSsIaN\\n \"}");
++    assertThat(client().transcribe(chunk, "auto").language()).isEqualTo("ru");
++    server.resetAll();
++    stub(200, "{\"text\":\"x\",\"language\":\"de\"}");
++    assertThat(client().transcribe(chunk, "auto").language()).isEqualTo("de");
++    server.resetAll();
++    stub(200, "{\"text\":\"x\",\"language\":\"klingon\"}");
++    assertThat(client().transcribe(chunk, "auto").language()).isEqualTo("unknown");
++  }
++
++  @Test
++  void detectModeWithoutTextDoesNotNeedALanguage() throws Exception {
++    for (String body :
++        List.of(
++            "{\"text\":\"\"}",
++            "{\"text\":\" \\t \",\"language\":null}",
++            "{\"text\":\"\\u00a0\",\"language\":42}")) {
++      server.resetAll();
++      stub(200, body);
++
++      WhisperResult result = client().transcribe(chunk, "auto");
++
++      assertThat(result.language()).isNull();
++    }
++  }
++
++  @Test
++  void detectModeWithTextButUnusableLanguageIsABrokenAnswer() {
++    for (String language : List.of("", "null", "42", "true", "[]", "{}", "\"\"", "\" \\t\"")) {
++      server.resetAll();
++      String json =
++          language.isEmpty()
++              ? "{\"text\":\"Речь.\"}"
++              : "{\"text\":\"Речь.\",\"language\":" + language + "}";
++      stub(200, json);
++
++      assertThatThrownBy(() -> client().transcribe(chunk, "auto"))
++          .isInstanceOfSatisfying(
++              WhisperException.class,
++              e -> {
++                assertThat(e.isConnection()).isFalse();
++                assertThat(e.getMessage()).isEqualTo("Whisper answer has no language");
++              });
++    }
++  }
++
++  @Test
++  void aNonBreakingSpaceLanguageIsAnUnknownLanguageNotABrokenAnswer() throws Exception {
++    stub(200, "{\"text\":\"Речь.\",\"language\":\"\\u00a0\"}");
++
++    assertThat(client().transcribe(chunk, "auto").language()).isEqualTo("unknown");
++  }
++
++  @Test
++  void onlyAutoAndSupportedCodesAreAccepted() {
++    assertThatThrownBy(() -> client().transcribe(chunk, "de"))
++        .isInstanceOf(IllegalArgumentException.class);
++    assertThatThrownBy(() -> client().transcribe(chunk, ""))
++        .isInstanceOf(IllegalArgumentException.class);
++    assertThatThrownBy(() -> client().transcribe(chunk, null))
++        .isInstanceOf(NullPointerException.class);
++    assertThat(server.getAllServeEvents()).isEmpty();
+   }
+ 
+   @Test
+   void trailingSlashInBaseUrlIsDropped() throws Exception {
+     stub(200, "{\"text\":\"\"}");
+ 
+-    assertThat(client(server.baseUrl() + "/", Duration.ofSeconds(5)).transcribe(chunk)).isEmpty();
++    assertThat(client(server.baseUrl() + "/", Duration.ofSeconds(5)).transcribe(chunk, "en").text())
++        .isEmpty();
+     server.verify(1, postRequestedFor(urlEqualTo("/inference")));
+   }
+ 
+@@ -214,7 +324,8 @@ class WhisperClientTest {
+             .willReturn(aResponse().withStatus(200).withBody(OK).withFixedDelay(2000)));
+ 
+     WhisperException e =
+-        catchWhisper(() -> client(server.baseUrl(), Duration.ofMillis(200)).transcribe(chunk));
++        catchWhisper(
++            () -> client(server.baseUrl(), Duration.ofMillis(200)).transcribe(chunk, "en"));
+ 
+     assertThat(e.isConnection()).isFalse();
+   }
+@@ -236,8 +347,8 @@ class WhisperClientTest {
+     }
+ 
+     WhisperException e =
+-        catchWhisper(
+-            () -> client("http://localhost:" + port, Duration.ofSeconds(5)).transcribe(chunk));
++        catchWhisper(() ->
++            client("http://localhost:" + port, Duration.ofSeconds(5)).transcribe(chunk, "en"));
+ 
+     assertThat(e.isConnection()).isTrue();
+   }
+@@ -245,8 +356,8 @@ class WhisperClientTest {
+   @Test
+   void unresolvedHostIsAConnectionError() {
+     WhisperException e =
+-        catchWhisper(
+-            () -> client("http://no-such-host.invalid", Duration.ofSeconds(5)).transcribe(chunk));
++        catchWhisper(() ->
++            client("http://no-such-host.invalid", Duration.ofSeconds(5)).transcribe(chunk, "en"));
+ 
+     assertThat(e.isConnection()).isTrue();
+   }
+@@ -255,7 +366,7 @@ class WhisperClientTest {
+   void missingChunkIsAFailureWithoutARequest() {
+     stub(200, OK);
+ 
+-    WhisperException e = catchWhisper(() -> client().transcribe(dir.resolve("missing.wav")));
++    WhisperException e = catchWhisper(() -> client().transcribe(dir.resolve("missing.wav"), "en"));
+ 
+     assertThat(e.isConnection()).isFalse();
+     assertThat(server.getAllServeEvents()).isEmpty();
+@@ -268,7 +379,8 @@ class WhisperClientTest {
+             .willReturn(aResponse().withStatus(200).withBody(OK).withFixedDelay(2000)));
+     Thread.currentThread().interrupt();
+     try {
+-      assertThatThrownBy(() -> client().transcribe(chunk)).isInstanceOf(WhisperException.class);
++      assertThatThrownBy(() -> client().transcribe(chunk, "en"))
++          .isInstanceOf(WhisperException.class);
+       assertThat(Thread.currentThread().isInterrupted()).isTrue();
+     } finally {
+       Thread.interrupted();
+diff --git a/src/test/java/com/video2podcast/transcript/WhisperLanguagesTest.java b/src/test/java/com/video2podcast/transcript/WhisperLanguagesTest.java
+new file mode 100644
+index 0000000..613a3a5
+--- /dev/null
++++ b/src/test/java/com/video2podcast/transcript/WhisperLanguagesTest.java
+@@ -0,0 +1,45 @@
++package com.video2podcast.transcript;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.params.ParameterizedTest;
++import org.junit.jupiter.params.provider.CsvSource;
++import org.junit.jupiter.params.provider.ValueSource;
++
++class WhisperLanguagesTest {
++
++  @ParameterizedTest
++  @CsvSource({
++    "russian,ru",
++    "english,en",
++    "german,de",
++    "chinese,zh",
++    "spanish,es",
++    "cantonese,yue",
++    "haitian creole,ht",
++    "  RuSsIaN\t,ru",
++    "GERMAN,de"
++  })
++  void aFullNameGivesItsCode(String name, String code) {
++    assertThat(WhisperLanguages.toCode(name)).isEqualTo(code);
++  }
++
++  @ParameterizedTest
++  @ValueSource(strings = {"ru", "en", "de", "zz", "yue", "RU", " De "})
++  void aCodeIsReturnedInLowerCase(String code) {
++    assertThat(WhisperLanguages.toCode(code)).isEqualTo(code.strip().toLowerCase());
++  }
++
++  @ParameterizedTest
++  @ValueSource(
++      strings = {"klingon", "<b>de</b>", "d", "dees", "d1", "дe", "ру", "", "  ", "de\nru"})
++  void anythingElseIsUnknown(String value) {
++    assertThat(WhisperLanguages.toCode(value)).isEqualTo("unknown");
++  }
++
++  @Test
++  void nullIsUnknown() {
++    assertThat(WhisperLanguages.toCode(null)).isEqualTo("unknown");
++  }
++}

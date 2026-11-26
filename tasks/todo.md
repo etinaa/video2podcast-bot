@@ -196,7 +196,7 @@ Sizes: S = 1-2 files, M = 3-5 files.
   - Depends on: T9, T10, T11, T14
   - Files: `job/DeferredJobs.java`, `job/DeferredJobRunner.java`, `job/PipelineService.java`, `config/AppProperties.java`, `application.yml`, `.env.example`, `docs/host-setup.md`, `SPEC.md` (criterion 14 and storage), tests
 
-- [~] **T19: Russian videos: transcript and summary in Russian, language auto-detection** (M)
+- [x] **T19: Russian videos: transcript and summary in Russian, language auto-detection** (M)
   - Why: Whisper runs with `-l en`, so a Russian video gives a garbled transcript with loops (seen in T17). The owner wants the transcript and the summary of a Russian video in Russian.
   - Acceptance:
     - The language is detected by Whisper (`-l en` is removed from the Whisper command, the bot asks for detection, `docs/host-setup.md` is updated). English and Russian are supported.
